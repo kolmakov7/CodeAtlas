@@ -1,0 +1,13 @@
+# Local-only documentation (plan, ADRs, progress journal)
+docs/
+
+# .NET
+bin/
+obj/
+*.user
+
+# Test output
+TestResults/
+
+# Local data (when running outside Docker)
+data/

@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeRag.Analyzers.Abstractions\CodeRag.Analyzers.Abstractions.csproj" />
+    <ProjectReference Include="..\CodeRag.Analyzers.TreeSitter\CodeRag.Analyzers.TreeSitter.csproj" />
+    <ProjectReference Include="..\CodeRag.Analyzers.Sql\CodeRag.Analyzers.Sql.csproj" />
+    <ProjectReference Include="..\CodeRag.Analyzers.Vbs\CodeRag.Analyzers.Vbs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.14.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.14.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.5" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

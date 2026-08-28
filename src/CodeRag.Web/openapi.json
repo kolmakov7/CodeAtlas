@@ -1,0 +1,10 @@
+{
+  "openapi": "3.0.1",
+  "info": { "title": "CodeRAG API (placeholder)", "version": "0.7.0" },
+  "paths": {
+    "/api/statistics": { "get": { "operationId": "getStatistics", "responses": { "200": { "description": "ok" } } } },
+    "/api/repositories": { "get": { "operationId": "listRepositories", "responses": { "200": { "description": "ok" } } } },
+    "/api/search": { "post": { "operationId": "search", "responses": { "200": { "description": "ok" } } } },
+    "/api/jobs": { "get": { "operationId": "listJobs", "responses": { "200": { "description": "ok" } } } }
+  }
+}
