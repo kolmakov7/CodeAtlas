@@ -201,11 +201,26 @@ export function useJobActions() {
   return { cancel, retry };
 }
 
-// Diagnostics
+// Diagnostics - /api/diagnostics with fallback to /api/health
 export function useDiagnostics() {
   return useQuery({
     queryKey: ["diagnostics"],
-    queryFn: () => unwrap<Diagnostics>(apiClient.get("/diagnostics")),
+    queryFn: async () => {
+      try {
+        return await unwrap<Diagnostics>(apiClient.get("/diagnostics"));
+      } catch {
+        // fallback to /health -> map to Diagnostics shape
+        const h: any = await unwrap<any>(apiClient.get("/health"));
+        const map = (s: string) => (s === "Healthy" ? "OK" : "FAIL");
+        return {
+          database: { status: map(h.database?.status ?? "FAIL"), detail: h.database?.message },
+          vectorIndex: { status: map(h.vector?.status ?? "FAIL"), detail: h.vector?.message },
+          embeddingApi: { status: map(h.embedding?.status ?? "FAIL"), detail: h.embedding?.message, latencyMs: h.embedding?.latencyMs },
+          indexer: { status: map(h.indexer?.status ?? "FAIL"), detail: h.indexer?.message },
+          storage: { status: map(h.storage?.status ?? "FAIL"), detail: h.storage?.message },
+        } as Diagnostics;
+      }
+    },
     refetchInterval: 10_000,
   });
 }

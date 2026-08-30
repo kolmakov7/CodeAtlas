@@ -32,7 +32,24 @@ export default function Dashboard() {
       </div>
     );
   }
-  const s = statsQ.data!;
+  const sRaw: any = statsQ.data!;
+  // API returns RepositoryCount/FileCount... but Web expects repositories/files — handle both
+  const s = {
+    repositories: sRaw.repositories ?? sRaw.repositoryCount ?? 0,
+    files: sRaw.files ?? sRaw.fileCount ?? 0,
+    symbols: sRaw.symbols ?? sRaw.symbolCount ?? 0,
+    chunks: sRaw.chunks ?? sRaw.chunkCount ?? 0,
+    relations: sRaw.relations ?? 0,
+    embeddingsIndexed: sRaw.embeddingsIndexed ?? sRaw.vectorCount ?? 0,
+    embeddingsPending: sRaw.embeddingsPending ?? 0,
+    embeddingsFailed: sRaw.embeddingsFailed ?? 0,
+    indexingRunning: sRaw.indexingRunning ?? 0,
+    indexingQueued: sRaw.indexingQueued ?? 0,
+    indexingFailed: sRaw.indexingFailed ?? 0,
+    storage: sRaw.storage ?? { sqliteSizeBytes: 0, vectorSizeBytes: 0, repositoriesSizeBytes: 0 },
+    recentActivity: sRaw.recentActivity ?? [],
+    recentErrors: sRaw.recentErrors ?? [],
+  } as any;
   const running = jobsQ.data?.filter((j) => j.status === "Running") ?? [];
 
   return (
@@ -54,9 +71,9 @@ export default function Dashboard() {
         <div className="card">
           <div style={{ fontSize: 12, color: "var(--text-muted)", textTransform: "uppercase" }}>Storage</div>
           <div style={{ fontSize: 13, marginTop: 6, lineHeight: 1.6 }}>
-            SQLite: <strong>{formatBytes(s.storage.sqliteSizeBytes)}</strong><br />
-            Vector: <strong>{formatBytes(s.storage.vectorSizeBytes)}</strong><br />
-            Repos: <strong>{formatBytes(s.storage.repositoriesSizeBytes)}</strong>
+            SQLite: <strong>{formatBytes(s.storage?.sqliteSizeBytes ?? 0)}</strong><br />
+            Vector: <strong>{formatBytes(s.storage?.vectorSizeBytes ?? 0)}</strong><br />
+            Repos: <strong>{formatBytes(s.storage?.repositoriesSizeBytes ?? 0)}</strong>
           </div>
         </div>
       </div>
@@ -86,7 +103,7 @@ export default function Dashboard() {
               </tbody>
             </table>
           ) : (
-            <div style={{ color: "var(--text-muted)", fontSize: 14 }}>{s.recentActivity?.length ? s.recentActivity.map(a => a.action).join(", ") : "No activity yet"}</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 14 }}>{s.recentActivity?.length ? (s.recentActivity as any[]).map((a: any) => a.action).join(", ") : "No activity yet"}</div>
           )}
         </div>
         <div className="card">
@@ -95,7 +112,7 @@ export default function Dashboard() {
             <table className="table">
               <thead><tr><th>At</th><th>File</th><th>Message</th></tr></thead>
               <tbody>
-                {s.recentErrors.slice(0, 8).map((e) => (
+                {(s.recentErrors as any[]).slice(0, 8).map((e: any) => (
                   <tr key={e.id}>
                     <td style={{ whiteSpace: "nowrap" }}>{formatDate(e.at)}</td>
                     <td style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis" }}>{e.filePath ?? "—"}</td>

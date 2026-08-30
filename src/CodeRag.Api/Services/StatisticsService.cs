@@ -52,7 +52,13 @@ public sealed class StatisticsService
         var totalSymbols = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM symbols;").ConfigureAwait(false);
         var totalChunks = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks;").ConfigureAwait(false);
         var totalJobs = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM indexing_jobs;").ConfigureAwait(false);
+        // storage sizes - best effort
+        long sqliteBytes = 0, vectorBytes = 0, reposBytes = 0;
+        try { var fi = new FileInfo(_factory.DbPath); if (fi.Exists) sqliteBytes = fi.Length; } catch { }
+        try { var vecPath = _factory.DbPath + "-vec"; if (File.Exists(vecPath)) vectorBytes = new FileInfo(vecPath).Length; } catch { }
+        try { var reposRoot = Path.Combine(Path.GetDirectoryName(_factory.DbPath) ?? "/data", "repos"); if (Directory.Exists(reposRoot)) reposBytes = Directory.GetFiles(reposRoot, "*", SearchOption.AllDirectories).Sum(f => { try { return new FileInfo(f).Length; } catch { return 0; } }); } catch { }
 
+        // Return DTO still compatible with old Web (repositoryCount etc) but also include storage via extra endpoint
         return new GlobalStatisticsDto(
             repoStats.Count, (int)totalFiles, (int)totalSymbols, (int)totalChunks, (int)totalJobs, repoStats);
     }
