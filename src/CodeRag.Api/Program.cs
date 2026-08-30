@@ -82,6 +82,11 @@ app.MapGet("/openapi/{documentName}.json", (string documentName, Swashbuckle.Asp
 });
 
 app.UseCors();
+// Web UI static (React Vite dist → wwwroot) — MapStaticAssets on .NET9+/UseStaticFiles fallback
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.MapFallbackToFile("index.html");
+
 app.MapControllers();
 
 app.Run();

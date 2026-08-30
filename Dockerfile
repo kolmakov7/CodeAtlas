@@ -1,5 +1,14 @@
 # syntax=docker/dockerfile:1
 # CodeRAG Dockerfile — multi-stage sdk:10.0 -> aspnet:10.0 (§37 deployment.md §4)
+
+# Web UI build stage (React+Vite) — optional but included for single image
+FROM node:20-alpine AS web-build
+WORKDIR /web
+COPY src/CodeRag.Web/package.json src/CodeRag.Web/package-lock.json* ./
+RUN npm install --silent || npm install
+COPY src/CodeRag.Web/ ./
+RUN npm run build
+
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
@@ -15,6 +24,8 @@ COPY src/CodeRag.Infrastructure/CodeRag.Infrastructure.csproj src/CodeRag.Infras
 COPY src/CodeRag.Embeddings/CodeRag.Embeddings.csproj src/CodeRag.Embeddings/
 COPY src/CodeRag.Git/CodeRag.Git.csproj src/CodeRag.Git/
 COPY src/CodeRag.Indexer/CodeRag.Indexer.csproj src/CodeRag.Indexer/
+COPY src/CodeRag.Search/CodeRag.Search.csproj src/CodeRag.Search/
+COPY src/CodeRag.Mcp/CodeRag.Mcp.csproj src/CodeRag.Mcp/
 COPY src/CodeRag.Api/CodeRag.Api.csproj src/CodeRag.Api/
 COPY tests/CodeRag.Tests/CodeRag.Tests.csproj tests/CodeRag.Tests/
 
@@ -23,23 +34,22 @@ RUN dotnet restore CodeAtlas.sln
 # Copy remaining source
 COPY . .
 
-# Publish Api (Release, no restore)
-RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish --no-restore
-
+# Publish Api (Release)
+RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish
 # Runtime image
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 # Install curl for healthcheck, git + openssh-client for Git SSH (§37)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl git openssh-client && \
+RUN apt-get update --allow-unauthenticated || apt-get update --fix-missing || true; \
+    apt-get install -y --no-install-recommends curl git openssh-client || apt-get install -y --allow-unauthenticated curl git openssh-client; \
     rm -rf /var/lib/apt/lists/*
 
-# Non-root user 1000:1000 (§37, deployment.md §2)
-RUN groupadd -g 1000 coderag && \
-    useradd -u 1000 -g 1000 -m -s /bin/bash coderag && \
-    mkdir -p /data && \
-    chown -R 1000:1000 /app /data
+# Non-root user 1000:1000 (§37, deployment.md §2) — aspnet image already has 'ubuntu' GID/UID 1000, reuse it
+RUN mkdir -p /data && chown -R 1000:1000 /app /data
+
+# Copy Web UI dist to wwwroot for MapStaticAssets/UseStaticFiles
+COPY --from=web-build /web/dist ./wwwroot
 
 # Copy published app
 COPY --from=build /app/publish ./

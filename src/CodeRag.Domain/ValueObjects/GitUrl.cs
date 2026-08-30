@@ -31,11 +31,12 @@ public sealed record GitUrl
         if (string.IsNullOrWhiteSpace(url)) return false;
         var s = url.Trim();
 
-        // https://, http://, ssh://, git://
+        // https://, http://, ssh://, git://, file:// (for local E2E/tests)
         if (s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
             s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             s.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) ||
-            s.StartsWith("git://", StringComparison.OrdinalIgnoreCase))
+            s.StartsWith("git://", StringComparison.OrdinalIgnoreCase) ||
+            s.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
         {
             return Uri.TryCreate(s, UriKind.Absolute, out _);
         }

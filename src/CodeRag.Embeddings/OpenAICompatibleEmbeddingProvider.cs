@@ -175,7 +175,7 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
             }
             catch (HttpRequestException ex) when (IsTransient(ex) && attempt < _options.MaxRetries)
             {
-                _logger.LogWarning(ex, "Transient embedding error, retry {Attempt}/{Max} after {Delay}ms (model={Model})", attempt + 1, _options.MaxRetries, delay.TotalMilliseconds);
+                _logger.LogWarning(ex, "Transient embedding error, retry {Attempt}/{Max} after {Delay}ms (model={Model})", attempt + 1, _options.MaxRetries, delay.TotalMilliseconds, Model);
             }
             catch (HttpRequestException ex)
             {
