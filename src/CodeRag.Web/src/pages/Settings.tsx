@@ -19,6 +19,10 @@ export default function SettingsPage() {
   const proxiesQ = useProxies();
   const credsQ = useCredentials();
   const update = useUpdateSettings();
+  const [proxyForm, setProxyForm] = useState({ name: "", scheme: "http", host: "", port: 8080, username: "", password: "" });
+  const [credForm, setCredForm] = useState({ kind: "https_token", username: "", secret: "" });
+  const [proxyError, setProxyError] = useState<string | null>(null);
+  const [credError, setCredError] = useState<string | null>(null);
 
   const [form, setForm] = useState<NonNullable<typeof settingsQ.data>>({});
 
@@ -99,37 +103,78 @@ export default function SettingsPage() {
       )}
       {tab === "proxies" && (
         <div className="card">
-          <h3 style={{ marginBottom: 8 }}>Proxies</h3>
+          <h3 style={{ marginBottom: 8 }}>Proxies — add manually</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 6 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input placeholder="Name" value={proxyForm.name} onChange={e => setProxyForm({ ...proxyForm, name: e.target.value })} style={{ flex: 1 }} />
+              <select value={proxyForm.scheme} onChange={e => setProxyForm({ ...proxyForm, scheme: e.target.value })}>
+                <option value="http">http</option><option value="https">https</option><option value="socks5">socks5</option><option value="socks5h">socks5h</option>
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input placeholder="Host" value={proxyForm.host} onChange={e => setProxyForm({ ...proxyForm, host: e.target.value })} style={{ flex: 1 }} />
+              <input placeholder="Port" type="number" value={proxyForm.port} onChange={e => setProxyForm({ ...proxyForm, port: Number(e.target.value) })} style={{ width: 100 }} />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input placeholder="Username (optional)" value={proxyForm.username} onChange={e => setProxyForm({ ...proxyForm, username: e.target.value })} style={{ flex: 1 }} />
+              <input placeholder="Password (optional)" type="password" value={proxyForm.password} onChange={e => setProxyForm({ ...proxyForm, password: e.target.value })} style={{ flex: 1 }} />
+            </div>
+            {proxyError && <div style={{ color: "var(--danger)", fontSize: 12 }}>{proxyError}</div>}
+            <button className="primary" onClick={async () => {
+              setProxyError(null);
+              try {
+                const r = await fetch("/api/proxies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: proxyForm.name, scheme: proxyForm.scheme, host: proxyForm.host, port: proxyForm.port, username: proxyForm.username || undefined, password: proxyForm.password || undefined }) });
+                if (!r.ok) throw new Error(await r.text());
+                setProxyForm({ name: "", scheme: "http", host: "", port: 8080, username: "", password: "" });
+                proxiesQ.refetch();
+              } catch (e: any) { setProxyError(e.message); }
+            }}>Add Proxy</button>
+          </div>
           {proxiesQ.isLoading ? <div className="skeleton" style={{ height: 80 }} /> : proxiesQ.data?.length ? (
             <table className="table">
               <thead><tr><th>Name</th><th>Scheme</th><th>Host</th><th>Port</th><th>Actions</th></tr></thead>
               <tbody>
-                {proxiesQ.data.map((p) => (
+                {(proxiesQ.data as any[]).map((p: any) => (
                   <tr key={p.id}>
                     <td>{p.name}</td><td>{p.scheme}</td><td>{p.host}</td><td>{p.port}</td>
-                    <td><button style={{ fontSize: 12 }} onClick={() => fetch(`/api/proxies/${p.id}/test`, { method: "POST" }).then(() => alert("Proxy test requested"))}>Test</button></td>
+                    <td style={{ display: "flex", gap: 4 }}><button style={{ fontSize: 12 }} onClick={() => fetch(`/api/proxies/${p.id}/test`, { method: "POST" }).then(async r => alert(await r.text())).catch(e => alert(e.message))}>Test</button><button style={{ fontSize: 12 }} onClick={async () => { if (confirm(`Delete proxy ${p.name}?`)) { await fetch(`/api/proxies/${p.id}`, { method: "DELETE" }); proxiesQ.refetch(); }}}>Delete</button></td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          ) : <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No proxies configured. Add via <code>POST /api/proxies</code>.</div>}
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>See docs/git-proxy-auth.md for details.</div>
+          ) : <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No proxies configured.</div>}
         </div>
       )}
       {tab === "credentials" && (
         <div className="card">
-          <h3 style={{ marginBottom: 8 }}>Credentials</h3>
-          {credsQ.isLoading ? <div className="skeleton" style={{ height: 80 }} /> : credsQ.data?.length ? (
+          <h3 style={{ marginBottom: 8 }}>Credentials — add manually</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 6 }}>
+            <select value={credForm.kind} onChange={e => setCredForm({ ...credForm, kind: e.target.value })}>
+              <option value="https_token">https_token (PAT)</option><option value="https_userpass">https_userpass</option><option value="ssh_key">ssh_key</option>
+            </select>
+            <input placeholder="Username (optional)" value={credForm.username} onChange={e => setCredForm({ ...credForm, username: e.target.value })} />
+            <input placeholder="Secret / Token / Private Key" type="password" value={credForm.secret} onChange={e => setCredForm({ ...credForm, secret: e.target.value })} />
+            {credError && <div style={{ color: "var(--danger)", fontSize: 12 }}>{credError}</div>}
+            <button className="primary" onClick={async () => {
+              setCredError(null);
+              try {
+                const r = await fetch("/api/credentials", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: credForm.kind, username: credForm.username || undefined, secret: credForm.secret }) });
+                if (!r.ok) throw new Error(await r.text());
+                setCredForm({ kind: "https_token", username: "", secret: "" });
+                credsQ.refetch();
+              } catch (e: any) { setCredError(e.message); }
+            }}>Add Credential</button>
+          </div>
+          {credsQ.isLoading ? <div className="skeleton" style={{ height: 80 }} /> : (credsQ.data as any[])?.length ? (
             <table className="table">
-              <thead><tr><th>Kind</th><th>Username</th><th>Id</th></tr></thead>
+              <thead><tr><th>Kind</th><th>Username</th><th>Id</th><th>Actions</th></tr></thead>
               <tbody>
-                {credsQ.data.map((c) => (
-                  <tr key={c.id}><td>{c.kind}</td><td>{c.username ?? "—"}</td><td style={{ fontFamily: "monospace", fontSize: 12 }}>{c.id.slice(0, 8)}…</td></tr>
+                {(credsQ.data as any[]).map((c: any) => (
+                  <tr key={c.id}><td>{c.kind}</td><td>{c.username ?? "—"}</td><td style={{ fontFamily: "monospace", fontSize: 12 }}>{c.id.slice(0, 8)}…</td><td><button style={{ fontSize: 12 }} onClick={async () => { if (confirm(`Delete credential ${c.id.slice(0,8)}?`)) { await fetch(`/api/credentials/${c.id}`, { method: "DELETE" }); credsQ.refetch(); }}}>Delete</button></td></tr>
                 ))}
               </tbody>
             </table>
           ) : <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No credentials stored (secrets never displayed).</div>}
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 8 }}>Credentials are write-only via <code>POST /api/credentials</code> — secrets are encrypted.</div>
         </div>
       )}
 
