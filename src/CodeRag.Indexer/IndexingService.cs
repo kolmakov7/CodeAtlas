@@ -156,6 +156,7 @@ public sealed class IndexingService
 
             // Enqueue Index job (или Rebuild если diff > threshold) — но делаем синхронно здесь для простоты потока Sync->Index
             var indexJob = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Index, JobStatus.Queued, DateTimeOffset.UtcNow, repo.IndexedCommit, newHead);
+            indexJob.MarkRunning();
             await _jobStore.UpsertAsync(indexJob, ct).ConfigureAwait(false);
 
             // Непосредственно выполнить индексацию в рамках Sync джобы (упрощённый поток Sync->Index)
