@@ -36,6 +36,8 @@ COPY . .
 
 # Publish Api (Release)
 RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish
+RUN find /root/.nuget -name "vec0.so" -exec cp {} /app/publish/vec0.so \; 2>/dev/null; ls -lh /app/publish/vec0.so 2>&1 || echo "vec0 not found"
+
 # Runtime image
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
