@@ -362,7 +362,12 @@ try
             var rid = repositoryId.ToString();
             await conn.ExecuteAsync("DELETE FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id = @rid);", new { rid }, transaction: tx).ConfigureAwait(false);
             await conn.ExecuteAsync("DELETE FROM chunks_fts WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-            try { await conn.ExecuteAsync("DELETE FROM vec_chunks WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false); } catch { }
+            await conn.ExecuteAsync("DELETE FROM indexing_errors WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
+            await conn.ExecuteAsync("DELETE FROM activity_log WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
+            foreach (var table in new[] { "vec_chunks_code", "vec_chunks_text", "vec_chunks" })
+            {
+                try { await conn.ExecuteAsync($"DELETE FROM {table} WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false); } catch { }
+            }
             await conn.ExecuteAsync("DELETE FROM repositories WHERE id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             tx.Commit();
         }

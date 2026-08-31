@@ -126,8 +126,9 @@ public sealed class SearchService : ISearchService
         {
             var vecResults = await GetVectorCandidatesAsync(query, repoFilter, warnings, ct).ConfigureAwait(false);
             // Drop low-confidence vector matches so weak/ambiguous queries return no results instead of
-            // "least-irrelevant" random code (see SearchOptions.MinSemanticScore).
-            var relevantVec = vecResults.Where(r => r.Score >= Opts.MinSemanticScore).ToList();
+            // noise. Request may override the configured floor.
+            var minScore = req.MinScore ?? Opts.MinSemanticScore;
+            var relevantVec = vecResults.Where(r => r.Score >= minScore).ToList();
             foreach (var r in relevantVec)
             {
                 if (!candidates.TryGetValue(r.ChunkId, out var acc))
@@ -303,11 +304,12 @@ public sealed class SearchService : ISearchService
                 Score: score,
                 Preview: preview,
                 Origin: origin)
-            {
-                ChunkId = acc.ChunkId,
-                SymbolName = info.SymbolName,
-                Fqn = info.Fqn,
-            });
+             {
+                 ChunkId = acc.ChunkId,
+                 SymbolName = info.SymbolName,
+                 Fqn = info.Fqn,
+                 RepositoryName = info.RepositoryName,
+             });
         }
 
         sw.Stop();
@@ -360,13 +362,33 @@ public sealed class SearchService : ISearchService
         return rows.Select(MapSymbolRow).ToList();
     }
 
+    /// <summary>
+    /// Incoming "usage" relations for a symbol. The Roslyn extractor emits Calls/DependsOn/Implements/
+    /// Inherits/Overrides/Contains (the generic "References" type is unused), so reference lookup
+    /// covers all usage-bearing types rather than only "References".
+    /// </summary>
+    private static readonly string[] ReferenceTypes =
+    {
+        "References", "Uses", "Calls", "DependsOn", "Imports"
+    };
+
     public async Task<IReadOnlyList<Reference>> FindReferencesAsync(Guid symbolId, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        var rows = await conn.QueryAsync<RelationRow>(
-            "SELECT from_symbol_id, to_symbol_id, relation_type FROM relations WHERE to_symbol_id = @id AND relation_type = @type;",
-            new { id = symbolId.ToString(), type = "References" }).ConfigureAwait(false);
+        var sql = "SELECT from_symbol_id, to_symbol_id, relation_type FROM relations WHERE to_symbol_id = @id AND relation_type IN (" +
+                  string.Join(",", ReferenceTypes.Select((_, i) => $"@t{i}")) + ");";
+        var p = new Dapper.DynamicParameters();
+        p.Add("id", symbolId.ToString());
+        for (int i = 0; i < ReferenceTypes.Length; i++) p.Add($"t{i}", ReferenceTypes[i]);
+        var rows = (await conn.QueryAsync<RelationRow>(sql, p).ConfigureAwait(false)).ToList();
         return rows.Select(r => new Reference(Guid.Parse(r.from_symbol_id), Guid.Parse(r.to_symbol_id), r.relation_type)).ToList();
+    }
+
+    public async Task<Symbol?> GetSymbolAsync(Guid symbolId, CancellationToken ct = default)
+    {
+        if (symbolId == Guid.Empty) return null;
+        var list = await LoadSymbolsByIdsAsync(new[] { symbolId.ToString() }, ct).ConfigureAwait(false);
+        return list.Count > 0 ? list[0] : null;
     }
 
     public async Task<IReadOnlyList<RelationEntry>> GetRelationsAsync(
@@ -794,9 +816,11 @@ public sealed class SearchService : ISearchService
         var sql = $@"
 SELECT c.id as chunk_id, c.repository_id, c.file_id, c.symbol_id, c.language as chunk_language, c.start_line, c.end_line, c.source,
        f.path as file_path, f.language as file_language,
+       r.name as repository_name,
        s.fqn, s.name as symbol_name, s.kind as symbol_kind, s.language as symbol_language
 FROM chunks c
 JOIN files f ON f.id = c.file_id
+LEFT JOIN repositories r ON r.id = c.repository_id
 LEFT JOIN symbols s ON s.id = c.symbol_id
 WHERE c.id IN ({placeholders});";
 
@@ -822,7 +846,8 @@ WHERE c.id IN ({placeholders});";
                 Source: r.source ?? string.Empty,
                 SymbolName: r.symbol_name,
                 Fqn: r.fqn,
-                SymbolKind: r.symbol_kind);
+                SymbolKind: r.symbol_kind,
+                RepositoryName: r.repository_name);
         }
         return dict;
     }
@@ -902,7 +927,8 @@ WHERE c.id IN ({placeholders});";
         string Source,
         string? SymbolName,
         string? Fqn,
-        string? SymbolKind);
+        string? SymbolKind,
+        string? RepositoryName);
 
     private sealed class ChunkInfoRow
     {
@@ -920,6 +946,7 @@ WHERE c.id IN ({placeholders});";
         public string? symbol_name { get; set; }
         public string? symbol_kind { get; set; }
         public string? symbol_language { get; set; }
+        public string? repository_name { get; set; }
     }
 
     private sealed class SymbolRow

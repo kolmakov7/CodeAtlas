@@ -102,12 +102,25 @@ public static class ServiceCollectionExtensions
         var initializer = provider.GetRequiredService<DbInitializer>();
         await initializer.InitializeAsync(ct).ConfigureAwait(false);
 
-        // Also ensure vec table if available (via vector store)
+        // Load saved settings into IConfiguration NOW that the tables exist, so the code/text embedding
+        // dimensions come from the settings table (not the built-in defaults). This MUST run before the
+        // vector-store init below, otherwise the vec table is created with the default dim and marked STALE.
+        provider.GetService<SettingsTableConfigurationProvider>()?.FireReload();
+
+        // Also ensure vec table if available (via vector store) — now with the correct, settings-sourced dim.
         var vec = provider.GetService<IVectorStore>() as SqliteVecVectorStore;
         if (vec is not null)
         {
-            // Trigger lazy init with dummy empty call
-            await vec.SearchAsync(new float[384], 1, null, ct).ConfigureAwait(false);
+            // Trigger lazy table creation. Table creation happens inside EnsureInitializedAsync before the
+            // query, so the dummy vector dim may not match and a dim-mismatch here is non-fatal.
+            try
+            {
+                await vec.SearchAsync(new float[384], 1, null, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Non-fatal: startup table creation is best-effort.
+            }
         }
     }
 }

@@ -115,10 +115,12 @@ try
     }
 
     [HttpDelete("{id:guid}")]
-    public async Task<IActionResult> Delete(Guid id, [FromQuery] bool deleteLocalFiles = false, CancellationToken ct = default)
+    public async Task<IActionResult> Delete(Guid id, [FromQuery] bool deleteLocalFiles = false, [FromQuery] bool deleteCheckout = false, CancellationToken ct = default)
     {
-        _logger.LogInformation("DELETE /api/repositories/{Id} deleteLocal={Flag}", id, deleteLocalFiles);
-        await _repoService.DeleteAsync(id, deleteLocalFiles, ct).ConfigureAwait(false);
+        // The Web UI sends ?deleteCheckout=true; accept both so the local checkout is actually removed.
+        var deleteLocal = deleteLocalFiles || deleteCheckout;
+        _logger.LogInformation("DELETE /api/repositories/{Id} deleteLocal={Flag}", id, deleteLocal);
+        await _repoService.DeleteAsync(id, deleteLocal, ct).ConfigureAwait(false);
         return NoContent();
     }
 

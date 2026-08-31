@@ -15,7 +15,8 @@ public sealed record SearchRequest(
     string? SymbolKind = null,
     SearchMode Mode = SearchMode.Hybrid,
     int Limit = 20,
-    int Offset = 0);
+    int Offset = 0,
+    double? MinScore = null);
 
 public sealed record FindSymbolRequest(
     string Query,

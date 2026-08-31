@@ -11,6 +11,8 @@ public interface ISearchService
 
     Task<IReadOnlyList<Reference>> FindReferencesAsync(Guid symbolId, CancellationToken ct = default);
 
+    Task<Symbol?> GetSymbolAsync(Guid symbolId, CancellationToken ct = default);
+
     Task<IReadOnlyList<RelationEntry>> GetRelationsAsync(
         Guid symbolId,
         RelationDirection direction = RelationDirection.Both,

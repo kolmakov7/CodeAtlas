@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "codeatlas": {
+      "type": "local",
+      "command": ["dotnet", "{env:CODEATLAS_MCP_DLL}"],
+      "environment": {
+        "CODERAG__DataDir": "{env:CODEATLAS_DATA_DIR}"
+      },
+      "enabled": true,
+      "timeout": 30000
+    }
+  },
+  "permission": {
+    "skill": {
+      "codeatlas": "allow"
+    }
+  }
+}

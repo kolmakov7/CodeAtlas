@@ -27,6 +27,7 @@ public sealed class IndexingService
     private readonly IEnumerable<ICodeAnalyzer> _analyzers;
     private readonly IGitService _git;
     private readonly IndexingJobStore _jobStore;
+    private readonly IJobRunner _jobRunner;
     private readonly IOptionsMonitor<IndexerOptions> _indexerOptions;
     private readonly CodeRag.Domain.Ports.IIndexingErrorStore _errorStore;
     private readonly CodeRag.Domain.Ports.IRelationStore _relationStore;
@@ -44,6 +45,7 @@ public sealed class IndexingService
         IEnumerable<ICodeAnalyzer> analyzers,
         IGitService git,
         IndexingJobStore jobStore,
+        IJobRunner jobRunner,
         IOptionsMonitor<IndexerOptions> indexerOptions,
         CodeRag.Domain.Ports.IIndexingErrorStore errorStore,
         CodeRag.Domain.Ports.IRelationStore relationStore,
@@ -60,6 +62,7 @@ public sealed class IndexingService
         _analyzers = analyzers;
         _git = git;
         _jobStore = jobStore;
+        _jobRunner = jobRunner;
         _indexerOptions = indexerOptions;
         _errorStore = errorStore;
         _relationStore = relationStore;
@@ -172,6 +175,7 @@ public sealed class IndexingService
         if (!repo.Enabled || repo.Status == RepositoryStatus.Paused)
         {
             _logger.LogInformation("Sync skipped repo {Repo} status={Status} enabled={Enabled}", repo.Id, repo.Status, repo.Enabled);
+            await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
             return;
         }
 
@@ -183,6 +187,8 @@ public sealed class IndexingService
 
         try
         {
+            // 1) Update the local working copy + resolve the new HEAD.
+            await SetJobProgressAsync(job, 0.25, ct).ConfigureAwait(false);
             await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxyUrl, ct).ConfigureAwait(false);
             var newHead = await _git.GetHeadAsync(repo.LocalPath.Value, repo.Branch, ct).ConfigureAwait(false);
 
@@ -194,25 +200,25 @@ public sealed class IndexingService
                 _logger.LogInformation("Sync done repo {Repo}: HEAD {Head} already indexed", repo.Id, newHead);
                 repo.MarkActive();
                 await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+                await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
                 return;
             }
 
-            // git diff IndexedCommit..newHead
+            // 2) Record what changed (git diff IndexedCommit..newHead).
+            await SetJobProgressAsync(job, 0.6, ct).ConfigureAwait(false);
             var diff = await _git.DiffAsync(repo.LocalPath.Value, repo.IndexedCommit, newHead, ct).ConfigureAwait(false);
             _logger.LogInformation("Sync diff repo {Repo}: {Count} changed files (full={Full})", repo.Id, diff.ChangedFiles.Count, diff.IsFullDiff);
 
-            // Enqueue Index job (или Rebuild если diff > threshold) — но делаем синхронно здесь для простоты потока Sync->Index
+            // 3) The structural index is a SEPARATE task: enqueue an Index job (which in turn enqueues
+            //    Embedding). Sync only fetches the local copy, records the new HEAD and the diff, then
+            //    hands off — so each stage reports its own progress instead of Sync sitting at 0%.
             var indexJob = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Index, JobStatus.Queued, DateTimeOffset.UtcNow, repo.IndexedCommit, newHead);
-            indexJob.MarkRunning();
-            await _jobStore.UpsertAsync(indexJob, ct).ConfigureAwait(false);
+            await _jobRunner.EnqueueAsync(indexJob, ct).ConfigureAwait(false);
+            _logger.LogInformation("Sync repo {Repo} enqueued Index job {IndexJob} ({From} -> {To})", repo.Id, indexJob.Id, repo.IndexedCommit, newHead);
 
-            // Непосредственно выполнить индексацию в рамках Sync джобы (упрощённый поток Sync->Index)
-            await ExecuteIndexCoreAsync(indexJob, diff, ct).ConfigureAwait(false);
-
-            indexJob.MarkCompleted();
-            await _jobStore.UpsertAsync(indexJob, ct).ConfigureAwait(false);
             repo.MarkActive();
             await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+            await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -220,6 +226,13 @@ public sealed class IndexingService
             await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>Persist a progress value on the job (in-memory + DB) so the UI reflects the current stage.</summary>
+    private async Task SetJobProgressAsync(IndexingJob job, double progress, CancellationToken ct)
+    {
+        job.UpdateProgress(progress);
+        await _jobStore.UpdateProgressAsync(job.Id, progress, ct).ConfigureAwait(false);
     }
 
     private Task ExecuteIndexAsync(IndexingJob job, CancellationToken ct) =>
@@ -288,14 +301,14 @@ public sealed class IndexingService
             }
         }
 
-        // Embedding батчами (indexing.md §5) с кэшем по ContentHash+Model+ConfigHash.
-        // Code и text уходят в СВОИ модели/векторные пространства — группируем чанки по домену.
+        // Vector embedding is a SEPARATE task (isolates the slow model calls so Index progress reflects
+        // parsing, not embedding). The structural chunks are now persisted, so enqueue an Embedding job that
+        // re-embeds every chunk still marked NeedsEmbedding (code and text each use their own model/vector space).
         if (pendingChunks.Count > 0)
         {
-            foreach (var group in pendingChunks.GroupBy(c => c.EmbeddingDomain))
-            {
-                await EmbedAndUpsertAsync(group.ToList(), ct).ConfigureAwait(false);
-            }
+            var embeddingJob = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Embedding, JobStatus.Queued, DateTimeOffset.UtcNow, to, to);
+            await _jobRunner.EnqueueAsync(embeddingJob, ct).ConfigureAwait(false);
+            _logger.LogInformation("Index job {JobId} enqueued Embedding job {EmbedJob} ({Count} new chunks)", job.Id, embeddingJob.Id, pendingChunks.Count);
         }
 
         // C# relations are rebuilt authoritatively from the whole repo once any C# file changed
@@ -604,7 +617,11 @@ public sealed class IndexingService
 
         _logger.LogInformation("Embedding job {JobId}: {Total} chunks total, need re-embed in {Domains} domain(s)", job.Id, allChunks.Count, activeDomains);
 
-        if (total == 0) return;
+        if (total == 0)
+        {
+            await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
+            return;
+        }
 
         const int batchSize = 64;
         var done = 0;
