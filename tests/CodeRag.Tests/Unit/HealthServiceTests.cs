@@ -20,10 +20,33 @@ public sealed class HealthServiceTests
     {
         if (db is null) { db = Substitute.For<IDbHealthProbe>(); db.CheckAsync(Arg.Any<CancellationToken>()).Returns(new HealthProbeResult("Healthy", null, 1)); }
         if (storage is null) { storage = Substitute.For<IStorageProbe>(); storage.Check().Returns(new HealthProbeResult("Healthy", null, null)); }
-        if (vec is null) { vec = Substitute.For<IVectorStore>(); vec.SearchAsync(Arg.Any<float[]>(), Arg.Any<int>(), Arg.Any<VectorSearchFilter?>(), Arg.Any<CancellationToken>()).Returns(new List<ScoredChunk>()); }
-        if (emb is null) { emb = Substitute.For<IEmbeddingProvider>(); emb.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>()).Returns(new[] { new float[4] }); }
+        if (vec is null)
+        {
+            vec = Substitute.For<IVectorStore>();
+            vec.SearchAsync(Arg.Any<float[]>(), Arg.Any<int>(), Arg.Any<VectorSearchFilter?>(), Arg.Any<CancellationToken>()).Returns(new List<ScoredChunk>());
+            vec.GetIndexSummaryAsync(Arg.Any<CancellationToken>()).Returns(VectorIndexSummary.Empty);
+        }
+        if (emb is null)
+        {
+            emb = Substitute.For<IEmbeddingProvider>();
+            emb.EmbedAsync(Arg.Any<IReadOnlyList<string>>(), Arg.Any<CancellationToken>()).Returns(new[] { new float[4] });
+            emb.Dimensions.Returns(4);
+            emb.Model.Returns("test-model");
+            emb.ContextLength.Returns((int?)null);
+        }
+
+        var vecFactory = Substitute.For<IVectorStoreFactory>();
+        vecFactory.Code.Returns(vec);
+        vecFactory.Text.Returns(vec);
+        vecFactory.Get(Arg.Any<CodeRag.Domain.Enums.EmbeddingDomain>()).Returns(vec);
+
+        var embFactory = Substitute.For<IEmbeddingProviderFactory>();
+        embFactory.Code.Returns(emb);
+        embFactory.Text.Returns(emb);
+        embFactory.Get(Arg.Any<CodeRag.Domain.Enums.EmbeddingDomain>()).Returns(emb);
+
         runner ??= Substitute.For<IJobRunner>();
-        return new HealthService(db, storage, vec, emb, runner, NullLogger<HealthService>.Instance);
+        return new HealthService(db, storage, vecFactory, embFactory, runner, NullLogger<HealthService>.Instance);
     }
 
     [Fact]

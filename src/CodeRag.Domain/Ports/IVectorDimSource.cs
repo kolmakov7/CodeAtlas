@@ -1,4 +1,18 @@
+using CodeRag.Domain.Enums;
+
 namespace CodeRag.Domain.Ports;
+
+/// <summary>
+/// Разрешает источник размерности вектора для конкретного embedding-домена.
+/// Реализуется слоем Embeddings и используется фабтурой векторных хранилищ (Infrastructure),
+/// чтобы создать изолированное хранилище на каждый домен, не создавая циклической
+/// зависимости Infrastructure → Embeddings.
+/// </summary>
+public interface IVectorDimSourceProvider
+{
+    /// <summary>Возвращает источник размерности для домена (null, если домен не сконфигурирован).</summary>
+    IVectorDimSource? Get(EmbeddingDomain domain);
+}
 
 /// <summary>
 /// Источник размерности вектора для векторного индекса.

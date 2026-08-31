@@ -26,6 +26,20 @@ export interface Repository {
   lastError?: string | null;
 }
 
+export interface EmbeddingDomainStats {
+  domain: string; // "code" | "text"
+  indexed: number;
+  pending: number;
+}
+
+export interface EmbeddingProfile {
+  endpoint?: string;
+  model?: string;
+  dimensions?: number;
+  batchSize?: number;
+  timeoutSeconds?: number;
+}
+
 export interface RepositoryStatistics {
   repositoryId: string;
   name: string;
@@ -33,13 +47,12 @@ export interface RepositoryStatistics {
   symbolCount: number;
   chunkCount: number;
   vectorCount: number;
+  embeddingStats: EmbeddingDomainStats[];
+  embeddingsFailed: number;
   indexedCommit?: string | null;
   currentCommit?: string | null;
   status: string;
-  embeddingsIndexed: number;
-  embeddingsPending: number;
-  embeddingsFailed: number;
-  languageBreakdown: Record<string, number>;
+  languageBreakdown?: Record<string, number>;
 }
 
 export interface GlobalStatistics {
@@ -48,8 +61,7 @@ export interface GlobalStatistics {
   symbols: number;
   chunks: number;
   relations: number;
-  embeddingsIndexed: number;
-  embeddingsPending: number;
+  embeddingStats: EmbeddingDomainStats[];
   embeddingsFailed: number;
   indexingRunning: number;
   indexingQueued: number;
@@ -183,7 +195,27 @@ export interface Diagnostics {
     currentDim?: number | null;
     currentContextLength?: number | null;
   };
+  vectorDomains?: Array<{
+    domain: string;
+    status: HealthStatus;
+    latencyMs?: number;
+    detail?: string;
+    stale?: boolean;
+    reason?: string | null;
+    stored?: VectorStoredModel[];
+    currentModel?: string | null;
+    currentDim?: number | null;
+    currentContextLength?: number | null;
+  }>;
   embeddingApi: { status: HealthStatus; latencyMs?: number; model?: string; detail?: string };
+  embeddingDomains?: Array<{
+    domain: string;
+    status: HealthStatus;
+    latencyMs?: number;
+    detail?: string;
+    model?: string | null;
+    dimensions?: number | null;
+  }>;
   indexer: { status: HealthStatus; queueDepth?: number; detail?: string };
   storage: { status: HealthStatus; freeBytes?: number; detail?: string };
 }
@@ -202,11 +234,8 @@ export interface Settings {
     languageExclusions?: string[];
   };
   embeddings?: {
-    endpoint?: string;
-    model?: string;
-    dimensions?: number;
-    batchSize?: number;
-    timeoutSeconds?: number;
+    code?: EmbeddingProfile;
+    text?: EmbeddingProfile;
   };
   search?: {
     lexicalWeight?: number;

@@ -52,7 +52,19 @@ export default function RepositoryDashboard() {
         <StatCard label="Symbols" value={s?.symbolCount ?? "—"} />
         <StatCard label="Chunks" value={s?.chunkCount ?? "—"} />
         <StatCard label="Relations" value={"—"} />
-        <StatCard label="Embeddings" value={s ? `${s.vectorCount}/${s.chunkCount}` : "—"} sub={s ? `vectors / chunks` : undefined} />
+        {(() => {
+          const stats = s?.embeddingStats ?? [];
+          const code = stats.find((d) => d.domain?.toLowerCase() === "code");
+          const text = stats.find((d) => d.domain?.toLowerCase() === "text");
+          const pending = stats.reduce((a, d) => a + (d.pending ?? 0), 0);
+          return (
+            <StatCard
+              label="Embeddings"
+              value={s ? `${s.vectorCount}/${s.chunkCount}` : "—"}
+              sub={s ? `code ${code?.indexed ?? 0} · text ${text?.indexed ?? 0} · ${pending} pending` : "vectors / chunks"}
+            />
+          );
+        })()}
       </div>
 
       {s?.languageBreakdown && Object.keys(s.languageBreakdown).length > 0 && (

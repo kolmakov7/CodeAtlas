@@ -38,6 +38,13 @@ export default function Dashboard() {
   const sRaw: any = statsQ.data!;
   const repoStatsArray = Array.isArray(sRaw.repositories) ? sRaw.repositories : [];
   const repoCount = typeof sRaw.repositories === 'number' ? sRaw.repositories : repoStatsArray.length;
+  // Per-domain embedding stats (code + text) from the dual-embedding API.
+  const embStatsRaw: any[] = Array.isArray(sRaw.embeddingStats) ? sRaw.embeddingStats : [];
+  const embByDomain = (d: string) => embStatsRaw.find((x) => String(x.domain).toLowerCase() === d);
+  const embCode = embByDomain("code");
+  const embText = embByDomain("text");
+  const embeddingsIndexed = embStatsRaw.reduce((a: number, d: any) => a + (Number(d.indexed) || 0), 0);
+  const embeddingsPending = embStatsRaw.reduce((a: number, d: any) => a + (Number(d.pending) || 0), 0);
   // API returns RepositoryCount/FileCount... but Web expects repositories/files — handle both
   const s = {
     repositories: repoCount,
@@ -45,8 +52,10 @@ export default function Dashboard() {
     symbols: sRaw.symbols ?? sRaw.symbolCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.symbols ?? r.SymbolCount ?? 0), 0),
     chunks: sRaw.chunks ?? sRaw.chunkCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.chunks ?? r.ChunkCount ?? 0), 0),
     relations: sRaw.relations ?? 0,
-    embeddingsIndexed: sRaw.embeddingsIndexed ?? sRaw.vectorCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.embeddingsIndexed ?? r.VectorCount ?? 0), 0),
-    embeddingsPending: sRaw.embeddingsPending ?? 0,
+    embeddingsIndexed: embeddingsIndexed || (sRaw.embeddingsIndexed ?? sRaw.vectorCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.VectorCount ?? 0), 0)),
+    embeddingsPending,
+    embeddingsCode: embCode?.indexed ?? null,
+    embeddingsText: embText?.indexed ?? null,
     embeddingsFailed: sRaw.embeddingsFailed ?? 0,
     indexingRunning: sRaw.indexingRunning ?? 0,
     indexingQueued: sRaw.indexingQueued ?? 0,
@@ -94,7 +103,7 @@ export default function Dashboard() {
       </div>
 
       <div className="grid grid-3" style={{ marginTop: 16 }}>
-        <StatCard label="Embeddings Indexed" value={s.embeddingsIndexed} sub={`${s.embeddingsPending} pending · ${s.embeddingsFailed} failed`} />
+        <StatCard label="Embeddings Indexed" value={s.embeddingsIndexed} sub={`code ${s.embeddingsCode ?? "—"} · text ${s.embeddingsText ?? "—"} · ${s.embeddingsPending} pending · ${s.embeddingsFailed} failed`} />
         <StatCard label="Indexing Running" value={s.indexingRunning} sub={`${s.indexingQueued} queued · ${s.indexingFailed} failed`} />
         <div className="card">
           <div style={{ fontSize: 12, color: "var(--text-muted)", textTransform: "uppercase" }}>Storage</div>

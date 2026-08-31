@@ -19,13 +19,19 @@ public sealed class IndexingSettingsDto
     public string[]? LanguageExclusions { get; set; }
 }
 
-public sealed class EmbeddingsSettingsDto
+public sealed class EmbeddingProfileDto
 {
     public string? Endpoint { get; set; }
     public string? Model { get; set; }
     public int? Dimensions { get; set; }
     public int? BatchSize { get; set; }
     public int? TimeoutSeconds { get; set; }
+}
+
+public sealed class EmbeddingsSettingsDto
+{
+    public EmbeddingProfileDto? Code { get; set; }
+    public EmbeddingProfileDto? Text { get; set; }
 }
 
 public sealed class SearchSettingsDto
@@ -85,11 +91,22 @@ public sealed class AppSettingsDto
 
         if (dto.Embeddings is { } e)
         {
-            Add("Embeddings:Endpoint", e.Endpoint);
-            Add("Embeddings:Model", e.Model);
-            Add("Embeddings:Dimensions", e.Dimensions?.ToString(CultureInfo.InvariantCulture));
-            Add("Embeddings:BatchSize", e.BatchSize?.ToString(CultureInfo.InvariantCulture));
-            Add("Embeddings:Timeout", e.TimeoutSeconds?.ToString(CultureInfo.InvariantCulture));
+            if (e.Code is { } c)
+            {
+                Add("Embeddings:Code:Endpoint", c.Endpoint);
+                Add("Embeddings:Code:Model", c.Model);
+                Add("Embeddings:Code:Dimensions", c.Dimensions?.ToString(CultureInfo.InvariantCulture));
+                Add("Embeddings:Code:BatchSize", c.BatchSize?.ToString(CultureInfo.InvariantCulture));
+                Add("Embeddings:Code:Timeout", c.TimeoutSeconds?.ToString(CultureInfo.InvariantCulture));
+            }
+            if (e.Text is { } t)
+            {
+                Add("Embeddings:Text:Endpoint", t.Endpoint);
+                Add("Embeddings:Text:Model", t.Model);
+                Add("Embeddings:Text:Dimensions", t.Dimensions?.ToString(CultureInfo.InvariantCulture));
+                Add("Embeddings:Text:BatchSize", t.BatchSize?.ToString(CultureInfo.InvariantCulture));
+                Add("Embeddings:Text:Timeout", t.TimeoutSeconds?.ToString(CultureInfo.InvariantCulture));
+            }
         }
 
         if (dto.Search is { } s)
@@ -134,6 +151,16 @@ public sealed class AppSettingsDto
         double CfgDouble(string key, double fallback) =>
             double.TryParse(config[key], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
 
+        // Stored value wins over merged config; null if absent.
+        string? Resolve(string key) => Get(key) ?? config[key];
+
+        // Per-domain value, falling back to the legacy single-model key, then a default.
+        string? DomStr(string domain, string key, string? legacyKey, string? fallback) =>
+            Resolve($"Embeddings:{domain}:{key}") ?? (legacyKey is null ? null : Resolve(legacyKey)) ?? fallback;
+
+        int DomInt(string domain, string key, string? legacyKey, int fallback) =>
+            int.TryParse(DomStr(domain, key, legacyKey, null), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+
         return new AppSettingsDto
         {
             Repositories = new RepositoriesSettingsDto
@@ -152,11 +179,22 @@ public sealed class AppSettingsDto
             },
             Embeddings = new EmbeddingsSettingsDto
             {
-                Endpoint = Cfg("Embeddings:Endpoint", "http://llama-embeddings:8080/v1/embeddings"),
-                Model = Cfg("Embeddings:Model", "bge-m3"),
-                Dimensions = CfgInt("Embeddings:Dimensions", 1024),
-                BatchSize = CfgInt("Embeddings:BatchSize", 32),
-                TimeoutSeconds = TimeoutSecondsFrom(config["Embeddings:Timeout"], 30)
+                Code = new EmbeddingProfileDto
+                {
+                    Endpoint = DomStr("Code", "Endpoint", "Embeddings:Endpoint", CodeRag.Embeddings.EmbeddingOptions.DefaultCodeEndpoint),
+                    Model = DomStr("Code", "Model", "Embeddings:Model", CodeRag.Embeddings.EmbeddingOptions.DefaultCodeModel),
+                    Dimensions = DomInt("Code", "Dimensions", "Embeddings:Dimensions", CodeRag.Embeddings.EmbeddingOptions.DefaultCodeDimensions),
+                    BatchSize = DomInt("Code", "BatchSize", "Embeddings:BatchSize", 32),
+                    TimeoutSeconds = TimeoutSecondsFrom(DomStr("Code", "Timeout", "Embeddings:Timeout", null), 30)
+                },
+                Text = new EmbeddingProfileDto
+                {
+                    Endpoint = DomStr("Text", "Endpoint", "Embeddings:Endpoint", CodeRag.Embeddings.EmbeddingOptions.DefaultTextEndpoint),
+                    Model = DomStr("Text", "Model", "Embeddings:Model", CodeRag.Embeddings.EmbeddingOptions.DefaultTextModel),
+                    Dimensions = DomInt("Text", "Dimensions", "Embeddings:Dimensions", CodeRag.Embeddings.EmbeddingOptions.DefaultTextDimensions),
+                    BatchSize = DomInt("Text", "BatchSize", "Embeddings:BatchSize", 32),
+                    TimeoutSeconds = TimeoutSecondsFrom(DomStr("Text", "Timeout", "Embeddings:Timeout", null), 30)
+                }
             },
             Search = new SearchSettingsDto
             {

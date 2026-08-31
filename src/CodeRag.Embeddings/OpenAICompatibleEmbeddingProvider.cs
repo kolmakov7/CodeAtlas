@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CodeRag.Domain.Enums;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -11,7 +12,7 @@ namespace CodeRag.Embeddings;
 
 /// <summary>
 /// OpenAI-compatible провайдер эмбеддингов с батчингом, таймаутом, retry (exponential backoff) и cancellation.
-/// Endpoint: http://llama-embeddings:8080/v1/embeddings, модель bge-m3 (ADR-005, indexing.md §5).
+/// Один экземпляр на домен (code / text): свой endpoint, модель и векторное пространство (ADR-005, ADR-011, indexing.md §5).
 /// Кэш по ContentHash+Model+ConfigHash реализован на уровне чанков (chunks.embedded_at) — провайдер также держит LRU
 /// по хэшу текста+модель+конфиг для дедупликации батчей в рамках процесса.
 /// </summary>
@@ -21,8 +22,11 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
     private readonly IOptionsMonitor<EmbeddingOptions> _optionsMonitor;
     private readonly ILogger<OpenAICompatibleEmbeddingProvider> _logger;
 
-    // Читаем опции при каждом обращении — hot reload из таблицы settings (FireReload → OptionsMonitor)
-    private EmbeddingOptions Opts => _optionsMonitor.CurrentValue;
+    // Читаем профиль домена при каждом обращении — hot reload из таблицы settings (FireReload → OptionsMonitor)
+    private EmbeddingProfileOptions Profile => _optionsMonitor.CurrentValue.For(Domain);
+
+    /// <summary>Which embedding domain (code / text) this provider serves.</summary>
+    public EmbeddingDomain Domain { get; }
 
     // Простой LRU in-memory кэш для дедупликации одинаковых текстов в рамках батча/процесса.
     // Ключ: sha256(content | model | configHash) -> vector
@@ -31,14 +35,14 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
     private readonly LinkedList<string> _lru = new();
     private const int MaxCacheEntries = 2048;
 
-    public string Model => Opts.Model;
-    public string ConfigHash => Opts.GetConfigHash();
+    public string Model => Profile.Model ?? string.Empty;
+    public string ConfigHash => Profile.GetConfigHash();
 
     // Размерность может быть auto-detected из ответа API.
     // Возвращаем 0 если ещё не известна (до загрузки settings и до первого API вызова),
     // чтобы SqliteVecVectorStore отложил создание таблицы до получения реального dim.
     private int? _detectedDim;
-    public int Dimensions => _detectedDim ?? Opts.Dimensions;
+    public int Dimensions => _detectedDim ?? Profile.Dimensions;
 
     // Длина контекста модели (n_ctx) — детектится ОДИН раз на комбинацию Endpoint|Model
     // из GET {base}/v1/models. При смене модели или ссылки на API — детект заново.
@@ -49,21 +53,31 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
 
     public OpenAICompatibleEmbeddingProvider(
         HttpClient httpClient,
+        EmbeddingDomain domain,
         IOptionsMonitor<EmbeddingOptions> options,
         ILogger<OpenAICompatibleEmbeddingProvider> logger)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        Domain = domain;
         _optionsMonitor = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
 
-        if (string.IsNullOrWhiteSpace(Opts.Endpoint))
-            throw new ArgumentException("Embedding endpoint must not be empty.", nameof(options));
+        // Lenient: a missing endpoint for one domain must not break the other domain or DI.
+        // EmbedAsync throws a clear error for that domain, which callers treat as "no vectors".
+        if (string.IsNullOrWhiteSpace(Profile.Endpoint))
+            _logger.LogWarning(
+                "Embedding endpoint for {Domain} domain is not configured — embeddings for this domain will be unavailable.",
+                domain.ToText());
     }
 
     public async Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct)
     {
         if (texts is null) throw new ArgumentNullException(nameof(texts));
         if (texts.Count == 0) return Array.Empty<float[]>();
+
+        if (string.IsNullOrWhiteSpace(Profile.Endpoint))
+            throw new InvalidOperationException(
+                $"Embedding endpoint for {Domain.ToText()} domain is not configured. Set Embeddings:{(Domain == EmbeddingDomain.Text ? "Text" : "Code")}:Endpoint.");
 
         MaybeDetectModelInfo();
 
@@ -107,7 +121,7 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
         }
 
         // Батчинг
-        var batches = Chunk(toFetchTexts, Opts.BatchSize).ToList();
+        var batches = Chunk(toFetchTexts, Profile.BatchSize).ToList();
         var batchResults = new List<float[]>();
         int offset = 0;
         foreach (var batch in batches)
@@ -158,9 +172,9 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
             return;
         }
         _detectedDim = observed;
-        if (Opts.Dimensions > 0 && Opts.Dimensions != observed)
+        if (Profile.Dimensions > 0 && Profile.Dimensions != observed)
         {
-            _logger.LogWarning("Configured embedding dim={Cfg} but API returns dim={Observed} (model={Model}) — using observed", Opts.Dimensions, observed, Model);
+            _logger.LogWarning("Configured embedding dim={Cfg} but API returns dim={Observed} (model={Model}) — using observed", Profile.Dimensions, observed, Model);
         }
         else
         {
@@ -174,7 +188,9 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
     /// </summary>
     private void MaybeDetectModelInfo()
     {
-        var identity = $"{Opts.Endpoint}|{Opts.Model}";
+        if (string.IsNullOrWhiteSpace(Profile.Endpoint))
+            return;
+        var identity = $"{Profile.Endpoint}|{Profile.Model}";
         lock (_modelInfoLock)
         {
             if (string.Equals(_modelInfoIdentity, identity, StringComparison.Ordinal))
@@ -188,7 +204,7 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
     /// <summary>Force re-detect and await model info (used by diagnostics/tests). Returns detected n_ctx or null.</summary>
     public async Task<int?> RefreshModelInfoAsync(CancellationToken ct = default)
     {
-        var identity = $"{Opts.Endpoint}|{Opts.Model}";
+        var identity = $"{Profile.Endpoint}|{Profile.Model}";
         lock (_modelInfoLock)
         {
             _modelInfoIdentity = identity;
@@ -205,49 +221,53 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(5));
 
-            var url = DeriveModelsUrl(Opts.Endpoint);
+            var url = DeriveModelsUrl(Profile.Endpoint);
+            if (url is null)
+                return;
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            if (!string.IsNullOrWhiteSpace(Opts.ApiKey))
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Opts.ApiKey);
+            if (!string.IsNullOrWhiteSpace(Profile.ApiKey))
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Profile.ApiKey);
 
             using var resp = await _httpClient.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Model info endpoint {Url} returned {Status} (model={Model}) — context length not detected", url, (int)resp.StatusCode, Opts.Model);
+                _logger.LogWarning("Model info endpoint {Url} returned {Status} (model={Model}) — context length not detected", url, (int)resp.StatusCode, Profile.Model);
                 return;
             }
 
             var json = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
-            var nCtx = ParseContextLength(json, Opts.Model);
+            var nCtx = ParseContextLength(json, Profile.Model);
             if (nCtx is > 0)
             {
                 _detectedContextLength = nCtx;
-                _logger.LogInformation("Detected model context length n_ctx={NCtx} (model={Model})", nCtx, Opts.Model);
+                _logger.LogInformation("Detected model context length n_ctx={NCtx} (model={Model})", nCtx, Profile.Model);
             }
             else
             {
-                _logger.LogWarning("Model info for {Model} did not expose context length (n_ctx) — chunking will use defaults", Opts.Model);
+                _logger.LogWarning("Model info for {Model} did not expose context length (n_ctx) — chunking will use defaults", Profile.Model);
             }
         }
         catch (OperationCanceledException)
         {
-            _logger.LogDebug("Model info detection timed out (model={Model})", Opts.Model);
+            _logger.LogDebug("Model info detection timed out (model={Model})", Profile.Model);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Model info detection failed (model={Model}) — chunking will use defaults", Opts.Model);
+            _logger.LogDebug(ex, "Model info detection failed (model={Model}) — chunking will use defaults", Profile.Model);
         }
     }
 
-    private static string DeriveModelsUrl(string endpoint)
+    private static string? DeriveModelsUrl(string? endpoint)
     {
+        if (string.IsNullOrWhiteSpace(endpoint))
+            return null;
         var trimmed = endpoint.TrimEnd('/');
         if (trimmed.EndsWith("/embeddings", StringComparison.OrdinalIgnoreCase))
             return trimmed[..^"/embeddings".Length] + "/models";
         return trimmed + "/models";
     }
 
-    private static int? ParseContextLength(string json, string model)
+    private static int? ParseContextLength(string json, string? model)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -289,8 +309,8 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
 
     private string ApplyPrefix(string text)
     {
-        if (string.IsNullOrEmpty(Opts.Prefix)) return text ?? string.Empty;
-        return Opts.Prefix + (text ?? string.Empty);
+        if (string.IsNullOrEmpty(Profile.Prefix)) return text ?? string.Empty;
+        return Profile.Prefix + (text ?? string.Empty);
     }
 
     private string ComputeCacheKey(string text)
@@ -304,12 +324,12 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
     private async Task<IReadOnlyList<float[]>> EmbedBatchWithRetryAsync(IReadOnlyList<string> batch, CancellationToken ct)
     {
         var attempt = 0;
-        var delay = Opts.BaseDelay;
+        var delay = Profile.BaseDelay;
 
         while (true)
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(Opts.Timeout);
+            timeoutCts.CancelAfter(Profile.Timeout);
 
             try
             {
@@ -323,33 +343,33 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {
                 // Таймаут батча — ретраим если есть попытки
-                if (attempt >= Opts.MaxRetries)
+                if (attempt >= Profile.MaxRetries)
                 {
                     _logger.LogWarning(ex, "Embedding batch timeout after {Attempt} attempts (size={Size}, model={Model})", attempt + 1, batch.Count, Model);
                     throw new TimeoutException($"Embedding timeout after {attempt + 1} attempts (model={Model}, size={batch.Count})", ex);
                 }
-                _logger.LogWarning(ex, "Embedding batch timeout, retry {Attempt}/{Max} after {Delay}ms", attempt + 1, Opts.MaxRetries, delay.TotalMilliseconds);
+                _logger.LogWarning(ex, "Embedding batch timeout, retry {Attempt}/{Max} after {Delay}ms", attempt + 1, Profile.MaxRetries, delay.TotalMilliseconds);
             }
-            catch (HttpRequestException ex) when (IsTransient(ex) && attempt < Opts.MaxRetries)
+            catch (HttpRequestException ex) when (IsTransient(ex) && attempt < Profile.MaxRetries)
             {
-                _logger.LogWarning(ex, "Transient embedding error, retry {Attempt}/{Max} after {Delay}ms (model={Model})", attempt + 1, Opts.MaxRetries, delay.TotalMilliseconds, Model);
+                _logger.LogWarning(ex, "Transient embedding error, retry {Attempt}/{Max} after {Delay}ms (model={Model})", attempt + 1, Profile.MaxRetries, delay.TotalMilliseconds, Model);
             }
             catch (HttpRequestException ex)
             {
-                if (attempt >= Opts.MaxRetries)
+                if (attempt >= Profile.MaxRetries)
                 {
-                    _logger.LogError(ex, "Embedding request failed after {Attempt} attempts (model={Model}, endpoint={Endpoint})", attempt + 1, Model, Opts.Endpoint);
+                    _logger.LogError(ex, "Embedding request failed after {Attempt} attempts (model={Model}, endpoint={Endpoint})", attempt + 1, Model, Profile.Endpoint);
                     throw;
                 }
-                _logger.LogWarning(ex, "Embedding request failed, retry {Attempt}/{Max}", attempt + 1, Opts.MaxRetries);
+                _logger.LogWarning(ex, "Embedding request failed, retry {Attempt}/{Max}", attempt + 1, Profile.MaxRetries);
             }
-            catch (Exception ex) when (attempt < Opts.MaxRetries && IsTransientStatus(ex))
+            catch (Exception ex) when (attempt < Profile.MaxRetries && IsTransientStatus(ex))
             {
-                _logger.LogWarning(ex, "Transient embedding status, retry {Attempt}/{Max}", attempt + 1, Opts.MaxRetries);
+                _logger.LogWarning(ex, "Transient embedding status, retry {Attempt}/{Max}", attempt + 1, Profile.MaxRetries);
             }
 
             attempt++;
-            if (attempt > Opts.MaxRetries) throw new HttpRequestException($"Embedding failed after {attempt} attempts (model={Model})");
+            if (attempt > Profile.MaxRetries) throw new HttpRequestException($"Embedding failed after {attempt} attempts (model={Model})");
 
             // Exponential backoff с jitter 0.8..1.2
             var jitter = 0.8 + Random.Shared.NextDouble() * 0.4;
@@ -388,30 +408,30 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
     {
         var payload = new EmbeddingRequest
         {
-            Model = Opts.Model,
+            Model = Profile.Model ?? string.Empty,
             Input = batch.ToList(),
             EncodingFormat = "float"
         };
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
-        using var req = new HttpRequestMessage(HttpMethod.Post, Opts.Endpoint)
+        using var req = new HttpRequestMessage(HttpMethod.Post, Profile.Endpoint)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
 
-        if (!string.IsNullOrWhiteSpace(Opts.ApiKey))
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Opts.ApiKey);
+        if (!string.IsNullOrWhiteSpace(Profile.ApiKey))
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Profile.ApiKey);
 
         // Proxy per-repo уже применён на уровне HttpClient handler (если настроен ProxyUrl);
         // здесь лишь логируем endpoint без секретов.
-        _logger.LogDebug("Embedding batch request model={Model} size={Size} endpoint={Endpoint}", Model, batch.Count, Opts.Endpoint);
+        _logger.LogDebug("Embedding batch request model={Model} size={Size} endpoint={Endpoint}", Model, batch.Count, Profile.Endpoint);
 
         using var resp = await _httpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
         if (!resp.IsSuccessStatusCode)
         {
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            var msg = $"Embedding API {resp.StatusCode} at {Opts.Endpoint}: {Truncate(body, 500)}";
+            var msg = $"Embedding API {resp.StatusCode} at {Profile.Endpoint}: {Truncate(body, 500)}";
             _logger.LogWarning("Embedding API error {Status} model={Model} body={Body}", resp.StatusCode, Model, Truncate(body, 300));
 
             if (resp.StatusCode == HttpStatusCode.TooManyRequests || (int)resp.StatusCode >= 500)
@@ -423,7 +443,7 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
         var respJson = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         var parsed = JsonSerializer.Deserialize<EmbeddingResponse>(respJson, JsonOptions);
         if (parsed?.Data is null || parsed.Data.Count == 0)
-            throw new InvalidOperationException($"Empty embedding response from {Opts.Endpoint}: {Truncate(respJson, 500)}");
+            throw new InvalidOperationException($"Empty embedding response from {Profile.Endpoint}: {Truncate(respJson, 500)}");
 
         // Сортировка по index гарантирует порядок
         var ordered = parsed.Data.OrderBy(d => d.Index).Select(d => d.Embedding).ToList();
@@ -434,8 +454,8 @@ public sealed class OpenAICompatibleEmbeddingProvider : IEmbeddingProvider
         // Валидация размерности
         foreach (var vec in ordered)
         {
-            if (vec.Length != Opts.Dimensions)
-                _logger.LogDebug("Embedding dim mismatch: expected {Exp}, got {Got} (model={Model}) — continuing", Opts.Dimensions, vec.Length, Model);
+            if (vec.Length != Profile.Dimensions)
+                _logger.LogDebug("Embedding dim mismatch: expected {Exp}, got {Got} (model={Model}) — continuing", Profile.Dimensions, vec.Length, Model);
         }
 
         return ordered;

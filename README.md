@@ -44,15 +44,18 @@ Oversized symbol chunks (a whole class/method) are split into windows of at most
 **Git** — only through the local `git` CLI. Each repository gets a checkout in `/data/repos/<slug>`:
 `clone --branch`, `fetch origin <branch>`, `diff --name-status -M IndexedCommit..newHead`, `ls-tree`, `rev-parse`. Supports proxy (`http/https/socks5`), `Credentials` (token/SSH), and `ls-remote` for validation. Sync is polling on `sync_interval` (default 5 min) + manual Sync/Re-index.
 
-**Embeddings** — any OpenAI-compatible API:
-`POST {endpoint}/v1/embeddings` with `{model, input, encoding_format}`. Default `http://llama-embeddings:8080/v1/embeddings`, model `bge-m3` (1024 dim). Batching, retry with backoff, timeout, and an LRU cache. Without an endpoint, search degrades to FTS + structural (a warning in the UI/API).
+**Embeddings** — two independent OpenAI-compatible pipelines (ADR-011), each with its own endpoint, model, and vector space:
+- **Code** — source code (C#/Python/SQL/VBS/C++/JS/Go; comments stay code). Default `http://code-embeddings:8080/v1/embeddings`, model `bge-m3`.
+- **Text** — Markdown/README/docs/prose. Default `http://text-embeddings:8080/v1/embeddings`, model `all-MiniLM-L6-v2`.
 
-Enable the local model:
+Each calls `POST {endpoint}/v1/embeddings` with `{model, input, encoding_format}`; batching, retry with backoff, timeout, and an LRU cache. Dimension is auto-detected from the first response (`0 = auto`). Search merges code + text vector results as one semantic signal alongside FTS and structural. Without an endpoint for a domain, that domain degrades gracefully (a warning in the UI/API).
+
+Enable the bundled local models (opt-in):
 ```bash
-docker compose --profile embeddings up -d  # downloads bge-m3-Q8_0.gguf ~2GB, needs ~4GB RAM
+docker compose --profile embeddings up -d  # downloads the code + text GGUF models, needs ~8GB RAM total
 ```
 
-Switch to an external API via settings (see below).
+Point either domain at an external API via settings (see below) — e.g. a different code vs text embedding server.
 
 ## Settings
 
@@ -68,11 +71,16 @@ Changeable without a rebuild: Web UI **Settings** → DB (`settings` table) → 
 | | `Search:DefaultResultCount` | `20` | results per query (max 100) |
 | | `Search:PreviewMaxLines` | `20` | preview lines |
 | | `Search:VectorTopK` | `50` | candidates from the vector index |
-| **Embedding** | `Embedding:Endpoint` | `http://llama-embeddings:8080/v1/embeddings` | OpenAI-compatible URL |
-| | `Embedding:Model` | `bge-m3` | model name, part of invalidation |
-| | `Embedding:Dimensions` | `1024` | dimensionality |
-| | `Embedding:BatchSize` / `Timeout` / `MaxRetries` | `32 / 30s / 3` | batching and retry |
-| | `Embedding:ApiKey` / `ProxyUrl` | — | key and proxy for an external API |
+| **Embedding (code)** | `Embeddings:Code:Endpoint` | `http://code-embeddings:8080/v1/embeddings` | OpenAI-compatible URL for code |
+| | `Embeddings:Code:Model` | `bge-m3` | code model name, part of invalidation |
+| | `Embeddings:Code:Dimensions` | `0` (auto) | code dimensionality (0 = auto-detect) |
+| | `Embeddings:Code:BatchSize` / `Timeout` / `MaxRetries` | `32 / 30s / 3` | code batching and retry |
+| | `Embeddings:Code:ApiKey` / `ProxyUrl` | — | code key and proxy |
+| **Embedding (text)** | `Embeddings:Text:Endpoint` | `http://text-embeddings:8080/v1/embeddings` | OpenAI-compatible URL for text |
+| | `Embeddings:Text:Model` | `all-MiniLM-L6-v2` | text model name, part of invalidation |
+| | `Embeddings:Text:Dimensions` | `0` (auto) | text dimensionality (0 = auto-detect) |
+| | `Embeddings:Text:BatchSize` / `Timeout` / `MaxRetries` | `32 / 30s / 3` | text batching and retry |
+| | `Embeddings:Text:ApiKey` / `ProxyUrl` | — | text key and proxy |
 | **Indexer** | `Indexer:MaxConcurrentIndexers` | `2` | parallel jobs |
 | | `Indexer:DefaultSyncIntervalSeconds` | `300` | repo polling |
 | | `Indexer:FullReindexThreshold` | `0.5` | >50% of files changed → full reindex |
@@ -84,12 +92,14 @@ Changeable without a rebuild: Web UI **Settings** → DB (`settings` table) → 
 
 Per-repository: `branch`, `proxy_id`, `credential_id`, `sync_interval_seconds`, `enabled`.
 
-Example `.env` for an external embedding:
+Example `.env` for external code + text embeddings:
 ```
-CODERAG__Embedding__Endpoint=https://api.openai.com/v1/embeddings
-CODERAG__Embedding__Model=text-embedding-3-small
-CODERAG__Embedding__ApiKey=sk-...
-CODERAG__Embedding__Dimensions=1536
+CODE_EMBEDDINGS_ENDPOINT=https://api.external-host.com/v1/embeddings
+CODE_EMBEDDINGS_MODEL=code-embed-v1
+CODE_EMBEDDINGS_DIMENSIONS=1536
+TEXT_EMBEDDINGS_ENDPOINT=https://api.external-host.com/v1/embeddings
+TEXT_EMBEDDINGS_MODEL=text-embed-v1
+TEXT_EMBEDDINGS_DIMENSIONS=1536
 ```
 
 ## MCP

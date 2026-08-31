@@ -1,4 +1,5 @@
 using CodeRag.Api.Models;
+using CodeRag.Domain.Enums;
 using CodeRag.Domain.Ports;
 using CodeRag.Embeddings;
 using CodeRag.Indexer;
@@ -9,19 +10,21 @@ namespace CodeRag.Api.Services;
 
 public sealed class HealthService
 {
+    private static readonly EmbeddingDomain[] Domains = { EmbeddingDomain.Code, EmbeddingDomain.Text };
+
     private readonly IDbHealthProbe _dbProbe;
     private readonly IStorageProbe _storageProbe;
-    private readonly IVectorStore _vectorStore;
-    private readonly IEmbeddingProvider _embedding;
+    private readonly IVectorStoreFactory _vectorStoreFactory;
+    private readonly IEmbeddingProviderFactory _embeddingFactory;
     private readonly IJobRunner _runner;
     private readonly ILogger<HealthService> _logger;
 
-    public HealthService(IDbHealthProbe dbProbe, IStorageProbe storageProbe, IVectorStore vectorStore, IEmbeddingProvider embedding, IJobRunner runner, ILogger<HealthService> logger)
+    public HealthService(IDbHealthProbe dbProbe, IStorageProbe storageProbe, IVectorStoreFactory vectorStoreFactory, IEmbeddingProviderFactory embeddingFactory, IJobRunner runner, ILogger<HealthService> logger)
     {
         _dbProbe = dbProbe;
         _storageProbe = storageProbe;
-        _vectorStore = vectorStore;
-        _embedding = embedding;
+        _vectorStoreFactory = vectorStoreFactory;
+        _embeddingFactory = embeddingFactory;
         _runner = runner;
         _logger = logger;
     }
@@ -30,22 +33,22 @@ public sealed class HealthService
     {
         var warnings = new List<string>();
         var db = await CheckDbAsync(ct).ConfigureAwait(false);
-        var (vec, vectorIndex) = await CheckVectorAsync(ct).ConfigureAwait(false);
-        var emb = await CheckEmbeddingAsync(ct).ConfigureAwait(false);
+        var (vec, vectorIndex, vectorDomains) = await CheckVectorAsync(ct).ConfigureAwait(false);
+        var (emb, embeddingDomains) = await CheckEmbeddingAsync(ct).ConfigureAwait(false);
         var indexer = CheckIndexer();
         var storage = CheckStorage();
         if (vectorIndex is { Stale: true })
             warnings.Add(vectorIndex.Reason ?? "vector index stale");
         var overall = (db.Status == "Healthy" && vec.Status == "Healthy" && indexer.Status == "Healthy" && storage.Status == "Healthy") ? "Healthy" : "Degraded";
         if (emb.Status != "Healthy") warnings.Add("embeddings unavailable");
-        return new HealthDetailsDto(overall, db, vec, emb, indexer, storage, warnings, vectorIndex);
+        return new HealthDetailsDto(overall, db, vec, vectorDomains, emb, embeddingDomains, indexer, storage, warnings, vectorIndex);
     }
 
     public async Task<(bool Healthy, string? Message)> CheckReadyAsync(CancellationToken ct = default)
     {
         var db = await CheckDbAsync(ct).ConfigureAwait(false);
         if (db.Status != "Healthy") return (false, $"database: {db.Message}");
-        var (vec, _) = await CheckVectorAsync(ct).ConfigureAwait(false);
+        var (vec, _, _) = await CheckVectorAsync(ct).ConfigureAwait(false);
         if (vec.Status != "Healthy") return (false, $"vector: {vec.Message}");
         var indexer = CheckIndexer();
         if (indexer.Status != "Healthy") return (false, $"indexer: {indexer.Message}");
@@ -62,16 +65,44 @@ public sealed class HealthService
         return new HealthComponentDto(r.Status, r.Message, r.LatencyMs);
     }
 
-    private async Task<(HealthComponentDto Component, VectorFreshnessDto? Freshness)> CheckVectorAsync(CancellationToken ct)
+    /// <summary>
+    /// Checks every vector space (code / text) independently. The aggregate is Healthy only when all
+    /// domains are healthy; the aggregate freshness mirrors the code domain (the primary space).
+    /// </summary>
+    private async Task<(HealthComponentDto Component, VectorFreshnessDto? Freshness, IReadOnlyList<VectorDomainHealthDto> Domains)> CheckVectorAsync(CancellationToken ct)
+    {
+        var domainResults = new List<VectorDomainHealthDto>();
+        VectorFreshnessDto? aggregateFreshness = null;
+
+        foreach (var domain in Domains)
+        {
+            var (component, freshness) = await CheckDomainVectorAsync(domain, ct).ConfigureAwait(false);
+            domainResults.Add(new VectorDomainHealthDto(domain.ToText(), component.Status, component.Message, component.LatencyMs, freshness));
+            if (domain == EmbeddingDomain.Code && aggregateFreshness is null)
+                aggregateFreshness = freshness;
+        }
+
+        var anyHealthy = domainResults.Any(d => d.Status == "Healthy");
+        var allHealthy = domainResults.All(d => d.Status == "Healthy");
+        var message = allHealthy ? null : string.Join("; ", domainResults.Where(d => d.Status != "Healthy").Select(d => $"{d.Domain}: {d.Message ?? "degraded"}"));
+        // No store registered at all => degraded; otherwise reflect whether at least one space is usable.
+        var status = allHealthy ? "Healthy" : anyHealthy ? "Degraded" : "Degraded";
+
+        return (new HealthComponentDto(status, message, null), aggregateFreshness, domainResults);
+    }
+
+    private async Task<(HealthComponentDto Component, VectorFreshnessDto? Freshness)> CheckDomainVectorAsync(EmbeddingDomain domain, CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var dim = _embedding.Dimensions > 0 ? _embedding.Dimensions : 384;
+            var provider = _embeddingFactory.Get(domain);
+            var store = _vectorStoreFactory.Get(domain);
+            var dim = provider.Dimensions > 0 ? provider.Dimensions : 384;
             var dummy = new float[dim];
-            await _vectorStore.SearchAsync(dummy, 1, null, ct).ConfigureAwait(false);
+            await store.SearchAsync(dummy, 1, null, ct).ConfigureAwait(false);
             sw.Stop();
-            var freshness = await BuildFreshnessAsync(ct).ConfigureAwait(false);
+            var freshness = await BuildFreshnessAsync(domain, ct).ConfigureAwait(false);
             if (freshness is { Stale: true })
                 return (new HealthComponentDto("Degraded", freshness.Reason ?? "vector index stale", sw.Elapsed.TotalMilliseconds), freshness);
             return (new HealthComponentDto("Healthy", null, sw.Elapsed.TotalMilliseconds), freshness);
@@ -79,19 +110,21 @@ public sealed class HealthService
         catch (Exception ex)
         {
             sw.Stop();
-            _logger.LogWarning(ex, "Health Vector check failed");
+            _logger.LogWarning(ex, "Health Vector check failed for {Domain}", domain.ToText());
             return (new HealthComponentDto("Degraded", ex.Message, sw.Elapsed.TotalMilliseconds), null);
         }
     }
 
-    private async Task<VectorFreshnessDto> BuildFreshnessAsync(CancellationToken ct)
+    private async Task<VectorFreshnessDto> BuildFreshnessAsync(EmbeddingDomain domain, CancellationToken ct)
     {
-        var currentModel = _embedding.Model;
-        int? currentDim = _embedding.Dimensions > 0 ? _embedding.Dimensions : null;
-        var currentCtx = _embedding.ContextLength;
+        var provider = _embeddingFactory.Get(domain);
+        var currentModel = provider.Model;
+        int? currentDim = provider.Dimensions > 0 ? provider.Dimensions : null;
+        var currentCtx = provider.ContextLength;
         try
         {
-            var summary = await _vectorStore.GetIndexSummaryAsync(ct).ConfigureAwait(false);
+            var store = _vectorStoreFactory.Get(domain);
+            var summary = await store.GetIndexSummaryAsync(ct).ConfigureAwait(false);
             var stored = summary.StoredModels
                 .Select(m => new VectorModelInfoDto(m.Model, m.Dim, m.ContextLength, m.ChunkCount))
                 .ToList();
@@ -114,33 +147,53 @@ public sealed class HealthService
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Vector freshness check failed");
+            _logger.LogDebug(ex, "Vector freshness check failed for {Domain}", domain.ToText());
             return VectorFreshnessDto.Fresh(Array.Empty<VectorModelInfoDto>(), currentModel, currentDim, currentCtx);
         }
     }
 
-    private async Task<HealthComponentDto> CheckEmbeddingAsync(CancellationToken ct)
+    /// <summary>
+    /// Probes every embedding endpoint (code / text) independently. The aggregate is Healthy only when
+    /// all configured domains respond.
+    /// </summary>
+    private async Task<(HealthComponentDto Component, IReadOnlyList<EmbeddingDomainHealthDto> Domains)> CheckEmbeddingAsync(CancellationToken ct)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var domainResults = new List<EmbeddingDomainHealthDto>();
+
+        foreach (var domain in Domains)
+        {
+            var provider = _embeddingFactory.Get(domain);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var (status, message) = await ProbeDomainAsync(provider, domain, ct).ConfigureAwait(false);
+            sw.Stop();
+            domainResults.Add(new EmbeddingDomainHealthDto(domain.ToText(), status, message, sw.Elapsed.TotalMilliseconds, provider.Model, provider.Dimensions));
+        }
+
+        // Embedding probe is non-blocking: any reachable endpoint keeps the component "Degraded", never "Unhealthy".
+        var allHealthy = domainResults.All(d => d.Status == "Healthy");
+        var aggMessage = allHealthy ? null : string.Join("; ", domainResults.Where(d => d.Status != "Healthy").Select(d => $"{d.Domain}: {d.Message ?? "unavailable"}"));
+        var aggStatus = allHealthy ? "Healthy" : "Degraded";
+        return (new HealthComponentDto(aggStatus, aggMessage, null), domainResults);
+    }
+
+    private async Task<(string Status, string? Message)> ProbeDomainAsync(IEmbeddingProvider provider, EmbeddingDomain domain, CancellationToken ct)
+    {
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(3));
-            var vecs = await _embedding.EmbedAsync(new[] { "health check" }, cts.Token).ConfigureAwait(false);
-            sw.Stop();
-            if (vecs.Length == 0) return new HealthComponentDto("Degraded", "empty embedding response", sw.Elapsed.TotalMilliseconds);
-            return new HealthComponentDto("Healthy", null, sw.Elapsed.TotalMilliseconds);
+            var vecs = await provider.EmbedAsync(new[] { "health check" }, cts.Token).ConfigureAwait(false);
+            if (vecs.Length == 0) return ("Degraded", "empty embedding response");
+            return ("Healthy", null);
         }
         catch (OperationCanceledException)
         {
-            sw.Stop();
-            return new HealthComponentDto("Degraded", "embedding timeout", sw.Elapsed.TotalMilliseconds);
+            return ("Degraded", "embedding timeout");
         }
         catch (Exception ex)
         {
-            sw.Stop();
-            _logger.LogDebug(ex, "Embedding health check failed (not blocking)");
-            return new HealthComponentDto("Degraded", ex.Message, sw.Elapsed.TotalMilliseconds);
+            _logger.LogDebug(ex, "Embedding health check failed for {Domain} (not blocking)", domain.ToText());
+            return ("Degraded", ex.Message);
         }
     }
 

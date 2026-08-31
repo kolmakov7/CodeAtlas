@@ -35,6 +35,22 @@ export default function SettingsPage() {
 
   const save = () => update.mutate(form);
 
+  type ProfileField = "endpoint" | "model" | "dimensions" | "batchSize" | "timeoutSeconds";
+  const renderProfile = (domain: "code" | "text") => {
+    const p = form.embeddings?.[domain];
+    const set = (field: ProfileField, v: string | number) =>
+      setForm({ ...form, embeddings: { ...form.embeddings, [domain]: { ...form.embeddings?.[domain], [field]: v } } });
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: "1px solid var(--border)", borderRadius: 6 }}>
+        <label>Endpoint <input value={p?.endpoint ?? ""} onChange={(e) => set("endpoint", e.target.value)} placeholder={domain === "code" ? "http://llama-embeddings:8080/v1/embeddings" : "http://text-embeddings:8080/v1/embeddings"} /></label>
+        <label>Model <input value={p?.model ?? ""} onChange={(e) => set("model", e.target.value)} placeholder={domain === "code" ? "bge-m3" : "jina-embeddings-v5-text-small"} /></label>
+        <label>Dimensions <input type="number" value={p?.dimensions ?? 1024} onChange={(e) => set("dimensions", Number(e.target.value))} /></label>
+        <label>Batch size <input type="number" value={p?.batchSize ?? 32} onChange={(e) => set("batchSize", Number(e.target.value))} /></label>
+        <label>Timeout (seconds) <input type="number" value={p?.timeoutSeconds ?? 30} onChange={(e) => set("timeoutSeconds", Number(e.target.value))} /></label>
+      </div>
+    );
+  };
+
   return (
     <div>
       <h1 style={{ marginBottom: 12 }}>Settings</h1>
@@ -67,11 +83,15 @@ export default function SettingsPage() {
       {tab === "embeddings" && (
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <h3>Embeddings</h3>
-          <label>Endpoint <input value={form.embeddings?.endpoint ?? ""} onChange={(e) => setForm({ ...form, embeddings: { ...form.embeddings, endpoint: e.target.value } })} placeholder="http://llama-embeddings:8080/v1/embeddings" /></label>
-          <label>Model <input value={form.embeddings?.model ?? ""} onChange={(e) => setForm({ ...form, embeddings: { ...form.embeddings, model: e.target.value } })} placeholder="bge-m3" /></label>
-          <label>Dimensions <input type="number" value={form.embeddings?.dimensions ?? 384} onChange={(e) => setForm({ ...form, embeddings: { ...form.embeddings, dimensions: Number(e.target.value) } })} /></label>
-          <label>Batch size <input type="number" value={form.embeddings?.batchSize ?? 32} onChange={(e) => setForm({ ...form, embeddings: { ...form.embeddings, batchSize: Number(e.target.value) } })} /></label>
-          <label>Timeout (seconds) <input type="number" value={form.embeddings?.timeoutSeconds ?? 30} onChange={(e) => setForm({ ...form, embeddings: { ...form.embeddings, timeoutSeconds: Number(e.target.value) } })} /></label>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Two independent OpenAI-compatible endpoints, one per vector space. Code embeddings embed source code (comments stay code); text embeddings embed Markdown, README and docs prose.</div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Code</div>
+            {renderProfile("code")}
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Text</div>
+            {renderProfile("text")}
+          </div>
         </div>
       )}
       {tab === "search" && (

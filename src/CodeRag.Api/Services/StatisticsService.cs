@@ -11,13 +11,21 @@ public sealed class StatisticsService
     public async Task<RepositoryStatisticsDto> GetRepositoryStatisticsAsync(Guid repositoryId, CancellationToken ct = default)
     {
         var s = await _query.GetRepositoryStatisticsAsync(repositoryId, ct).ConfigureAwait(false);
-        return new RepositoryStatisticsDto(s.RepositoryId, s.Name, s.FileCount, s.SymbolCount, s.ChunkCount, s.VectorCount, s.IndexedCommit, s.CurrentCommit, s.Status);
+        return MapRepository(s);
     }
 
     public async Task<GlobalStatisticsDto> GetGlobalStatisticsAsync(CancellationToken ct = default)
     {
         var g = await _query.GetGlobalStatisticsAsync(ct).ConfigureAwait(false);
-        var repoStats = g.Repositories.Select(s => new RepositoryStatisticsDto(s.RepositoryId, s.Name, s.FileCount, s.SymbolCount, s.ChunkCount, s.VectorCount, s.IndexedCommit, s.CurrentCommit, s.Status)).ToList();
-        return new GlobalStatisticsDto(g.RepositoryCount, g.FileCount, g.SymbolCount, g.ChunkCount, g.JobCount, repoStats);
+        var repoStats = g.Repositories.Select(MapRepository).ToList();
+        return new GlobalStatisticsDto(g.RepositoryCount, g.FileCount, g.SymbolCount, g.ChunkCount, g.JobCount,
+            g.EmbeddingStats.Select(MapDomain).ToList(), g.EmbeddingsFailed, repoStats);
     }
+
+    private static EmbeddingDomainStatsDto MapDomain(CodeRag.Domain.Ports.EmbeddingDomainStats d) => new(d.Domain, d.Indexed, d.Pending);
+
+    private static RepositoryStatisticsDto MapRepository(CodeRag.Domain.Ports.RepositoryStatistics s) => new(
+        s.RepositoryId, s.Name, s.FileCount, s.SymbolCount, s.ChunkCount, s.VectorCount,
+        s.EmbeddingStats.Select(d => new EmbeddingDomainStatsDto(d.Domain, d.Indexed, d.Pending)).ToList(),
+        s.EmbeddingsFailed, s.IndexedCommit, s.CurrentCommit, s.Status);
 }

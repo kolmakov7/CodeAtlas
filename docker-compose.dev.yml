@@ -6,7 +6,14 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       CODERAG__DataDir: /data
-      CODERAG__Embedding__Endpoint: http://llama-embeddings:8080/v1/embeddings
+      # Dual embedding domains — two independent OpenAI-compatible endpoints.
+      # Override CODE_EMBEDDINGS_* / TEXT_EMBEDDINGS_* in .env to point at any external service.
+      Embeddings__Code__Endpoint: ${CODE_EMBEDDINGS_ENDPOINT:-http://code-embeddings:8080/v1/embeddings}
+      Embeddings__Code__Model: ${CODE_EMBEDDINGS_MODEL:-bge-m3}
+      Embeddings__Code__Dimensions: ${CODE_EMBEDDINGS_DIMENSIONS:-0}
+      Embeddings__Text__Endpoint: ${TEXT_EMBEDDINGS_ENDPOINT:-http://text-embeddings:8080/v1/embeddings}
+      Embeddings__Text__Model: ${TEXT_EMBEDDINGS_MODEL:-all-MiniLM-L6-v2}
+      Embeddings__Text__Dimensions: ${TEXT_EMBEDDINGS_DIMENSIONS:-0}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 15s
@@ -16,14 +23,34 @@ services:
     restart: unless-stopped
     user: "1000:1000"
 
-  llama-embeddings:
+  # Code vector space endpoint (OpenAI-compatible), opt-in via the `embeddings` profile.
+  code-embeddings:
     image: ghcr.io/ggerganov/llama.cpp:server
     profiles: ["embeddings"]
     volumes: ["./data/models:/models", "./scripts:/scripts:ro"]
     ports: ["8081:8080"]
     environment:
-      MODEL_URL: https://huggingface.co/BAAI/bge-m3/resolve/main/bge-m3-Q8_0.gguf
-      MODEL_FILE: /models/bge-m3-Q8_0.gguf
+      MODEL_URL: ${CODE_EMBEDDINGS_MODEL_URL:-https://huggingface.co/BAAI/bge-m3/resolve/main/bge-m3-Q8_0.gguf}
+      MODEL_FILE: ${CODE_EMBEDDINGS_MODEL_FILE:-/models/bge-m3-Q8_0.gguf}
+      LLAMA_ARGS: --embedding --port 8080 --threads 4
+    entrypoint: ["/scripts/download-and-run.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # Text vector space endpoint (OpenAI-compatible), opt-in via the `embeddings` profile.
+  text-embeddings:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    profiles: ["embeddings"]
+    volumes: ["./data/models:/models", "./scripts:/scripts:ro"]
+    ports: ["8082:8080"]
+    environment:
+      MODEL_URL: ${TEXT_EMBEDDINGS_MODEL_URL:-https://huggingface.co/QuantFactory/all-MiniLM-L6-v2-gguf/resolve/main/all-MiniLM-L6-v2-Q8_0.gguf}
+      MODEL_FILE: ${TEXT_EMBEDDINGS_MODEL_FILE:-/models/all-MiniLM-L6-v2-Q8_0.gguf}
       LLAMA_ARGS: --embedding --port 8080 --threads 4
     entrypoint: ["/scripts/download-and-run.sh"]
     healthcheck:

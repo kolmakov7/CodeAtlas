@@ -13,7 +13,7 @@ public sealed class StatisticsServiceTests
         var query = Substitute.For<IStatisticsQueryService>();
         var repoId = Guid.NewGuid();
         query.GetRepositoryStatisticsAsync(repoId, Arg.Any<CancellationToken>())
-            .Returns(new RepositoryStatistics(repoId, "demo", 5, 10, 20, 15, "aaa", "aaa", "Active"));
+            .Returns(new RepositoryStatistics(repoId, "demo", 5, 10, 20, 15, Array.Empty<EmbeddingDomainStats>(), 0, "aaa", "aaa", "Active"));
 
         var sut = new StatisticsService(query);
         var dto = await sut.GetRepositoryStatisticsAsync(repoId);
@@ -28,7 +28,7 @@ public sealed class StatisticsServiceTests
     {
         var query = Substitute.For<IStatisticsQueryService>();
         query.GetGlobalStatisticsAsync(Arg.Any<CancellationToken>())
-            .Returns(new GlobalStatistics(1, 10, 20, 30, 2, new[] { new RepositoryStatistics(Guid.NewGuid(), "r1", 1, 2, 3, 4, null, null, "Active") }));
+            .Returns(new GlobalStatistics(1, 10, 20, 30, 2, Array.Empty<EmbeddingDomainStats>(), 0, new[] { new RepositoryStatistics(Guid.NewGuid(), "r1", 1, 2, 3, 4, Array.Empty<EmbeddingDomainStats>(), 0, null, null, "Active") }));
         var sut = new StatisticsService(query);
         var global = await sut.GetGlobalStatisticsAsync();
         global.RepositoryCount.Should().Be(1);

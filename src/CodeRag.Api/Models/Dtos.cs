@@ -54,6 +54,8 @@ public sealed record RepositoryDto(
     string? LastIndexAt,
     string? LastError);
 
+public sealed record EmbeddingDomainStatsDto(string Domain, int Indexed, int Pending);
+
 public sealed record RepositoryStatisticsDto(
     Guid RepositoryId,
     string Name,
@@ -61,6 +63,8 @@ public sealed record RepositoryStatisticsDto(
     int SymbolCount,
     int ChunkCount,
     int VectorCount,
+    IReadOnlyList<EmbeddingDomainStatsDto> EmbeddingStats,
+    int EmbeddingsFailed,
     string? IndexedCommit,
     string? CurrentCommit,
     string Status);
@@ -71,6 +75,8 @@ public sealed record GlobalStatisticsDto(
     int SymbolCount,
     int ChunkCount,
     int JobCount,
+    IReadOnlyList<EmbeddingDomainStatsDto> EmbeddingStats,
+    int EmbeddingsFailed,
     IReadOnlyList<RepositoryStatisticsDto> Repositories);
 
 public sealed record JobDto(
@@ -93,13 +99,32 @@ public sealed record HealthDetailsDto(
     string Status,
     HealthComponentDto Database,
     HealthComponentDto Vector,
+    IReadOnlyList<VectorDomainHealthDto> VectorDomains,
     HealthComponentDto Embedding,
+    IReadOnlyList<EmbeddingDomainHealthDto> EmbeddingDomains,
     HealthComponentDto Indexer,
     HealthComponentDto Storage,
     IReadOnlyList<string> Warnings,
     VectorFreshnessDto? VectorIndex = null);
 
 public sealed record HealthComponentDto(string Status, string? Message, double? LatencyMs);
+
+/// <summary>Health of one vector space (code / text) — store reachability + index freshness.</summary>
+public sealed record VectorDomainHealthDto(
+    string Domain,
+    string Status,
+    string? Message,
+    double? LatencyMs,
+    VectorFreshnessDto? Freshness);
+
+/// <summary>Health of one embedding endpoint (code / text) — probe + configured model.</summary>
+public sealed record EmbeddingDomainHealthDto(
+    string Domain,
+    string Status,
+    string? Message,
+    double? LatencyMs,
+    string? Model,
+    int Dimensions);
 
 /// <summary>
 /// Freshness of the stored vector index relative to the currently configured embedding model.

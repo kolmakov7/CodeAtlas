@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
+using CodeRag.Domain.Enums;
+using CodeRag.Embeddings;
 using CodeRag.Search;
 using CodeRag.Search.Models;
 using Microsoft.Extensions.Logging;
@@ -12,14 +14,40 @@ namespace CodeRag.Mcp.Tools;
 public sealed class CodeSearchTools : IMcpToolHandler
 {
     private readonly ISearchService _search;
+    private readonly IEmbeddingProviderFactory _embeddings;
     private readonly ILogger<CodeSearchTools> _logger;
     private const int PreviewLimit = 20;
 
-    public CodeSearchTools(ISearchService search, ILogger<CodeSearchTools> logger)
+    public CodeSearchTools(ISearchService search, IEmbeddingProviderFactory embeddings, ILogger<CodeSearchTools> logger)
     {
         _search = search;
+        _embeddings = embeddings;
         _logger = logger;
     }
+
+    [McpServerTool, Description("Report the two independent embedding domains (code + text): configured model and vector dimensions for each endpoint.")]
+    public string EmbeddingStatus()
+    {
+        _logger.LogInformation("MCP embedding_status");
+        var sb = new StringBuilder();
+        sb.AppendLine("Embedding domains:");
+        foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
+        {
+            try
+            {
+                var provider = _embeddings.Get(domain);
+                sb.AppendLine($"- {domain.ToText()}: model={provider.Model} dimensions={provider.Dimensions}");
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"- {domain.ToText()}: unavailable ({ex.Message})");
+            }
+        }
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "embedding_status"), Description("Alias for EmbeddingStatus")]
+    public string EmbeddingStatusAlias() => EmbeddingStatus();
 
     [McpServerTool, Description("Code search (Hybrid by default: semantic + FullText + exact; Semantic = vectors only; FullText = lexical only). Returns compact previews ≤limit lines. Use to find code by query.")]
     public async Task<string> SearchCodeAsync(

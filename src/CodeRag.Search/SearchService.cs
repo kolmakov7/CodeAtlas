@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using CodeRag.Domain.Enums;
 using CodeRag.Embeddings;
 using CodeRag.Infrastructure.Persistence;
 using CodeRag.Infrastructure.Search;
@@ -15,8 +16,8 @@ public sealed class SearchService : ISearchService
 {
     private readonly SqliteConnectionFactory _factory;
     private readonly FtsHelper _fts;
-    private readonly IVectorStore _vectorStore;
-    private readonly IEmbeddingProvider? _embeddingProvider;
+    private readonly IVectorStoreFactory _vectorStoreFactory;
+    private readonly IEmbeddingProviderFactory _embeddingFactory;
     private readonly ILogger<SearchService> _logger;
     private readonly IOptionsMonitor<SearchOptions> _optionsMonitor;
     private SearchOptions Opts => _optionsMonitor.CurrentValue;
@@ -24,18 +25,17 @@ public sealed class SearchService : ISearchService
     public SearchService(
         SqliteConnectionFactory factory,
         FtsHelper fts,
-        IVectorStore vectorStore,
+        IVectorStoreFactory vectorStoreFactory,
+        IEmbeddingProviderFactory embeddingFactory,
         ILogger<SearchService> logger,
-        IOptionsMonitor<SearchOptions> options,
-        IServiceProvider serviceProvider)
+        IOptionsMonitor<SearchOptions> options)
     {
         _factory = factory;
         _fts = fts;
-        _vectorStore = vectorStore;
+        _vectorStoreFactory = vectorStoreFactory;
+        _embeddingFactory = embeddingFactory;
         _logger = logger;
         _optionsMonitor = options;
-        // Optional embedding provider (graceful degradation)
-        _embeddingProvider = serviceProvider.GetService(typeof(IEmbeddingProvider)) as IEmbeddingProvider;
     }
 
     public async Task<SearchResult> SearchCodeAsync(SearchRequest req, CancellationToken ct = default)
@@ -242,7 +242,8 @@ public sealed class SearchService : ISearchService
         var scored = new List<(CandidateAccumulator acc, ChunkInfo info, double finalScore)>(filtered.Count);
         foreach (var (acc, info) in filtered)
         {
-            // Semantic-only mode: rank by absolute cosine similarity (0..1) — meaningful, comparable scores
+            // Semantic-only mode: rank by the merged semantic score (0..1). This is the per-domain
+            // min-max-normalized cosine similarity from the code/text vector spaces (see GetVectorCandidatesAsync).
             if (mode == SearchMode.Semantic)
             {
                 var semScore = Math.Clamp(acc.VectorScore ?? 0.0, 0.0, 1.0);
@@ -586,49 +587,83 @@ public sealed class SearchService : ISearchService
 
     private async Task<IReadOnlyList<ScoredChunk>> GetVectorCandidatesAsync(string query, Guid[]? repoIds, List<string> warnings, CancellationToken ct)
     {
-        if (_embeddingProvider is null)
+        // ДВА независимых семантических пространства: code и text. Запрос эмбеддится
+        // каждой моделью отдельно, ищем в своём store, нормализуем распределение скор
+        // каждого домена в [0,1] и сливаем в один семантический сигнал.
+        var merged = new List<ScoredChunk>();
+        var filter = (repoIds != null && repoIds.Length > 0) ? new VectorSearchFilter(repoIds) : VectorSearchFilter.Empty;
+        var anySucceeded = false;
+
+        foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
         {
-            warnings.Add("embeddings unavailable");
-            _logger.LogWarning("Vector branch skipped: embeddings unavailable (no provider registered) query={Query}", query);
-            return Array.Empty<ScoredChunk>();
+            IEmbeddingProvider provider;
+            IVectorStore store;
+            try
+            {
+                provider = _embeddingFactory.Get(domain);
+                store = _vectorStoreFactory.Get(domain);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Vector branch skipped for {Domain}: factory unavailable query={Query}", domain.ToText(), query);
+                continue;
+            }
+
+            float[] queryVector;
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+                var vectors = await provider.EmbedAsync(new[] { query }, timeoutCts.Token).ConfigureAwait(false);
+                if (vectors.Length == 0 || vectors[0] is null || vectors[0].Length == 0)
+                    throw new InvalidOperationException("Empty embedding result");
+                queryVector = vectors[0];
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogWarning("Vector branch timeout for {Domain} query={Query}", domain.ToText(), query);
+                continue;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Vector branch embeddings failed for {Domain} query={Query}", domain.ToText(), query);
+                continue;
+            }
+
+            IReadOnlyList<ScoredChunk> results;
+            try
+            {
+                results = await store.SearchAsync(queryVector, Opts.VectorTopK, filter, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Vector store search failed for {Domain} query={Query}", domain.ToText(), query);
+                continue;
+            }
+
+            if (results.Count == 0) continue;
+            anySucceeded = true;
+
+            // Мин-макс нормализация ВРЯДУ с распределением скор этого домена, чтобы
+            // две разные модели давали сопоставимые значения до слияния.
+            var scores = results.Select(r => r.Score).ToArray();
+            var min = scores.Min();
+            var max = scores.Max();
+            var range = max - min;
+            foreach (var r in results)
+            {
+                var norm = range <= 1e-9 ? 1.0 : (r.Score - min) / range;
+                merged.Add(new ScoredChunk(r.ChunkId, (double)Math.Clamp(norm, 0.0, 1.0), r.Distance));
+            }
         }
 
-        float[] queryVector;
-        try
-        {
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
-            var combinedCt = timeoutCts.Token;
-            var vectors = await _embeddingProvider.EmbedAsync(new[] { query }, combinedCt).ConfigureAwait(false);
-            if (vectors.Length == 0 || vectors[0] is null || vectors[0].Length == 0)
-                throw new InvalidOperationException("Empty embedding result");
-            queryVector = vectors[0];
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        if (!anySucceeded)
         {
             warnings.Add("embeddings unavailable");
-            _logger.LogWarning("Vector branch timeout query={Query}", query);
-            return Array.Empty<ScoredChunk>();
-        }
-        catch (Exception ex)
-        {
-            warnings.Add("embeddings unavailable");
-            _logger.LogWarning(ex, "Vector branch embeddings failed query={Query}", query);
-            return Array.Empty<ScoredChunk>();
+            _logger.LogWarning("Vector branch skipped: no domain produced candidates (embeddings unavailable) query={Query}", query);
         }
 
-        try
-        {
-            var filter = (repoIds != null && repoIds.Length > 0) ? new VectorSearchFilter(repoIds) : VectorSearchFilter.Empty;
-            var results = await _vectorStore.SearchAsync(queryVector, Opts.VectorTopK, filter, ct).ConfigureAwait(false);
-            return results;
-        }
-        catch (Exception ex)
-        {
-            warnings.Add("embeddings unavailable");
-            _logger.LogWarning(ex, "Vector store search failed query={Query}", query);
-            return Array.Empty<ScoredChunk>();
-        }
+        return merged;
     }
 
     private async Task<List<Guid>> GetStructuralCandidatesAsync(string query, List<Guid> exactSymbolIds, Guid[]? repoIds, string[]? languages, CancellationToken ct)

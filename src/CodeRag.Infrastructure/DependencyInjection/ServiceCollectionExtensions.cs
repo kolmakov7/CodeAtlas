@@ -1,3 +1,4 @@
+using CodeRag.Domain.Enums;
 using CodeRag.Domain.Ports;
 using CodeRag.Infrastructure.Persistence;
 using CodeRag.Infrastructure.Persistence.Repositories;
@@ -63,18 +64,26 @@ public static class ServiceCollectionExtensions
         // FTS
         services.AddSingleton<FtsHelper>();
 
-        // Vector store: SqliteVec with InMemory fallback
-        services.AddSingleton<IVectorStore>(sp =>
+        // Vector stores: one isolated store per domain (code / text) with InMemory fallback.
+        // Per-domain dim sources are looked up by name (registered by AddEmbeddings); when absent
+        // (embeddings not configured) a no-op source is used so the store defers table creation.
+        services.AddSingleton<IVectorStoreFactory>(sp =>
         {
             var factory = sp.GetRequiredService<SqliteConnectionFactory>();
             var logger = sp.GetRequiredService<ILogger<SqliteVecVectorStore>>();
             var fallbackLogger = sp.GetRequiredService<ILogger<InMemoryVectorStore>>();
-            // IVectorDimSource is registered by AddEmbeddings (called after AddInfrastructure).
-            // If not yet registered (embeddings not configured), create a no-op source.
-            var dimSource = sp.GetService<IVectorDimSource>()
-                ?? new CodeRag.Infrastructure.Vectors.NullDimSource();
-            return new SqliteVecVectorStore(factory, dimSource, logger, fallbackLogger);
+
+            var dimProvider = sp.GetService<IVectorDimSourceProvider>();
+            var codeDim = dimProvider?.Get(EmbeddingDomain.Code) ?? sp.GetService<IVectorDimSource>() ?? new CodeRag.Infrastructure.Vectors.NullDimSource();
+            var textDim = dimProvider?.Get(EmbeddingDomain.Text) ?? new CodeRag.Infrastructure.Vectors.NullDimSource();
+
+            var codeStore = new SqliteVecVectorStore(factory, codeDim, EmbeddingDomain.Code, logger, fallbackLogger);
+            var textStore = new SqliteVecVectorStore(factory, textDim, EmbeddingDomain.Text, logger, fallbackLogger);
+            return new DefaultVectorStoreFactory(codeStore, textStore);
         });
+
+        // Back-compat: the single IVectorStore resolves to the Code store.
+        services.AddSingleton<IVectorStore>(sp => sp.GetRequiredService<IVectorStoreFactory>().Code);
 
         // Also expose InMemory directly for diagnostics (optional)
         services.AddSingleton<InMemoryVectorStore>(sp =>

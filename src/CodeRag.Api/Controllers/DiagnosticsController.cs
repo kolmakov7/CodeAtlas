@@ -40,7 +40,29 @@ public sealed class DiagnosticsController : ControllerBase
                 count = (int?)null,
                 sizeBytes = (long?)null
             },
+            vectorDomains = h.VectorDomains.Select(d => new
+            {
+                domain = d.Domain,
+                status = MapStatus(d.Status),
+                detail = d.Message,
+                latencyMs = d.LatencyMs,
+                stale = d.Freshness?.Stale ?? false,
+                reason = d.Freshness?.Reason,
+                stored = d.Freshness?.Stored.Select(m => new { model = m.Model, dim = m.Dim, contextLength = m.ContextLength, chunkCount = m.ChunkCount }).ToList(),
+                currentModel = d.Freshness?.CurrentModel,
+                currentDim = d.Freshness?.CurrentDim,
+                currentContextLength = d.Freshness?.CurrentContextLength
+            }).ToList(),
             embeddingApi = new { status = MapStatus(h.Embedding.Status), detail = h.Embedding.Message, latencyMs = h.Embedding.LatencyMs, model = h.VectorIndex?.CurrentModel },
+            embeddingDomains = h.EmbeddingDomains.Select(d => new
+            {
+                domain = d.Domain,
+                status = MapStatus(d.Status),
+                detail = d.Message,
+                latencyMs = d.LatencyMs,
+                model = d.Model,
+                dimensions = d.Dimensions
+            }).ToList(),
             indexer = new { status = MapStatus(h.Indexer.Status), detail = h.Indexer.Message, queueDepth = (int?)null },
             storage = new { status = MapStatus(h.Storage.Status), detail = h.Storage.Message, freeBytes = (long?)null }
         };

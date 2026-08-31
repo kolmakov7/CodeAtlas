@@ -1,4 +1,5 @@
 using CodeRag.Domain.Entities;
+using CodeRag.Domain.Enums;
 using CodeRag.Domain.Ports;
 using Dapper;
 
@@ -36,13 +37,14 @@ public sealed class ChunkStore : CodeRag.Domain.Ports.IChunkStore, IChunkStore
     private static async Task ExecUpsertAsync(Microsoft.Data.Sqlite.SqliteConnection conn, Microsoft.Data.Sqlite.SqliteTransaction? tx, Chunk c)
     {
         const string sql = @"
-INSERT INTO chunks(id, repository_id, file_id, symbol_id, language, start_line, end_line, content_hash, source, embedding_model, embedding_config_hash, embedded_at)
-VALUES (@id,@repo,@file,@sym,@lang,@sl,@el,@hash,@src,@model,@cfg,@at)
+INSERT INTO chunks(id, repository_id, file_id, symbol_id, language, start_line, end_line, content_hash, source, embedding_model, embedding_config_hash, embedded_at, embedding_domain)
+VALUES (@id,@repo,@file,@sym,@lang,@sl,@el,@hash,@src,@model,@cfg,@at,@domain)
 ON CONFLICT(id) DO UPDATE SET
   repository_id=excluded.repository_id, file_id=excluded.file_id, symbol_id=excluded.symbol_id,
   language=excluded.language, start_line=excluded.start_line, end_line=excluded.end_line,
   content_hash=excluded.content_hash, source=excluded.source, embedding_model=excluded.embedding_model,
-  embedding_config_hash=excluded.embedding_config_hash, embedded_at=excluded.embedded_at;";
+  embedding_config_hash=excluded.embedding_config_hash, embedded_at=excluded.embedded_at,
+  embedding_domain=excluded.embedding_domain;";
 
         await conn.ExecuteAsync(sql, new
         {
@@ -57,7 +59,8 @@ ON CONFLICT(id) DO UPDATE SET
             src = c.Source,
             model = c.EmbeddingModel,
             cfg = c.EmbeddingConfigHash,
-            at = c.EmbeddedAt?.ToString("o")
+            at = c.EmbeddedAt?.ToString("o"),
+            domain = c.EmbeddingDomain.ToText()
         }, transaction: tx).ConfigureAwait(false);
     }
 
@@ -121,6 +124,7 @@ ON CONFLICT(id) DO UPDATE SET
             r.end_line,
             r.embedding_model,
             r.embedding_config_hash,
+            r.embedding_domain,
             string.IsNullOrWhiteSpace(r.embedded_at) ? null : DateTimeOffset.Parse(r.embedded_at));
     }
 
@@ -138,5 +142,6 @@ ON CONFLICT(id) DO UPDATE SET
         public string? embedding_model { get; set; }
         public string? embedding_config_hash { get; set; }
         public string? embedded_at { get; set; }
+        public string? embedding_domain { get; set; }
     }
 }

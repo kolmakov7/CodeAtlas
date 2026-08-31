@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using CodeRag.Domain.Enums;
 using CodeRag.Domain.Exceptions;
 
 namespace CodeRag.Domain.Entities;
@@ -27,7 +28,8 @@ public sealed class Chunk
     public string? EmbeddingModel { get; private set; }
     public string? EmbeddingConfigHash { get; private set; }
     public DateTimeOffset? EmbeddedAt { get; private set; }
-    public string EmbeddingDomain { get; private set; } = "code"; // code / text / mixed
+    /// <summary>Which embedding space this chunk belongs to (code vs text). Persisted as "code"/"text".</summary>
+    public EmbeddingDomain EmbeddingDomain { get; private set; } = EmbeddingDomain.Code;
 
     private Chunk(Guid id, Guid repositoryId, Guid fileId, string source, string contentHash)
     {
@@ -43,7 +45,7 @@ public sealed class Chunk
         Guid? symbolId = null, string? language = null,
         int? startLine = null, int? endLine = null,
         string? embeddingModel = null, string? embeddingConfigHash = null,
-        string? embeddingDomain = null, DateTimeOffset? embeddedAt = null)
+        EmbeddingDomain? domain = null, DateTimeOffset? embeddedAt = null)
     {
         if (id == Guid.Empty) throw new DomainValidationException("Chunk Id must not be empty.");
         if (repositoryId == Guid.Empty) throw new DomainValidationException("RepositoryId must not be empty.");
@@ -55,8 +57,9 @@ public sealed class Chunk
             throw new DomainValidationException("EndLine must be >= StartLine.");
 
         var hash = ComputeHash(source);
+        var resolved = domain ?? DetectDomain(language, source);
 
-        var chunk = new Chunk(id, repositoryId, fileId, source, hash)
+        return new Chunk(id, repositoryId, fileId, source, hash)
         {
             SymbolId = symbolId,
             Language = string.IsNullOrWhiteSpace(language) ? null : language.Trim(),
@@ -64,36 +67,28 @@ public sealed class Chunk
             EndLine = endLine,
             EmbeddingModel = string.IsNullOrWhiteSpace(embeddingModel) ? null : embeddingModel.Trim(),
             EmbeddingConfigHash = string.IsNullOrWhiteSpace(embeddingConfigHash) ? null : embeddingConfigHash.Trim(),
-            EmbeddingDomain = string.IsNullOrWhiteSpace(embeddingDomain) ? "code" : embeddingDomain.Trim().ToLowerInvariant(),
+            EmbeddingDomain = resolved,
             EmbeddedAt = embeddedAt
         };
-
-        // Default domain: code for .cs, text for .md etc.
-        if (string.IsNullOrWhiteSpace(chunk.EmbeddingDomain))
-        {
-            chunk.EmbeddingDomain = DetectDomain(language, source);
-        }
-
-        return chunk;
     }
 
-    private static string DetectDomain(string? language, string source)
+    /// <summary>Lightweight fallback classifier (path-based classification lives in the Indexer's ContentClassifier).</summary>
+    private static EmbeddingDomain DetectDomain(string? language, string source)
     {
-        // Simple heuristics: markdown/docs → Text, code extensions → Code
+        // Simple heuristics: markdown/docs → Text, everything else (source code, comments) → Code.
         if (language != null)
         {
             var lower = language.ToLowerInvariant();
-            if (lower == "markdown" || lower == "md" || lower == "txt")
-                return "text";
+            if (lower is "markdown" or "md" or "txt" or "rst")
+                return EmbeddingDomain.Text;
         }
-        // Check source for documentation patterns
         if (source != null)
         {
             var lowerSource = source.ToLowerInvariant();
             if (lowerSource.StartsWith("readme") || lowerSource.StartsWith("documentation"))
-                return "text";
+                return EmbeddingDomain.Text;
         }
-        return "code"; // default
+        return EmbeddingDomain.Code; // default
     }
 
     public static Chunk Rehydrate(
@@ -110,7 +105,7 @@ public sealed class Chunk
             EndLine = endLine,
             EmbeddingModel = embeddingModel,
             EmbeddingConfigHash = embeddingConfigHash,
-            EmbeddingDomain = string.IsNullOrWhiteSpace(embeddingDomain) ? "code" : embeddingDomain.Trim().ToLowerInvariant(),
+            EmbeddingDomain = embeddingDomain.ToDomain(),
             EmbeddedAt = embeddedAt
         };
         return chunk;

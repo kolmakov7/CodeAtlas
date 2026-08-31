@@ -21,9 +21,9 @@ public sealed class IndexingService
     private readonly IFileStore _fileStore;
     private readonly IChunkStore _chunkStore;
     private readonly ISymbolStore _symbolStore;
-    private readonly IVectorStore _vectorStore;
+    private readonly IVectorStoreFactory _vectorStoreFactory;
     private readonly FtsHelper _fts;
-    private readonly IEmbeddingProvider _embeddings;
+    private readonly IEmbeddingProviderFactory _embeddingsFactory;
     private readonly IEnumerable<ICodeAnalyzer> _analyzers;
     private readonly IGitService _git;
     private readonly IndexingJobStore _jobStore;
@@ -36,9 +36,9 @@ public sealed class IndexingService
         IFileStore fileStore,
         IChunkStore chunkStore,
         ISymbolStore symbolStore,
-        IVectorStore vectorStore,
+        IVectorStoreFactory vectorStoreFactory,
         FtsHelper fts,
-        IEmbeddingProvider embeddings,
+        IEmbeddingProviderFactory embeddingsFactory,
         IEnumerable<ICodeAnalyzer> analyzers,
         IGitService git,
         IndexingJobStore jobStore,
@@ -50,9 +50,9 @@ public sealed class IndexingService
         _fileStore = fileStore;
         _chunkStore = chunkStore;
         _symbolStore = symbolStore;
-        _vectorStore = vectorStore;
+        _vectorStoreFactory = vectorStoreFactory;
         _fts = fts;
-        _embeddings = embeddings;
+        _embeddingsFactory = embeddingsFactory;
         _analyzers = analyzers;
         _git = git;
         _jobStore = jobStore;
@@ -67,13 +67,14 @@ public sealed class IndexingService
     /// window. Always applied — oversized chunks are split even before the context length is detected,
     /// so a whole class/method is never embedded as one diluted vector.
     /// </summary>
-    private (int MaxChars, int OverlapChars) GetChunkBudget()
+    private (int MaxChars, int OverlapChars) GetChunkBudget(EmbeddingDomain domain)
     {
         var o = _indexerOptions.CurrentValue;
         var maxChars = o.MaxChunkChars;
-        if (_embeddings.ContextLength is > 0)
+        // Cap the chunk budget by THIS domain's model context length so a chunk never overflows that model's window.
+        if (_embeddingsFactory.Get(domain).ContextLength is > 0)
         {
-            var contextChars = (int)Math.Max(256, _embeddings.ContextLength.Value * o.CharsPerToken);
+            var contextChars = (int)Math.Max(256, _embeddingsFactory.Get(domain).ContextLength.Value * o.CharsPerToken);
             maxChars = Math.Min(maxChars, contextChars);
         }
         maxChars = Math.Max(256, maxChars);
@@ -246,7 +247,6 @@ public sealed class IndexingService
         var processed = 0;
         var lastProgressSave = DateTime.UtcNow;
         var pendingChunks = new List<Domain.Entities.Chunk>();
-        var pendingTexts = new List<string>();
 
         foreach (var cf in diff.ChangedFiles)
         {
@@ -262,7 +262,7 @@ public sealed class IndexingService
                 if (cf.Kind == GitChangeKind.Renamed && !string.IsNullOrWhiteSpace(cf.OldPath))
                     await DeleteFileAsync(repo, cf.OldPath!, ct).ConfigureAwait(false);
 
-                await IndexFileAsync(repo, cf.Path, pendingChunks, pendingTexts, ct).ConfigureAwait(false);
+                await IndexFileAsync(repo, cf.Path, pendingChunks, ct).ConfigureAwait(false);
             }
 
             processed++;
@@ -278,10 +278,14 @@ public sealed class IndexingService
             }
         }
 
-        // Embedding батчами (indexing.md §5) с кэшем по ContentHash+Model+ConfigHash
+        // Embedding батчами (indexing.md §5) с кэшем по ContentHash+Model+ConfigHash.
+        // Code и text уходят в СВОИ модели/векторные пространства — группируем чанки по домену.
         if (pendingChunks.Count > 0)
         {
-            await EmbedAndUpsertAsync(pendingChunks, pendingTexts, ct).ConfigureAwait(false);
+            foreach (var group in pendingChunks.GroupBy(c => c.EmbeddingDomain))
+            {
+                await EmbedAndUpsertAsync(group.ToList(), ct).ConfigureAwait(false);
+            }
         }
 
         await CommitIndexedAsync(repo, to, ct).ConfigureAwait(false);
@@ -301,14 +305,16 @@ public sealed class IndexingService
         if (chunkIds.Count > 0)
         {
             await _fts.DeleteByChunkIdsAsync(chunkIds, ct).ConfigureAwait(false);
-            try { await _vectorStore.DeleteByChunkIdsAsync(chunkIds, ct).ConfigureAwait(false); } catch (Exception ex) { _logger.LogWarning(ex, "Vector delete failed for file {Path}", filePath); }
+            // Each chunk lives in exactly one vector space; deleting from both stores is a safe no-op for the other.
+            try { await _vectorStoreFactory.Code.DeleteByChunkIdsAsync(chunkIds, ct).ConfigureAwait(false); } catch (Exception ex) { _logger.LogWarning(ex, "Vector delete failed for file {Path}", filePath); }
+            try { await _vectorStoreFactory.Text.DeleteByChunkIdsAsync(chunkIds, ct).ConfigureAwait(false); } catch (Exception ex) { _logger.LogWarning(ex, "Vector delete failed for file {Path}", filePath); }
         }
 
         await _fileStore.DeleteAsync(file.Id, ct).ConfigureAwait(false);
         _logger.LogDebug("Deleted file {Path} ({Chunks} chunks)", filePath, chunkIds.Count);
     }
 
-    private async Task IndexFileAsync(Domain.Entities.Repository repo, string filePath, List<Domain.Entities.Chunk> pendingChunks, List<string> pendingTexts, CancellationToken ct)
+    private async Task IndexFileAsync(Domain.Entities.Repository repo, string filePath, List<Domain.Entities.Chunk> pendingChunks, CancellationToken ct)
     {
         var fullPath = Path.Combine(repo.LocalPath.Value, filePath);
         string content;
@@ -358,6 +364,9 @@ public sealed class IndexingService
         var language = CodeRag.Analyzers.Abstractions.LanguageDetector.Detect(filePath, content);
         var analyzer = _analyzers.FirstOrDefault(a => a.CanAnalyze(filePath));
 
+        // Классифицировать файл: code (исходник) vs text (markdown/docs/prose) — выбор embedding-домена.
+        var domain = ContentClassifier.Classify(filePath, language);
+
         // Если файла уже был — удалить старые данные перед вставкой (diff vs DB)
         if (existing is not null)
         {
@@ -366,7 +375,8 @@ public sealed class IndexingService
             if (oldIds.Count > 0)
             {
                 await _fts.DeleteByChunkIdsAsync(oldIds, ct).ConfigureAwait(false);
-                try { await _vectorStore.DeleteByChunkIdsAsync(oldIds, ct).ConfigureAwait(false); } catch { }
+                try { await _vectorStoreFactory.Code.DeleteByChunkIdsAsync(oldIds, ct).ConfigureAwait(false); } catch { }
+                try { await _vectorStoreFactory.Text.DeleteByChunkIdsAsync(oldIds, ct).ConfigureAwait(false); } catch { }
             }
             // Символы/реляции каскадно через удаление файла? Удаляем явно
             await _chunkStore.DeleteByFileAsync(existing.Id, ct).ConfigureAwait(false);
@@ -378,12 +388,12 @@ public sealed class IndexingService
         var fileEntry = Domain.Entities.FileEntry.Create(fileId, repo.Id, filePath, null, language, hash);
         await _fileStore.UpsertAsync(fileEntry, ct).ConfigureAwait(false);
 
-        var (budgetMaxChars, budgetOverlapChars) = GetChunkBudget();
+        var (budgetMaxChars, budgetOverlapChars) = GetChunkBudget(domain);
 
         if (analyzer is null)
         {
             // Fallback чанкинг: sliding window (indexing.md §6), sized from the model budget when known
-            var fallbackChunks = CreateFallbackChunks(repo.Id, fileId, filePath, language, content, budgetMaxChars, budgetOverlapChars);
+            var fallbackChunks = CreateFallbackChunks(repo.Id, fileId, filePath, language, domain, content, budgetMaxChars, budgetOverlapChars);
             foreach (var ch in fallbackChunks)
             {
                 await _chunkStore.UpsertAsync(ch, ct).ConfigureAwait(false);
@@ -391,7 +401,6 @@ public sealed class IndexingService
                 if (ShouldEmbed(ch))
                 {
                     pendingChunks.Add(ch);
-                    pendingTexts.Add(ch.Source);
                 }
             }
             return;
@@ -425,14 +434,14 @@ public sealed class IndexingService
                     {
                         chunksToStore.Add(Domain.Entities.Chunk.Create(
                             Guid.NewGuid(), repo.Id, fileId, slice.Text,
-                            symbolId: ac.SymbolId, language: language, startLine: slice.StartLine, endLine: slice.EndLine));
+                            symbolId: ac.SymbolId, language: language, startLine: slice.StartLine, endLine: slice.EndLine, domain: domain));
                     }
                 }
                 if (chunksToStore.Count == 0)
                 {
                     var domainChunk = Domain.Entities.Chunk.Create(
                         Guid.NewGuid(), repo.Id, fileId, ac.Source,
-                        language: language, startLine: ac.StartLine, endLine: ac.EndLine);
+                        language: language, startLine: ac.StartLine, endLine: ac.EndLine, domain: domain);
                     chunksToStore.Add(domainChunk);
                 }
 
@@ -446,7 +455,6 @@ public sealed class IndexingService
                     if (ShouldEmbed(domainChunk))
                     {
                         pendingChunks.Add(domainChunk);
-                        pendingTexts.Add(domainChunk.Source);
                     }
                 }
             }
@@ -463,7 +471,7 @@ public sealed class IndexingService
             _logger.LogWarning(ex, "Analyzer failed for {Path} lang={Lang}", filePath, language);
             await LogIndexingErrorAsync(repo.Id, filePath, ex.Message, ct).ConfigureAwait(false);
             // Fallback чанки при ошибке парсера (indexing.md §7)
-            var fallbackChunks = CreateFallbackChunks(repo.Id, fileId, filePath, language, content, budgetMaxChars, budgetOverlapChars);
+            var fallbackChunks = CreateFallbackChunks(repo.Id, fileId, filePath, language, domain, content, budgetMaxChars, budgetOverlapChars);
             foreach (var ch in fallbackChunks)
             {
                 await _chunkStore.UpsertAsync(ch, ct).ConfigureAwait(false);
@@ -471,7 +479,6 @@ public sealed class IndexingService
                 if (ShouldEmbed(ch))
                 {
                     pendingChunks.Add(ch);
-                    pendingTexts.Add(ch.Source);
                 }
             }
         }
@@ -479,9 +486,10 @@ public sealed class IndexingService
 
     private bool ShouldEmbed(Domain.Entities.Chunk ch)
     {
-        // indexing.md §5: ContentHash не менялся AND Model/ConfigHash не менялся => skip
-        // Chunk.NeedsEmbedding уже отражает это
-        if (!ch.NeedsEmbedding(_embeddings.Model, _embeddings.ConfigHash)) return false;
+        // indexing.md §5: ContentHash не менялся AND Model/ConfigHash не менялся => skip.
+        // Сравниваем с моделью СВОЕГО домена чанка (code / text имеют разные модели).
+        var provider = _embeddingsFactory.Get(ch.EmbeddingDomain);
+        if (!ch.NeedsEmbedding(provider.Model, provider.ConfigHash)) return false;
         // Near-empty chunks produce noise vectors — keep them for FTS/structural, skip embedding.
         var minChars = _indexerOptions.CurrentValue.MinEmbeddingChars;
         return ch.Source.Length >= minChars;
@@ -501,19 +509,25 @@ public sealed class IndexingService
         return $"{comment} [continued] {filePath}{sym}";
     }
 
-    private async Task EmbedAndUpsertAsync(List<Domain.Entities.Chunk> chunks, List<string> texts, CancellationToken ct)
+    private async Task EmbedAndUpsertAsync(List<Domain.Entities.Chunk> chunks, CancellationToken ct)
     {
         if (chunks.Count == 0) return;
-        _logger.LogInformation("Embedding {Count} chunks model={Model} config={Cfg}", chunks.Count, _embeddings.Model, _embeddings.ConfigHash);
+        // Все чанки в батче одного домена (группировка вызывающего кода) — берём модель/хранилище домена.
+        var domain = chunks[0].EmbeddingDomain;
+        var provider = _embeddingsFactory.Get(domain);
+        var store = _vectorStoreFactory.Get(domain);
+        var texts = chunks.Select(c => c.Source).ToList();
+
+        _logger.LogInformation("Embedding {Count} {Domain} chunks model={Model} config={Cfg}", chunks.Count, domain.ToText(), provider.Model, provider.ConfigHash);
 
         float[][] vectors;
         try
         {
-            vectors = await _embeddings.EmbedAsync(texts, ct).ConfigureAwait(false);
+            vectors = await provider.EmbedAsync(texts, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Embedding failed for {Count} chunks, FTS still available (indexing.md §5)", chunks.Count);
+            _logger.LogWarning(ex, "Embedding failed for {Count} {Domain} chunks, FTS still available (indexing.md §5)", chunks.Count, domain.ToText());
             // Чанки остаются без вектора, FTS/structural поиск работает
             return;
         }
@@ -524,19 +538,19 @@ public sealed class IndexingService
             var ch = chunks[i];
             var vec = vectors[i];
             // Use actual vector length (auto-detected) for Dim metadata; record model context length for freshness checks
-            entries.Add(new VectorEntry(ch.Id, ch.RepositoryId, vec, _embeddings.Model, vec.Length, _embeddings.ContextLength));
+            entries.Add(new VectorEntry(ch.Id, ch.RepositoryId, vec, provider.Model, vec.Length, provider.ContextLength));
 
-            ch.MarkEmbedded(_embeddings.Model, _embeddings.ConfigHash);
+            ch.MarkEmbedded(provider.Model, provider.ConfigHash);
             await _chunkStore.UpsertAsync(ch, ct).ConfigureAwait(false);
         }
 
         try
         {
-            await _vectorStore.UpsertAsync(entries, ct).ConfigureAwait(false);
+            await store.UpsertAsync(entries, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Vector upsert failed for {Count} chunks", entries.Count);
+            _logger.LogWarning(ex, "Vector upsert failed for {Count} {Domain} chunks", entries.Count, domain.ToText());
         }
     }
 
@@ -547,25 +561,33 @@ public sealed class IndexingService
                    ?? throw new InvalidOperationException($"Repository {job.RepositoryId} not found");
 
         var allChunks = await _chunkStore.GetByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
-        var toReembed = allChunks.Where(c => c.NeedsEmbedding(_embeddings.Model, _embeddings.ConfigHash) && !string.IsNullOrWhiteSpace(c.Source)).ToList();
-        var skippedEmpty = allChunks.Count(c => c.NeedsEmbedding(_embeddings.Model, _embeddings.ConfigHash) && string.IsNullOrWhiteSpace(c.Source));
 
-        _logger.LogInformation("Embedding job {JobId}: {Total} chunks, {Need} need re-embed (model {Old}->{New}, {Skipped} skipped empty)", job.Id, allChunks.Count, toReembed.Count, allChunks.FirstOrDefault()?.EmbeddingModel, _embeddings.Model, skippedEmpty);
+        // Разбираем по доменам: каждый домен сравнивается со СВОЕЙ моделью и переэмбеддится своим провайдером.
+        var groups = allChunks.GroupBy(c => c.EmbeddingDomain).ToList();
+        var total = groups.Sum(g => g.Count(c => c.NeedsEmbedding(_embeddingsFactory.Get(g.Key).Model, _embeddingsFactory.Get(g.Key).ConfigHash) && !string.IsNullOrWhiteSpace(c.Source)));
+        var activeDomains = groups.Count(g => g.Any(c => c.NeedsEmbedding(_embeddingsFactory.Get(g.Key).Model, _embeddingsFactory.Get(g.Key).ConfigHash) && !string.IsNullOrWhiteSpace(c.Source)));
 
-        var total = toReembed.Count;
+        _logger.LogInformation("Embedding job {JobId}: {Total} chunks total, need re-embed in {Domains} domain(s)", job.Id, allChunks.Count, activeDomains);
+
         if (total == 0) return;
 
-        var batchSize = 64;
-        for (int i = 0; i < toReembed.Count; i += batchSize)
+        const int batchSize = 64;
+        var done = 0;
+        foreach (var g in groups)
         {
-            ct.ThrowIfCancellationRequested();
-            var batch = toReembed.Skip(i).Take(batchSize).ToList();
-            var texts = batch.Select(c => c.Source).ToList();
-            await EmbedAndUpsertAsync(batch, texts, ct).ConfigureAwait(false);
+            var provider = _embeddingsFactory.Get(g.Key);
+            var toReembed = g.Where(c => c.NeedsEmbedding(provider.Model, provider.ConfigHash) && !string.IsNullOrWhiteSpace(c.Source)).ToList();
+            for (int i = 0; i < toReembed.Count; i += batchSize)
+            {
+                ct.ThrowIfCancellationRequested();
+                var batch = toReembed.Skip(i).Take(batchSize).ToList();
+                await EmbedAndUpsertAsync(batch, ct).ConfigureAwait(false);
 
-            var p = (double)Math.Min(i + batchSize, total) / total;
-            job.UpdateProgress(p);
-            await _jobStore.UpdateProgressAsync(job.Id, p, ct).ConfigureAwait(false);
+                done += batch.Count;
+                var p = (double)done / total;
+                job.UpdateProgress(p);
+                await _jobStore.UpdateProgressAsync(job.Id, p, ct).ConfigureAwait(false);
+            }
         }
 
         job.UpdateProgress(1.0);
@@ -583,15 +605,20 @@ public sealed class IndexingService
         // Full clear via stores (no raw SQL here), then re-index all files (diff null..HEAD).
         // ResetIndexAsync drops a dim-mismatched vec table (stale index) — the only place a
         // vec table is ever dropped, and only on explicit user-confirmed rebuild.
-        try
+        // Code и text имеют свои модели/размерности — сбрасываем каждое пространство отдельно.
+        foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
         {
-            await _vectorStore.ResetIndexAsync(_embeddings.Dimensions, ct).ConfigureAwait(false);
+            try
+            {
+                await _vectorStoreFactory.Get(domain).ResetIndexAsync(_embeddingsFactory.Get(domain).Dimensions, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Rebuild: vec reset failed for {Domain} repo {Repo}", domain.ToText(), repo.Id);
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Rebuild: vec reset failed for repo {Repo}", repo.Id);
-        }
-        await _vectorStore.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
+        await _vectorStoreFactory.Code.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
+        await _vectorStoreFactory.Text.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
         await _fts.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
         await _chunkStore.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
         await _symbolStore.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
@@ -613,7 +640,7 @@ public sealed class IndexingService
         await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
     }
 
-    private static IReadOnlyList<Domain.Entities.Chunk> CreateFallbackChunks(Guid repoId, Guid fileId, string filePath, string? language, string content, int window = 3200, int overlap = 320)
+    private static IReadOnlyList<Domain.Entities.Chunk> CreateFallbackChunks(Guid repoId, Guid fileId, string filePath, string? language, EmbeddingDomain domain, string content, int window = 3200, int overlap = 320)
     {
         // Sliding window: 800 токенов (прим. 3200 символов) overlap 80 токенов (~320 символов) по умолчанию;
         // переопределяется бюджетом модели (n_ctx), когда известен.
@@ -632,7 +659,7 @@ public sealed class IndexingService
             var prefix = content[..pos];
             var startLine = prefix.Count(c => c == '\n') + 1;
             var endLine = startLine + slice.Count(c => c == '\n');
-            var ch = Domain.Entities.Chunk.Create(Guid.NewGuid(), repoId, fileId, slice, language: language, startLine: startLine, endLine: endLine);
+            var ch = Domain.Entities.Chunk.Create(Guid.NewGuid(), repoId, fileId, slice, language: language, startLine: startLine, endLine: endLine, domain: domain);
             list.Add(ch);
             if (pos + len >= content.Length) break;
         }
