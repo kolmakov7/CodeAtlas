@@ -10,8 +10,13 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="FluentAssertions" Version="8.2.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.11" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="NSubstitute" Version="5.3.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="SSH.NET" Version="2025.0.0" />
+    <PackageReference Include="Testcontainers" Version="3.10.0" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
   </ItemGroup>
@@ -22,7 +27,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\CodeRag.Domain\CodeRag.Domain.csproj" />
+    <ProjectReference Include="..\..\src\CodeRag.Application\CodeRag.Application.csproj" />
+    <ProjectReference Include="..\..\src\CodeRag.Infrastructure\CodeRag.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\CodeRag.Indexer\CodeRag.Indexer.csproj" />
+    <ProjectReference Include="..\..\src\CodeRag.Embeddings\CodeRag.Embeddings.csproj" />
     <ProjectReference Include="..\..\src\CodeRag.Analyzers.Abstractions\CodeRag.Analyzers.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\CodeRag.Api\CodeRag.Api.csproj" />
   </ItemGroup>
 
   <ItemGroup>

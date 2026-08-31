@@ -48,11 +48,11 @@ export default function RepositoryDashboard() {
       </div>
 
       <div className="grid grid-5" style={{ marginTop: 16 }}>
-        <StatCard label="Files" value={s?.files ?? "—"} />
-        <StatCard label="Symbols" value={s?.symbols ?? "—"} />
-        <StatCard label="Chunks" value={s?.chunks ?? "—"} />
-        <StatCard label="Relations" value={s?.relations ?? "—"} />
-        <StatCard label="Embeddings" value={s ? `${s.embeddingsIndexed}/${s.embeddingsIndexed + s.embeddingsPending + s.embeddingsFailed}` : "—"} sub={s ? `pending ${s.embeddingsPending}` : undefined} />
+        <StatCard label="Files" value={s?.fileCount ?? "—"} />
+        <StatCard label="Symbols" value={s?.symbolCount ?? "—"} />
+        <StatCard label="Chunks" value={s?.chunkCount ?? "—"} />
+        <StatCard label="Relations" value={"—"} />
+        <StatCard label="Embeddings" value={s ? `${s.vectorCount}/${s.chunkCount}` : "—"} sub={s ? `vectors / chunks` : undefined} />
       </div>
 
       {s?.languageBreakdown && Object.keys(s.languageBreakdown).length > 0 && (

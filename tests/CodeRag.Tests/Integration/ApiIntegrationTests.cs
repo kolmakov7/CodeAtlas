@@ -11,16 +11,23 @@ namespace CodeRag.Tests.Integration;
 /// SQLite is file-based and doesn't need a container, but we demonstrate Testcontainers
 /// for future Postgres/Qdrant migrations (ADR-001) and for API isolation.
 /// </summary>
-public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>, IDisposable
 {
     private readonly WebApplicationFactory<Program> _factory;
+    private readonly string? _originalDataDir;
 
     public ApiIntegrationTests(WebApplicationFactory<Program> factory)
     {
+        _originalDataDir = Environment.GetEnvironmentVariable("CODERAG__DataDir");
         var tmp = Path.Combine(Path.GetTempPath(), "coderag-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tmp);
         Environment.SetEnvironmentVariable("CODERAG__DataDir", tmp);
         _factory = factory.WithWebHostBuilder(b => b.UseSetting("CODERAG:DataDir", tmp));
+    }
+
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable("CODERAG__DataDir", _originalDataDir);
     }
 
     [Fact]

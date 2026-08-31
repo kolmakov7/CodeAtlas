@@ -96,9 +96,31 @@ public sealed record HealthDetailsDto(
     HealthComponentDto Embedding,
     HealthComponentDto Indexer,
     HealthComponentDto Storage,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    VectorFreshnessDto? VectorIndex = null);
 
 public sealed record HealthComponentDto(string Status, string? Message, double? LatencyMs);
+
+/// <summary>
+/// Freshness of the stored vector index relative to the currently configured embedding model.
+/// </summary>
+public sealed record VectorFreshnessDto(
+    bool Stale,
+    string? Reason,
+    IReadOnlyList<VectorModelInfoDto> Stored,
+    string? CurrentModel,
+    int? CurrentDim,
+    int? CurrentContextLength)
+{
+    public static VectorFreshnessDto Fresh(
+        IReadOnlyList<VectorModelInfoDto> stored,
+        string? model, int? dim, int? contextLength) => new(false, null, stored, model, dim, contextLength);
+}
+
+/// <summary>
+/// One group of stored vectors: which model/dim they were built with and how many chunks.
+/// </summary>
+public sealed record VectorModelInfoDto(string? Model, int Dim, int? ContextLength, int ChunkCount);
 
 public sealed record SearchApiResponse(
     IReadOnlyList<SearchResultItemDto> Items,
@@ -120,4 +142,15 @@ public sealed record SearchResultItemDto(
     int EndLine,
     double Score,
     string Origin,
+    string Preview);
+
+public sealed record GetCodeResponseDto(
+    Guid RepositoryId,
+    Guid FileId,
+    string Path,
+    string Language,
+    int StartLine,
+    int EndLine,
+    int TotalLines,
+    string Content,
     string Preview);

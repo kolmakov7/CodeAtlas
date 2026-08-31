@@ -1,6 +1,10 @@
+using System.Runtime.CompilerServices;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Exceptions;
 using CodeRag.Domain.ValueObjects;
+
+[assembly: InternalsVisibleTo("CodeRag.Infrastructure")]
+[assembly: InternalsVisibleTo("CodeRag.Tests")]
 
 namespace CodeRag.Domain.Entities;
 
@@ -210,6 +214,32 @@ public sealed class Repository
     public bool IsIndexUpToDate() =>
         IndexedCommit is not null && CurrentCommit is not null &&
         string.Equals(IndexedCommit, CurrentCommit, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Гидрация без рефлексии (DDD fabric). Используется Infrastructure для восстановления stale состояния
+    /// без проверки инварианта. Инкапсуляция сохранена через internal.
+    /// </summary>
+    internal static Repository Rehydrate(
+        Guid id, string name, string gitUrl, string branch, string localPath,
+        string? currentCommit, string? indexedCommit, RepositoryStatus status, bool enabled,
+        Guid? proxyId, Guid? credentialId, int? syncIntervalSeconds,
+        DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError)
+    {
+        var git = GitUrl.Create(gitUrl);
+        var lp = LocalPath.Create(localPath);
+        var repo = new Repository(id, name.Trim(), git, branch.Trim(), lp, status, enabled)
+        {
+            ProxyId = proxyId,
+            CredentialId = credentialId,
+            SyncIntervalSeconds = syncIntervalSeconds,
+            CurrentCommit = string.IsNullOrWhiteSpace(currentCommit) ? null : currentCommit.Trim(),
+            IndexedCommit = string.IsNullOrWhiteSpace(indexedCommit) ? null : indexedCommit.Trim(),
+            LastSyncAt = lastSyncAt,
+            LastIndexAt = lastIndexAt,
+            LastError = string.IsNullOrWhiteSpace(lastError) ? null : lastError
+        };
+        return repo;
+    }
 
     private static bool IsValidCommitSha(string sha)
     {

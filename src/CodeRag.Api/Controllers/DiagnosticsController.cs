@@ -27,8 +27,20 @@ public sealed class DiagnosticsController : ControllerBase
         var diag = new
         {
             database = new { status = MapStatus(h.Database.Status), detail = h.Database.Message },
-            vectorIndex = new { status = MapStatus(h.Vector.Status), detail = h.Vector.Message, count = (int?)null, sizeBytes = (long?)null },
-            embeddingApi = new { status = MapStatus(h.Embedding.Status), detail = h.Embedding.Message, latencyMs = h.Embedding.LatencyMs, model = (string?)null },
+            vectorIndex = new
+            {
+                status = MapStatus(h.Vector.Status),
+                detail = h.Vector.Message,
+                stale = h.VectorIndex?.Stale ?? false,
+                reason = h.VectorIndex?.Reason,
+                stored = h.VectorIndex?.Stored.Select(m => new { model = m.Model, dim = m.Dim, contextLength = m.ContextLength, chunkCount = m.ChunkCount }).ToList(),
+                currentModel = h.VectorIndex?.CurrentModel,
+                currentDim = h.VectorIndex?.CurrentDim,
+                currentContextLength = h.VectorIndex?.CurrentContextLength,
+                count = (int?)null,
+                sizeBytes = (long?)null
+            },
+            embeddingApi = new { status = MapStatus(h.Embedding.Status), detail = h.Embedding.Message, latencyMs = h.Embedding.LatencyMs, model = h.VectorIndex?.CurrentModel },
             indexer = new { status = MapStatus(h.Indexer.Status), detail = h.Indexer.Message, queueDepth = (int?)null },
             storage = new { status = MapStatus(h.Storage.Status), detail = h.Storage.Message, freeBytes = (long?)null }
         };

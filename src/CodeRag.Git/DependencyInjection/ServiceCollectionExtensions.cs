@@ -17,6 +17,14 @@ public static class ServiceCollectionExtensions
         if (configure is not null) services.Configure(configure);
         else services.AddOptions<GitOptions>().ValidateOnStart();
 
+        services.PostConfigure<GitOptions>(o =>
+        {
+            var dataDir = Environment.GetEnvironmentVariable("CODERAG__DataDir") ?? "/data";
+            var expected = Path.Combine(dataDir.TrimEnd('/'), "repos");
+            if (o.ReposRoot == "/data/repos" && expected != "/data/repos") o.ReposRoot = expected;
+            var keysExpected = Path.Combine(dataDir.TrimEnd('/'), "keys", "ssh");
+            if (o.SshKeysDir == "/data/keys/ssh" && keysExpected != "/data/keys/ssh") o.SshKeysDir = keysExpected;
+        });
         services.Configure<GitOptions>(o => { });
 
         // Core git

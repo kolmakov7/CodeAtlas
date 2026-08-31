@@ -1,5 +1,6 @@
 using CodeRag.Api.Models;
 using CodeRag.Domain.Enums;
+using CodeRag.Domain.Ports;
 using CodeRag.Indexer;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,11 +10,11 @@ namespace CodeRag.Api.Controllers;
 [Route("api/jobs")]
 public sealed class JobsController : ControllerBase
 {
-    private readonly IndexingJobStore _store;
+    private readonly IIndexingJobStore _store;
     private readonly IJobRunner _runner;
     private readonly ILogger<JobsController> _logger;
 
-    public JobsController(IndexingJobStore store, IJobRunner runner, ILogger<JobsController> logger)
+    public JobsController(IIndexingJobStore store, IJobRunner runner, ILogger<JobsController> logger)
     {
         _store = store;
         _runner = runner;

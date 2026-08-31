@@ -1,15 +1,15 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
 
-public sealed class RepositoryStore : IRepositoryStore
+public sealed class RepositoryStore : CodeRag.Domain.Ports.IRepositoryStore, IRepositoryStore
 {
-    private readonly SqliteConnectionFactory _factory;
+    private readonly IDbConnectionFactory _factory;
 
-    public RepositoryStore(SqliteConnectionFactory factory) => _factory = factory;
+    public RepositoryStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(Repository repository, CancellationToken ct = default)
     {
@@ -103,58 +103,31 @@ ON CONFLICT(id) DO UPDATE SET
 
     private static Repository Map(RepoRow r)
     {
-        var repo = Repository.Create(
+        var status = Enum.TryParse<RepositoryStatus>(r.status, out var st) ? st : RepositoryStatus.Active;
+        var repo = Repository.Rehydrate(
             Guid.Parse(r.id),
             r.name,
             r.git_url,
             r.branch,
             r.local_path,
-            Enum.TryParse<RepositoryStatus>(r.status, out var st) ? st : RepositoryStatus.Active,
+            r.current_commit,
+            r.indexed_commit,
+            status,
             r.enabled != 0,
             string.IsNullOrWhiteSpace(r.proxy_id) ? null : Guid.Parse(r.proxy_id),
             string.IsNullOrWhiteSpace(r.credential_id) ? null : Guid.Parse(r.credential_id),
-            r.sync_interval_seconds);
+            r.sync_interval_seconds,
+            ParseDate(r.last_sync_at),
+            ParseDate(r.last_index_at),
+            r.last_error);
 
-        // Restore commit tracking via reflection-free domain methods
-        if (!string.IsNullOrWhiteSpace(r.current_commit))
-            repo.UpdateCurrentCommit(r.current_commit, ParseDate(r.last_sync_at));
-        if (!string.IsNullOrWhiteSpace(r.indexed_commit))
+        // Preserve status transitions that Rehydrate cannot express (Paused/Error without error)
+        // Rehydrate already sets status, so only need to ensure error flag if needed.
+        if (status == RepositoryStatus.Paused && repo.Status != RepositoryStatus.Paused)
+            repo.MarkPaused();
+        if (!string.IsNullOrWhiteSpace(r.last_error) && repo.LastError != r.last_error)
         {
-            // Use MarkIndexSucceeded only if both commits equal? But for hydration we need direct set.
-            // Domain enforces invariant Indexed==Current on success. We can try to set via private setter workaround:
-            // Use reflection to set private properties if commits differ (stale).
-            try
-            {
-                if (string.Equals(r.indexed_commit, r.current_commit, StringComparison.Ordinal))
-                    repo.MarkIndexSucceeded(r.indexed_commit, ParseDate(r.last_index_at));
-                else
-                {
-                    // Use reflection to hydrate stale state for query purposes
-                    var t = typeof(Repository);
-                    var propIdx = t.GetProperty("IndexedCommit");
-                    var propCur = t.GetProperty("CurrentCommit");
-                    // Actually properties have private setters — set via reflection
-                    typeof(Repository).GetProperty("IndexedCommit")!.SetValue(repo, r.indexed_commit);
-                    // Current already set above
-                    if (!string.IsNullOrWhiteSpace(r.last_index_at) && DateTimeOffset.TryParse(r.last_index_at, out var lia))
-                        typeof(Repository).GetProperty("LastIndexAt")!.SetValue(repo, lia);
-                    if (!string.IsNullOrWhiteSpace(r.last_error))
-                        repo.MarkError(r.last_error);
-                }
-            }
-            catch { /* fallback: keep as created */ }
-        }
-        else
-        {
-            if (!string.IsNullOrWhiteSpace(r.last_error))
-                repo.MarkError(r.last_error);
-        }
-
-        // Ensure error and pause status preserved
-        if (r.status == RepositoryStatus.Paused.ToString()) repo.MarkPaused();
-        else if (r.status == RepositoryStatus.Error.ToString() && string.IsNullOrWhiteSpace(r.last_error))
-        {
-            // already error via MarkError else set status via reflection
+            try { repo.MarkError(r.last_error); } catch { }
         }
 
         return repo;

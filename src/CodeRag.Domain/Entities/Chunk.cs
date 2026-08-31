@@ -27,6 +27,7 @@ public sealed class Chunk
     public string? EmbeddingModel { get; private set; }
     public string? EmbeddingConfigHash { get; private set; }
     public DateTimeOffset? EmbeddedAt { get; private set; }
+    public string EmbeddingDomain { get; private set; } = "code"; // code / text / mixed
 
     private Chunk(Guid id, Guid repositoryId, Guid fileId, string source, string contentHash)
     {
@@ -42,7 +43,7 @@ public sealed class Chunk
         Guid? symbolId = null, string? language = null,
         int? startLine = null, int? endLine = null,
         string? embeddingModel = null, string? embeddingConfigHash = null,
-        DateTimeOffset? embeddedAt = null)
+        string? embeddingDomain = null, DateTimeOffset? embeddedAt = null)
     {
         if (id == Guid.Empty) throw new DomainValidationException("Chunk Id must not be empty.");
         if (repositoryId == Guid.Empty) throw new DomainValidationException("RepositoryId must not be empty.");
@@ -55,7 +56,7 @@ public sealed class Chunk
 
         var hash = ComputeHash(source);
 
-        return new Chunk(id, repositoryId, fileId, source, hash)
+        var chunk = new Chunk(id, repositoryId, fileId, source, hash)
         {
             SymbolId = symbolId,
             Language = string.IsNullOrWhiteSpace(language) ? null : language.Trim(),
@@ -63,8 +64,56 @@ public sealed class Chunk
             EndLine = endLine,
             EmbeddingModel = string.IsNullOrWhiteSpace(embeddingModel) ? null : embeddingModel.Trim(),
             EmbeddingConfigHash = string.IsNullOrWhiteSpace(embeddingConfigHash) ? null : embeddingConfigHash.Trim(),
+            EmbeddingDomain = string.IsNullOrWhiteSpace(embeddingDomain) ? "code" : embeddingDomain.Trim().ToLowerInvariant(),
             EmbeddedAt = embeddedAt
         };
+
+        // Default domain: code for .cs, text for .md etc.
+        if (string.IsNullOrWhiteSpace(chunk.EmbeddingDomain))
+        {
+            chunk.EmbeddingDomain = DetectDomain(language, source);
+        }
+
+        return chunk;
+    }
+
+    private static string DetectDomain(string? language, string source)
+    {
+        // Simple heuristics: markdown/docs → Text, code extensions → Code
+        if (language != null)
+        {
+            var lower = language.ToLowerInvariant();
+            if (lower == "markdown" || lower == "md" || lower == "txt")
+                return "text";
+        }
+        // Check source for documentation patterns
+        if (source != null)
+        {
+            var lowerSource = source.ToLowerInvariant();
+            if (lowerSource.StartsWith("readme") || lowerSource.StartsWith("documentation"))
+                return "text";
+        }
+        return "code"; // default
+    }
+
+    public static Chunk Rehydrate(
+        Guid id, Guid repositoryId, Guid fileId, string source, string contentHash,
+        Guid? symbolId, string? language, int? startLine, int? endLine,
+        string? embeddingModel, string? embeddingConfigHash, string? embeddingDomain, DateTimeOffset? embeddedAt)
+    {
+        var hash = string.IsNullOrWhiteSpace(contentHash) ? ComputeHash(source) : contentHash;
+        var chunk = new Chunk(id, repositoryId, fileId, source, hash)
+        {
+            SymbolId = symbolId,
+            Language = language,
+            StartLine = startLine,
+            EndLine = endLine,
+            EmbeddingModel = embeddingModel,
+            EmbeddingConfigHash = embeddingConfigHash,
+            EmbeddingDomain = string.IsNullOrWhiteSpace(embeddingDomain) ? "code" : embeddingDomain.Trim().ToLowerInvariant(),
+            EmbeddedAt = embeddedAt
+        };
+        return chunk;
     }
 
     /// <summary>Sha256 hex нижнего регистра по UTF8.</summary>
@@ -101,4 +150,22 @@ public sealed class Chunk
 
     public bool IsContentEqual(string source) =>
         string.Equals(ContentHash, ComputeHash(source), StringComparison.Ordinal);
+
+    internal static Chunk Rehydrate(
+        Guid id, Guid repositoryId, Guid fileId, string source, string contentHash,
+        Guid? symbolId, string? language, int? startLine, int? endLine,
+        string? embeddingModel, string? embeddingConfigHash, DateTimeOffset? embeddedAt)
+    {
+        var hash = string.IsNullOrWhiteSpace(contentHash) ? ComputeHash(source) : contentHash;
+        return new Chunk(id, repositoryId, fileId, source, hash)
+        {
+            SymbolId = symbolId,
+            Language = language,
+            StartLine = startLine,
+            EndLine = endLine,
+            EmbeddingModel = embeddingModel,
+            EmbeddingConfigHash = embeddingConfigHash,
+            EmbeddedAt = embeddedAt
+        };
+    }
 }

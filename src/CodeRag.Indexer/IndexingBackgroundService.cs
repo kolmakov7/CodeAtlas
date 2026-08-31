@@ -20,7 +20,8 @@ public sealed class IndexingBackgroundService : BackgroundService
     private readonly IndexingJobStore _jobStore;
     private readonly IGitService _git;
     private readonly ILogger<IndexingBackgroundService> _logger;
-    private readonly IndexerOptions _options;
+    private readonly IOptionsMonitor<IndexerOptions> _optionsMonitor;
+    private IndexerOptions Opts => _optionsMonitor.CurrentValue;
 
     public IndexingBackgroundService(
         JobRunner runner,
@@ -28,7 +29,7 @@ public sealed class IndexingBackgroundService : BackgroundService
         IRepositoryStore repoStore,
         IndexingJobStore jobStore,
         IGitService git,
-        IOptions<IndexerOptions> options,
+        IOptionsMonitor<IndexerOptions> options,
         ILogger<IndexingBackgroundService> logger)
     {
         _runner = runner;
@@ -36,14 +37,14 @@ public sealed class IndexingBackgroundService : BackgroundService
         _repoStore = repoStore;
         _jobStore = jobStore;
         _git = git;
-        _options = options.Value;
+        _optionsMonitor = options;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Indexer background service starting (maxConcurrent={Max}, syncInterval={Interval}s, watcher={Watcher})",
-            _options.MaxConcurrentIndexers, _options.DefaultSyncIntervalSeconds, _options.EnableFileWatcher);
+            Opts.MaxConcurrentIndexers, Opts.DefaultSyncIntervalSeconds, Opts.EnableFileWatcher);
 
         // Восстановление queued джоб после рестарта (ADR-008)
         try { await _runner.RestoreQueuedJobsAsync(stoppingToken).ConfigureAwait(false); }
@@ -101,7 +102,7 @@ public sealed class IndexingBackgroundService : BackgroundService
             }
 
             // Интервал polling — минимальный sync_interval, но проверяем per-repo внутри
-            var delay = TimeSpan.FromSeconds(_options.DefaultSyncIntervalSeconds);
+            var delay = TimeSpan.FromSeconds(Opts.DefaultSyncIntervalSeconds);
             if (delay < TimeSpan.FromSeconds(30)) delay = TimeSpan.FromSeconds(30);
             try { await Task.Delay(delay, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
@@ -118,7 +119,7 @@ public sealed class IndexingBackgroundService : BackgroundService
             if (!repo.Enabled) continue;
             if (repo.Status is RepositoryStatus.Paused or RepositoryStatus.Syncing or RepositoryStatus.Indexing or RepositoryStatus.Deleting) continue;
 
-            var interval = repo.SyncIntervalSeconds ?? _options.DefaultSyncIntervalSeconds;
+            var interval = repo.SyncIntervalSeconds ?? Opts.DefaultSyncIntervalSeconds;
             var lastSync = repo.LastSyncAt ?? DateTimeOffset.MinValue;
             if (DateTimeOffset.UtcNow - lastSync < TimeSpan.FromSeconds(interval)) continue;
 

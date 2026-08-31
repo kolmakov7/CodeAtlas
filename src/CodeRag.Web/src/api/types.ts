@@ -28,10 +28,14 @@ export interface Repository {
 
 export interface RepositoryStatistics {
   repositoryId: string;
-  files: number;
-  symbols: number;
-  chunks: number;
-  relations: number;
+  name: string;
+  fileCount: number;
+  symbolCount: number;
+  chunkCount: number;
+  vectorCount: number;
+  indexedCommit?: string | null;
+  currentCommit?: string | null;
+  status: string;
   embeddingsIndexed: number;
   embeddingsPending: number;
   embeddingsFailed: number;
@@ -158,9 +162,27 @@ export interface IndexingJob {
   error?: string | null;
 }
 
+export interface VectorStoredModel {
+  model: string | null;
+  dim: number;
+  contextLength: number | null;
+  chunkCount: number;
+}
+
 export interface Diagnostics {
   database: { status: HealthStatus; detail?: string };
-  vectorIndex: { status: HealthStatus; count?: number; sizeBytes?: number; detail?: string };
+  vectorIndex: {
+    status: HealthStatus;
+    count?: number;
+    sizeBytes?: number;
+    detail?: string;
+    stale?: boolean;
+    reason?: string | null;
+    stored?: VectorStoredModel[];
+    currentModel?: string | null;
+    currentDim?: number | null;
+    currentContextLength?: number | null;
+  };
   embeddingApi: { status: HealthStatus; latencyMs?: number; model?: string; detail?: string };
   indexer: { status: HealthStatus; queueDepth?: number; detail?: string };
   storage: { status: HealthStatus; freeBytes?: number; detail?: string };
@@ -191,6 +213,7 @@ export interface Settings {
     semanticWeight?: number;
     structuralWeight?: number;
     defaultResultCount?: number;
+    minSemanticScore?: number;
   };
   storage?: {
     dataDir?: string;

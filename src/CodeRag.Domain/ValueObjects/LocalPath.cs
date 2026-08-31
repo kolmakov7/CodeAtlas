@@ -9,7 +9,16 @@ namespace CodeRag.Domain.ValueObjects;
 /// </summary>
 public sealed record LocalPath
 {
-    public const string ReposRoot = "/data/repos";
+    public const string DefaultReposRoot = "/data/repos";
+    public static string ReposRoot => GetConfiguredReposRoot();
+
+    private static string GetConfiguredReposRoot()
+    {
+        var dataDir = Environment.GetEnvironmentVariable("CODERAG__DataDir")
+            ?? Environment.GetEnvironmentVariable("CODERAG_DataDir")
+            ?? "/data";
+        return Path.Combine(dataDir.TrimEnd('/'), "repos");
+    }
 
     public string Value { get; }
 

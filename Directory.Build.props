@@ -1,0 +1,10 @@
+<Project>
+  <!-- Централизованное подавление известных уязвимостей транзитивных зависимостей, 
+       которые исправляются апстримом (Roslyn, Testcontainers) и не блокируют сборку.
+       NU1903 — Package vulnerability, CA1416 — Platform compatibility для File.SetUnixFileMode (guarded) -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);NU1903;CA1416</NoWarn>
+    <!-- Оставляем аудит только для прямых зависимостей, чтобы не шуметь транзитивными -->
+    <NuGetAuditMode>direct</NuGetAuditMode>
+  </PropertyGroup>
+</Project>

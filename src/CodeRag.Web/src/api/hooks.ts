@@ -67,6 +67,10 @@ export function useRepositoryActions() {
     mutationFn: (id: string) => apiClient.post(`/repositories/${id}/reindex`),
     onSuccess: invalidate,
   });
+  const rebuildAll = useMutation({
+    mutationFn: () => apiClient.post(`/repositories/rebuild-all`),
+    onSuccess: invalidate,
+  });
   const pause = useMutation({
     mutationFn: (id: string) => apiClient.post(`/repositories/${id}/pause`),
     onSuccess: invalidate,
@@ -99,7 +103,7 @@ export function useRepositoryActions() {
       apiClient.delete(`/repositories/${id}`, { params: { deleteCheckout } }),
     onSuccess: invalidate,
   });
-  return { sync, reindex, pause, resume, remove };
+  return { sync, reindex, rebuildAll, pause, resume, remove };
 }
 
 // Search

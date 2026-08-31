@@ -15,17 +15,18 @@ public sealed class JobRunner : IJobRunner, IAsyncDisposable
     private readonly SemaphoreSlim _semaphore;
     private readonly IndexingJobStore _store;
     private readonly ILogger<JobRunner> _logger;
-    private readonly IndexerOptions _options;
+    private readonly IOptionsMonitor<IndexerOptions> _optionsMonitor;
+    private IndexerOptions Opts => _optionsMonitor.CurrentValue;
 
     private readonly Dictionary<Guid, CancellationTokenSource> _ctsMap = new();
     private readonly object _ctsLock = new();
 
-    public JobRunner(IndexingJobStore store, IOptions<IndexerOptions> options, ILogger<JobRunner> logger)
+    public JobRunner(IndexingJobStore store, IOptionsMonitor<IndexerOptions> options, ILogger<JobRunner> logger)
     {
         _store = store;
-        _options = options.Value;
+        _optionsMonitor = options;
         _logger = logger;
-        var max = _options.MaxConcurrentIndexers <= 0 ? 2 : _options.MaxConcurrentIndexers;
+        var max = Opts.MaxConcurrentIndexers <= 0 ? 2 : Opts.MaxConcurrentIndexers;
         _semaphore = new SemaphoreSlim(max, max);
         _channel = Channel.CreateUnbounded<IndexingJob>(new UnboundedChannelOptions
         {

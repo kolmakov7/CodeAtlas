@@ -19,8 +19,9 @@ public static class ServiceCollectionExtensions
         else
             services.Configure<IndexerOptions>(_ => { });
 
-        // Persistence
+        // Persistence — register both concrete and port
         services.AddSingleton<IndexingJobStore>();
+        services.AddSingleton<CodeRag.Domain.Ports.IIndexingJobStore>(sp => sp.GetRequiredService<IndexingJobStore>());
 
         // Git
         services.AddSingleton<IGitService, CliGitService>();

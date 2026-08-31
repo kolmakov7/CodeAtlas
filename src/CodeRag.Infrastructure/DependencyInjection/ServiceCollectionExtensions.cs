@@ -1,4 +1,6 @@
+using CodeRag.Domain.Ports;
 using CodeRag.Infrastructure.Persistence;
+using CodeRag.Infrastructure.Persistence.Repositories;
 using CodeRag.Infrastructure.Search;
 using CodeRag.Infrastructure.Stores;
 using CodeRag.Infrastructure.Vectors;
@@ -24,24 +26,39 @@ public static class ServiceCollectionExtensions
         Directory.CreateDirectory(fullDataDir);
         var dbPath = Path.Combine(fullDataDir, "coderag.db");
 
-        services.AddSingleton(sp =>
+        services.AddSingleton<SqliteConnectionFactory>(sp =>
         {
             var logger = sp.GetRequiredService<ILogger<SqliteConnectionFactory>>();
             return new SqliteConnectionFactory(dbPath, logger, vecExtensionPath);
         });
+        services.AddSingleton<IDbConnectionFactory>(sp => sp.GetRequiredService<SqliteConnectionFactory>());
 
         services.AddSingleton(sp =>
         {
-            var factory = sp.GetRequiredService<SqliteConnectionFactory>();
+            var factory = sp.GetRequiredService<IDbConnectionFactory>();
             var logger = sp.GetRequiredService<ILogger<DbInitializer>>();
-            return new DbInitializer(factory, logger);
+            // DbInitializer expects SqliteConnectionFactory concrete for legacy compat; pass singleton concrete if needed
+            var concrete = sp.GetRequiredService<SqliteConnectionFactory>();
+            return new DbInitializer(concrete, logger);
         });
 
-        // Stores
-        services.AddSingleton<IRepositoryStore, RepositoryStore>();
-        services.AddSingleton<IFileStore, FileStore>();
-        services.AddSingleton<ISymbolStore, SymbolStore>();
-        services.AddSingleton<IChunkStore, ChunkStore>();
+        // Stores — register both Domain ports and legacy Infrastructure proxies
+        services.AddSingleton<CodeRag.Domain.Ports.IRepositoryStore, RepositoryStore>();
+        services.AddSingleton<CodeRag.Infrastructure.Stores.IRepositoryStore, RepositoryStore>(sp => (RepositoryStore)sp.GetRequiredService<CodeRag.Domain.Ports.IRepositoryStore>());
+        services.AddSingleton<CodeRag.Domain.Ports.IFileStore, FileStore>();
+        services.AddSingleton<CodeRag.Infrastructure.Stores.IFileStore, FileStore>(sp => (FileStore)sp.GetRequiredService<CodeRag.Domain.Ports.IFileStore>());
+        services.AddSingleton<CodeRag.Domain.Ports.ISymbolStore, SymbolStore>();
+        services.AddSingleton<CodeRag.Infrastructure.Stores.ISymbolStore, SymbolStore>(sp => (SymbolStore)sp.GetRequiredService<CodeRag.Domain.Ports.ISymbolStore>());
+        services.AddSingleton<CodeRag.Domain.Ports.IChunkStore, ChunkStore>();
+        services.AddSingleton<CodeRag.Infrastructure.Stores.IChunkStore, ChunkStore>(sp => (ChunkStore)sp.GetRequiredService<CodeRag.Domain.Ports.IChunkStore>());
+        services.AddSingleton<IIndexingErrorStore, IndexingErrorStore>();
+
+        // Persistence adapters (Activity, Settings, Statistics, Health)
+        services.AddSingleton<IActivityRepository, DapperActivityRepository>();
+        services.AddSingleton<ISettingsRepository, DapperSettingsRepository>();
+        services.AddSingleton<IStatisticsQueryService, DapperStatisticsQueryService>();
+        services.AddSingleton<IDbHealthProbe, DbHealthProbe>();
+        services.AddSingleton<IStorageProbe, StorageProbe>();
 
         // FTS
         services.AddSingleton<FtsHelper>();
@@ -52,7 +69,11 @@ public static class ServiceCollectionExtensions
             var factory = sp.GetRequiredService<SqliteConnectionFactory>();
             var logger = sp.GetRequiredService<ILogger<SqliteVecVectorStore>>();
             var fallbackLogger = sp.GetRequiredService<ILogger<InMemoryVectorStore>>();
-            return new SqliteVecVectorStore(factory, logger, fallbackLogger);
+            // IVectorDimSource is registered by AddEmbeddings (called after AddInfrastructure).
+            // If not yet registered (embeddings not configured), create a no-op source.
+            var dimSource = sp.GetService<IVectorDimSource>()
+                ?? new CodeRag.Infrastructure.Vectors.NullDimSource();
+            return new SqliteVecVectorStore(factory, dimSource, logger, fallbackLogger);
         });
 
         // Also expose InMemory directly for diagnostics (optional)

@@ -1,13 +1,13 @@
 using CodeRag.Domain.Entities;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
 
-public sealed class ChunkStore : IChunkStore
+public sealed class ChunkStore : CodeRag.Domain.Ports.IChunkStore, IChunkStore
 {
-    private readonly SqliteConnectionFactory _factory;
-    public ChunkStore(SqliteConnectionFactory factory) => _factory = factory;
+    private readonly IDbConnectionFactory _factory;
+    public ChunkStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(Chunk chunk, CancellationToken ct = default)
     {
@@ -109,13 +109,12 @@ ON CONFLICT(id) DO UPDATE SET
 
     private static Chunk Map(ChunkRow r)
     {
-        // Domain Chunk.Create computes hash from source; but we want to preserve stored hash.
-        // Use Create then override hash via reflection if mismatch? Domain ComputeHash ensures consistency, so stored hash should match source.
-        var chunk = Chunk.Create(
+        return Chunk.Rehydrate(
             Guid.Parse(r.id),
             Guid.Parse(r.repository_id),
             Guid.Parse(r.file_id),
             r.source,
+            r.content_hash,
             string.IsNullOrWhiteSpace(r.symbol_id) ? null : Guid.Parse(r.symbol_id),
             r.language,
             r.start_line,
@@ -123,14 +122,6 @@ ON CONFLICT(id) DO UPDATE SET
             r.embedding_model,
             r.embedding_config_hash,
             string.IsNullOrWhiteSpace(r.embedded_at) ? null : DateTimeOffset.Parse(r.embedded_at));
-
-        // If stored hash differs due to legacy, patch via reflection
-        if (!string.Equals(chunk.ContentHash, r.content_hash, StringComparison.Ordinal))
-        {
-            typeof(Chunk).GetProperty("ContentHash")!.SetValue(chunk, r.content_hash);
-        }
-
-        return chunk;
     }
 
     private sealed class ChunkRow

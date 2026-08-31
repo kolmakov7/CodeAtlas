@@ -1,23 +1,25 @@
-using CodeRag.Embeddings;
-using CodeRag.Infrastructure.Persistence;
-using CodeRag.Infrastructure.Vectors;
-using CodeRag.Indexer;
-using Microsoft.Extensions.Logging;
 using CodeRag.Api.Models;
+using CodeRag.Domain.Ports;
+using CodeRag.Embeddings;
+using CodeRag.Indexer;
+using CodeRag.Infrastructure.Vectors;
+using Microsoft.Extensions.Logging;
 
 namespace CodeRag.Api.Services;
 
 public sealed class HealthService
 {
-    private readonly SqliteConnectionFactory _factory;
+    private readonly IDbHealthProbe _dbProbe;
+    private readonly IStorageProbe _storageProbe;
     private readonly IVectorStore _vectorStore;
     private readonly IEmbeddingProvider _embedding;
-    private readonly JobRunner _runner;
+    private readonly IJobRunner _runner;
     private readonly ILogger<HealthService> _logger;
 
-    public HealthService(SqliteConnectionFactory factory, IVectorStore vectorStore, IEmbeddingProvider embedding, JobRunner runner, ILogger<HealthService> logger)
+    public HealthService(IDbHealthProbe dbProbe, IStorageProbe storageProbe, IVectorStore vectorStore, IEmbeddingProvider embedding, IJobRunner runner, ILogger<HealthService> logger)
     {
-        _factory = factory;
+        _dbProbe = dbProbe;
+        _storageProbe = storageProbe;
         _vectorStore = vectorStore;
         _embedding = embedding;
         _runner = runner;
@@ -27,76 +29,93 @@ public sealed class HealthService
     public async Task<HealthDetailsDto> CheckDetailedAsync(CancellationToken ct = default)
     {
         var warnings = new List<string>();
-
         var db = await CheckDbAsync(ct).ConfigureAwait(false);
-        var vec = await CheckVectorAsync(ct).ConfigureAwait(false);
+        var (vec, vectorIndex) = await CheckVectorAsync(ct).ConfigureAwait(false);
         var emb = await CheckEmbeddingAsync(ct).ConfigureAwait(false);
         var indexer = CheckIndexer();
         var storage = CheckStorage();
-
-        // embedding not blocking ready
-        var overall = (db.Status == "Healthy" && vec.Status == "Healthy" && indexer.Status == "Healthy" && storage.Status == "Healthy")
-            ? "Healthy" : "Degraded";
-
+        if (vectorIndex is { Stale: true })
+            warnings.Add(vectorIndex.Reason ?? "vector index stale");
+        var overall = (db.Status == "Healthy" && vec.Status == "Healthy" && indexer.Status == "Healthy" && storage.Status == "Healthy") ? "Healthy" : "Degraded";
         if (emb.Status != "Healthy") warnings.Add("embeddings unavailable");
-
-        return new HealthDetailsDto(overall, db, vec, emb, indexer, storage, warnings);
+        return new HealthDetailsDto(overall, db, vec, emb, indexer, storage, warnings, vectorIndex);
     }
 
     public async Task<(bool Healthy, string? Message)> CheckReadyAsync(CancellationToken ct = default)
     {
-        // ready = DB + Vector + Indexer; embedding not blocking
         var db = await CheckDbAsync(ct).ConfigureAwait(false);
         if (db.Status != "Healthy") return (false, $"database: {db.Message}");
-
-        var vec = await CheckVectorAsync(ct).ConfigureAwait(false);
+        var (vec, _) = await CheckVectorAsync(ct).ConfigureAwait(false);
         if (vec.Status != "Healthy") return (false, $"vector: {vec.Message}");
-
         var indexer = CheckIndexer();
         if (indexer.Status != "Healthy") return (false, $"indexer: {indexer.Message}");
-
         var storage = CheckStorage();
         if (storage.Status != "Healthy") return (false, $"storage: {storage.Message}");
-
         return (true, null);
     }
 
-    private async Task<HealthComponentDto> CheckDbAsync(CancellationToken ct)
+    private Task<HealthComponentDto> CheckDbAsync(CancellationToken ct) => MapProbeAsync(_dbProbe.CheckAsync(ct));
+
+    private async Task<HealthComponentDto> MapProbeAsync(Task<HealthProbeResult> task)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        try
-        {
-            using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT 1;";
-            await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            sw.Stop();
-            return new HealthComponentDto("Healthy", null, sw.Elapsed.TotalMilliseconds);
-        }
-        catch (Exception ex)
-        {
-            sw.Stop();
-            _logger.LogWarning(ex, "Health DB check failed");
-            return new HealthComponentDto("Unhealthy", ex.Message, sw.Elapsed.TotalMilliseconds);
-        }
+        var r = await task.ConfigureAwait(false);
+        return new HealthComponentDto(r.Status, r.Message, r.LatencyMs);
     }
 
-    private async Task<HealthComponentDto> CheckVectorAsync(CancellationToken ct)
+    private async Task<(HealthComponentDto Component, VectorFreshnessDto? Freshness)> CheckVectorAsync(CancellationToken ct)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var dummy = new float[384];
+            var dim = _embedding.Dimensions > 0 ? _embedding.Dimensions : 384;
+            var dummy = new float[dim];
             await _vectorStore.SearchAsync(dummy, 1, null, ct).ConfigureAwait(false);
             sw.Stop();
-            return new HealthComponentDto("Healthy", null, sw.Elapsed.TotalMilliseconds);
+            var freshness = await BuildFreshnessAsync(ct).ConfigureAwait(false);
+            if (freshness is { Stale: true })
+                return (new HealthComponentDto("Degraded", freshness.Reason ?? "vector index stale", sw.Elapsed.TotalMilliseconds), freshness);
+            return (new HealthComponentDto("Healthy", null, sw.Elapsed.TotalMilliseconds), freshness);
         }
         catch (Exception ex)
         {
             sw.Stop();
             _logger.LogWarning(ex, "Health Vector check failed");
-            // vector store with InMemory fallback should still be healthy; but if fails -> degraded
-            return new HealthComponentDto("Degraded", ex.Message, sw.Elapsed.TotalMilliseconds);
+            return (new HealthComponentDto("Degraded", ex.Message, sw.Elapsed.TotalMilliseconds), null);
+        }
+    }
+
+    private async Task<VectorFreshnessDto> BuildFreshnessAsync(CancellationToken ct)
+    {
+        var currentModel = _embedding.Model;
+        int? currentDim = _embedding.Dimensions > 0 ? _embedding.Dimensions : null;
+        var currentCtx = _embedding.ContextLength;
+        try
+        {
+            var summary = await _vectorStore.GetIndexSummaryAsync(ct).ConfigureAwait(false);
+            var stored = summary.StoredModels
+                .Select(m => new VectorModelInfoDto(m.Model, m.Dim, m.ContextLength, m.ChunkCount))
+                .ToList();
+            if (stored.Count == 0)
+                return VectorFreshnessDto.Fresh(stored, currentModel, currentDim, currentCtx);
+
+            var reasons = new List<string>();
+            foreach (var m in summary.StoredModels)
+            {
+                if (currentDim is > 0 && m.Dim != currentDim.Value)
+                    reasons.Add($"index built with {m.Dim}-dim vectors, current model '{currentModel}' produces {currentDim.Value}-dim");
+                else if (!string.IsNullOrWhiteSpace(m.Model) && !string.Equals(m.Model, currentModel, StringComparison.OrdinalIgnoreCase))
+                    reasons.Add($"index built with model '{m.Model}', current model is '{currentModel}'");
+                else if (m.ContextLength is > 0 && currentCtx is > 0 && m.ContextLength != currentCtx.Value)
+                    reasons.Add($"index built with context {m.ContextLength}, current model context is {currentCtx.Value}");
+            }
+            if (reasons.Count > 0)
+                return new VectorFreshnessDto(true, string.Join("; ", reasons.Distinct()), stored, currentModel, currentDim, currentCtx);
+            return VectorFreshnessDto.Fresh(stored, currentModel, currentDim, currentCtx);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Vector freshness check failed");
+            return VectorFreshnessDto.Fresh(Array.Empty<VectorModelInfoDto>(), currentModel, currentDim, currentCtx);
         }
     }
 
@@ -105,7 +124,6 @@ public sealed class HealthService
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            // Try embed single token with short timeout
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(3));
             var vecs = await _embedding.EmbedAsync(new[] { "health check" }, cts.Token).ConfigureAwait(false);
@@ -130,35 +148,15 @@ public sealed class HealthService
     {
         try
         {
-            // JobRunner is healthy if channel not completed
-            // If runner is null -> degraded
             if (_runner is null) return new HealthComponentDto("Degraded", "JobRunner not initialized", null);
             return new HealthComponentDto("Healthy", null, null);
         }
-        catch (Exception ex)
-        {
-            return new HealthComponentDto("Unhealthy", ex.Message, null);
-        }
+        catch (Exception ex) { return new HealthComponentDto("Unhealthy", ex.Message, null); }
     }
 
     private HealthComponentDto CheckStorage()
     {
-        try
-        {
-            var dbPath = _factory.DbPath;
-            var dir = Path.GetDirectoryName(dbPath) ?? "/data";
-            if (!Directory.Exists(dir)) return new HealthComponentDto("Unhealthy", $"data dir missing: {dir}", null);
-            var di = new DriveInfo(dir);
-            // Check writable
-            var testFile = Path.Combine(dir, ".healthcheck");
-            try { File.WriteAllText(testFile, "ok"); File.Delete(testFile); }
-            catch (Exception ex) { return new HealthComponentDto("Degraded", $"storage not writable: {ex.Message}", null); }
-
-            return new HealthComponentDto("Healthy", null, null);
-        }
-        catch (Exception ex)
-        {
-            return new HealthComponentDto("Unhealthy", ex.Message, null);
-        }
+        var r = _storageProbe.Check();
+        return new HealthComponentDto(r.Status, r.Message, r.LatencyMs);
     }
 }

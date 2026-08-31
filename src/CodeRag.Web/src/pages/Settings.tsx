@@ -81,6 +81,8 @@ export default function SettingsPage() {
           <label>Semantic weight <input type="number" step="0.1" min={0} max={1} value={form.search?.semanticWeight ?? 0.4} onChange={(e) => setForm({ ...form, search: { ...form.search, semanticWeight: Number(e.target.value) } })} /></label>
           <label>Structural weight <input type="number" step="0.1" min={0} max={1} value={form.search?.structuralWeight ?? 0.2} onChange={(e) => setForm({ ...form, search: { ...form.search, structuralWeight: Number(e.target.value) } })} /></label>
           <label>Default result count <input type="number" value={form.search?.defaultResultCount ?? 20} onChange={(e) => setForm({ ...form, search: { ...form.search, defaultResultCount: Number(e.target.value) } })} /></label>
+          <label>Min semantic score <input type="number" step="0.01" min={0} max={1} value={form.search?.minSemanticScore ?? 0.25} onChange={(e) => setForm({ ...form, search: { ...form.search, minSemanticScore: Number(e.target.value) } })} /></label>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Vector matches below this cosine similarity are dropped, so weak/ambiguous queries return no "least-irrelevant" noise. Applied live per query — no rebuild or re-embedding. Tune per embedding model (0 disables the filter).</div>
         </div>
       )}
       {tab === "storage" && (

@@ -1,9 +1,14 @@
 using CodeRag.Analyzers.CSharp;
 using CodeRag.Api.Services;
+using CodeRag.Application.Ports;
+using CodeRag.Application.UseCases;
+using CodeRag.Domain.Ports;
 using CodeRag.Embeddings;
 using CodeRag.Git.DependencyInjection;
 using CodeRag.Indexer;
 using CodeRag.Infrastructure.DependencyInjection;
+using CodeRag.Infrastructure.Persistence;
+using Microsoft.Extensions.Configuration;
 using CodeRag.Search;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.OpenApi.Models;
@@ -43,17 +48,37 @@ builder.Services.AddSwaggerGen(c =>
 // Infrastructure wiring
 builder.Services.AddInfrastructure(dataDir);
 builder.Services.AddGit();
-builder.Services.AddEmbeddings();
-builder.Services.AddIndexer();
-builder.Services.AddSearch();
+// Embeddings: single bind — Configuration normalizes "__" to ":" automatically
+builder.Services.AddEmbeddings(builder.Configuration);
+// Бинд опций из конфигурации (включая таблицу settings — hot reload через IOptionsMonitor)
+builder.Services.AddIndexer(builder.Configuration);
+builder.Services.AddSearch(builder.Configuration);
 builder.Services.AddAnalyzers();
 
-// Api services
+// Application layer handlers (CQRS-lite)
+builder.Services.AddSingleton<IActivityQueryHandler, GetActivityQueryHandler>();
+builder.Services.AddSingleton<GetStatisticsQueryHandler>();
+
+// Api services — thin wrappers over Domain ports (no SQL inside)
 builder.Services.AddSingleton<HealthService>();
 builder.Services.AddSingleton<SettingsService>();
 builder.Services.AddSingleton<StatisticsService>();
 
+// Таблица settings → IConfiguration: значения из БД имеют приоритет над env/appsettings,
+// hot reload через FireReload() после Upsert (SettingsController).
+#pragma warning disable ASP0013 // источник добавляется после дефолтов; builder.Configuration (IConfiguration) Add не поддерживает
+IServiceProvider? settingsServiceProvider = null;
+var settingsTableProvider = new SettingsTableConfigurationProvider(
+    () => settingsServiceProvider ?? throw new InvalidOperationException("ServiceProvider not ready"),
+    () => settingsServiceProvider?.GetService<ILogger<SettingsTableConfigurationProvider>>()
+        ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SettingsTableConfigurationProvider>.Instance);
+builder.Host.ConfigureAppConfiguration((_, config) =>
+    config.Add(new SettingsTableConfigurationSource(settingsTableProvider)));
+#pragma warning restore ASP0013
+builder.Services.AddSingleton(settingsTableProvider);
+
 var app = builder.Build();
+settingsServiceProvider = app.Services;
 
 // Ensure DB initialized
 using (var scope = app.Services.CreateScope())
@@ -65,6 +90,9 @@ using (var scope = app.Services.CreateScope())
         var analyzers = scope.ServiceProvider.GetServices<CodeRag.Analyzers.Abstractions.ICodeAnalyzer>();
         var loggerInit = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
         loggerInit.LogInformation("Initialized DB at {DataDir}, analyzers={Count}", dataDir, analyzers.Count());
+        // Загрузить сохранённые настройки из БД в IConfiguration (первый Load() при Build()
+        // выполняется до инициализации DI и БД, поэтому значения тогда ещё недоступны).
+        settingsTableProvider.FireReload();
     }
     catch (Exception ex)
     {

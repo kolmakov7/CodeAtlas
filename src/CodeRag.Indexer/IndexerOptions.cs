@@ -27,4 +27,45 @@ public sealed class IndexerOptions
 
     /// <summary>Порог полной переиндексации при diff > 50% файлов (indexing.md §2, branch switch).</summary>
     public double FullReindexThreshold { get; set; } = 0.5;
+
+    // ---- Chunk budget (RAG-tuned fixed size, capped by the model context) ----
+
+    /// <summary>
+    /// Target max chunk size in characters for RAG retrieval. Oversized symbol chunks (a whole
+    /// class/method) are split into windows of at most this many chars so a single embedding stays
+    /// focused instead of being diluted by an entire file. 1500 chars (~375 tokens) keeps a chunk
+    /// coherent yet small enough to rank well against a focused natural-language query.
+    /// </summary>
+    public int MaxChunkChars { get; set; } = 1500;
+
+    /// <summary>Overlap between consecutive chunk windows as a FRACTION of the window size (for sliding-window splits).</summary>
+    public double ChunkOverlapFraction { get; set; } = 0.15;
+
+    /// <summary>Approx chars-per-token used to convert the model token context into a char cap so a chunk never overflows the context window.</summary>
+    public double CharsPerToken { get; set; } = 4.0;
+
+    /// <summary>
+    /// Minimum chars for a chunk to be embedded. Chunks below this are stored for FTS/structural
+    /// but skipped for embedding (avoids near-empty / noise vectors).
+    /// </summary>
+    public int MinEmbeddingChars { get; set; } = 32;
+
+    /// <summary>
+    /// File extensions treated as binary: skipped by the indexer entirely (not parsed, not embedded).
+    /// Prevents NUL-byte / binary content from producing garbage chunks and vectors.
+    /// </summary>
+    public string[] BinaryExtensions { get; set; } =
+    {
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "tif", "tiff", "webp", "avif", "heic",
+        "mp3", "wav", "ogg", "flac", "m4a", "aac", "mid",
+        "mp4", "mov", "avi", "mkv", "wmv", "flv", "webm",
+        "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "iso",
+        "exe", "dll", "so", "dylib", "bin", "o", "obj", "a", "lib", "pdb",
+        "apk", "ipa", "dmg", "msi",
+        "woff", "woff2", "ttf", "otf", "eot",
+        "parquet", "avro", "pkl", "pickle", "npy", "npz",
+        "onnx", "gguf", "safetensors", "pt", "pth", "joblib",
+        "db", "sqlite", "sqlite3", "mdb",
+        "xlsx", "xls", "docx", "doc", "pptx", "pdf"
+    };
 }

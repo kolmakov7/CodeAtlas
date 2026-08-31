@@ -76,21 +76,24 @@ public sealed class RepositoryService : IRepositoryService
         }
 
         // Attempt clone
-        try
-        {
-            repo.MarkSyncing();
-            await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+try
+            {
+                repo.MarkSyncing();
+                await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
 
-            await _git.CloneAsync(gitUrl, normalized, branch, proxy, cred, ct).ConfigureAwait(false);
+                await _git.CloneAsync(gitUrl, normalized, branch, proxy, cred, ct).ConfigureAwait(false);
 
-            var head = await _git.GetHeadAsync(normalized, branch, ct).ConfigureAwait(false);
-            repo.UpdateCurrentCommit(head);
-            repo.MarkActive();
-            repo.ClearError();
-            await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+                var head = await _git.GetHeadAsync(normalized, branch, ct).ConfigureAwait(false);
+                repo.UpdateCurrentCommit(head);
+                repo.MarkActive();
+                repo.ClearError();
+                await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
 
-            _logger.LogInformation("Repository {Name} cloned at {Path} head {Sha}", name, normalized, head);
-        }
+                _logger.LogInformation("Repository {Name} cloned at {Path} head {Sha}", name, normalized, head);
+
+                // Enqueue initial index job
+                // Note: This requires IJobRunner which is in CodeRag.Indexer - we'll handle via the background service polling instead
+            }
         catch (Exception ex)
         {
             var masked = SecretMasker.Mask(ex.Message);

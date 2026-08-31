@@ -183,10 +183,16 @@ public static class GitAuthHelper
             sb.AppendLine($"  *) echo \"{EscapeShellArgSimple(password)}\" ;;");
             sb.AppendLine("esac");
             File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(false));
-            // chmod 700
+            // chmod 700 — only on Unix
             try
             {
-                File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                if (!OperatingSystem.IsWindows())
+                    File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                else
+                {
+                    var psi = new ProcessStartInfo("chmod", $"700 \"{tmp}\"") { UseShellExecute = false };
+                    Process.Start(psi)?.WaitForExit(5000);
+                }
             }
             catch
             {
@@ -210,7 +216,9 @@ public static class GitAuthHelper
     {
         try
         {
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            else throw new PlatformNotSupportedException();
         }
         catch
         {

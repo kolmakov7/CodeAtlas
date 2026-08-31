@@ -21,7 +21,7 @@ public sealed class CodeSearchTools : IMcpToolHandler
         _logger = logger;
     }
 
-    [McpServerTool, Description("Hybrid code search (FTS + semantic + exact). Returns compact previews ≤limit lines. Use for find code by query.")]
+    [McpServerTool, Description("Code search (Hybrid by default: semantic + FullText + exact; Semantic = vectors only; FullText = lexical only). Returns compact previews ≤limit lines. Use to find code by query.")]
     public async Task<string> SearchCodeAsync(
         [Description("Search query text")] string query,
         [Description("Mode: Hybrid|FullText|Semantic|Symbol (default Hybrid)")] string? mode = null,

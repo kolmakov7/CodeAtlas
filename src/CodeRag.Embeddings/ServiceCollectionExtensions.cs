@@ -46,8 +46,8 @@ public static class ServiceCollectionExtensions
             return handler;
         });
 
-        // Также регистрируем EmbeddingOptions как singleton для удобного доступа без IOptions
-        services.AddSingleton(sp => sp.GetRequiredService<IOptions<EmbeddingOptions>>().Value);
+        // Register IVectorDimSource pointing to the same IEmbeddingProvider singleton
+        services.AddSingleton<CodeRag.Domain.Ports.IVectorDimSource>(sp => sp.GetRequiredService<IEmbeddingProvider>());
 
         return services;
     }

@@ -1,14 +1,14 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
 
-public sealed class SymbolStore : ISymbolStore
+public sealed class SymbolStore : CodeRag.Domain.Ports.ISymbolStore, ISymbolStore
 {
-    private readonly SqliteConnectionFactory _factory;
-    public SymbolStore(SqliteConnectionFactory factory) => _factory = factory;
+    private readonly IDbConnectionFactory _factory;
+    public SymbolStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(Symbol symbol, CancellationToken ct = default)
     {

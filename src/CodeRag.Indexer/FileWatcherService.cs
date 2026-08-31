@@ -17,7 +17,8 @@ public sealed class FileWatcherService : BackgroundService
     private readonly IRepositoryStore _repoStore;
     private readonly JobRunner _runner;
     private readonly ILogger<FileWatcherService> _logger;
-    private readonly IndexerOptions _options;
+    private readonly IOptionsMonitor<IndexerOptions> _optionsMonitor;
+    private IndexerOptions Opts => _optionsMonitor.CurrentValue;
     private readonly List<FileSystemWatcher> _watchers = new();
     private readonly Dictionary<Guid, DateTime> _lastTrigger = new();
     private readonly Dictionary<Guid, Timer?> _debounceTimers = new();
@@ -26,18 +27,18 @@ public sealed class FileWatcherService : BackgroundService
     public FileWatcherService(
         IRepositoryStore repoStore,
         JobRunner runner,
-        IOptions<IndexerOptions> options,
+        IOptionsMonitor<IndexerOptions> options,
         ILogger<FileWatcherService> logger)
     {
         _repoStore = repoStore;
         _runner = runner;
-        _options = options.Value;
+        _optionsMonitor = options;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_options.EnableFileWatcher)
+        if (!Opts.EnableFileWatcher)
         {
             _logger.LogInformation("File watcher disabled (EnableFileWatcher=false) — polling is source of truth");
             return;
@@ -138,7 +139,7 @@ public sealed class FileWatcherService : BackgroundService
                         if (_debounceTimers.TryGetValue(repoId, out var t)) { try { t?.Dispose(); } catch { } _debounceTimers.Remove(repoId); }
                     }
                 }
-            }, null, _options.FileWatcherDebounceMs, Timeout.Infinite);
+            }, null, Opts.FileWatcherDebounceMs, Timeout.Infinite);
 
             _debounceTimers[repoId] = timer;
         }
@@ -154,7 +155,7 @@ public sealed class FileWatcherService : BackgroundService
         if (fullPath.Contains("/bin/", StringComparison.Ordinal) || fullPath.Contains("\\bin\\", StringComparison.Ordinal)) return true;
         if (fullPath.Contains("/obj/", StringComparison.Ordinal) || fullPath.Contains("\\obj\\", StringComparison.Ordinal)) return true;
         if (fullPath.Contains("/node_modules/", StringComparison.Ordinal) || fullPath.Contains("\\node_modules\\", StringComparison.Ordinal)) return true;
-        foreach (var pat in _options.WatcherIgnorePatterns)
+        foreach (var pat in Opts.WatcherIgnorePatterns)
         {
             if (pat.StartsWith("*") && name.EndsWith(pat[1..], StringComparison.OrdinalIgnoreCase)) return true;
             if (fullPath.Contains(pat, StringComparison.Ordinal)) return true;

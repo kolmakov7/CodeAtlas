@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeRag.Domain.Ports;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 
@@ -9,15 +10,16 @@ namespace CodeRag.Infrastructure.Persistence;
 /// foreign_keys=ON, busy_timeout=5000 и опциональной загрузкой vec0 extension.
 /// Не падает если vec0.so отсутствует.
 /// </summary>
-public sealed class SqliteConnectionFactory
+public sealed class SqliteConnectionFactory : IDbConnectionFactory
 {
     private readonly string _connectionString;
     private readonly string _dbPath;
     private readonly ILogger<SqliteConnectionFactory> _logger;
     private readonly string? _explicitVecPath;
-    private bool _vecAttempted;
+    private int _vecAttempted; // 0 = not attempted, 1 = attempted - Interlocked
     private bool _vecAvailable;
     private string? _resolvedVecPath;
+    private readonly object _vecLock = new();
 
     public SqliteConnectionFactory(string dbPath, ILogger<SqliteConnectionFactory> logger, string? vecExtensionPath = null)
     {
@@ -70,11 +72,13 @@ public sealed class SqliteConnectionFactory
         cmd.CommandText = "PRAGMA busy_timeout=5000;";
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
-        // Optional vec0 extension.
-        if (!_vecAttempted)
+        // Optional vec0 extension — thread-safe via Interlocked + lock.
+        if (Interlocked.CompareExchange(ref _vecAttempted, 1, 0) == 0)
         {
-            TryLoadVecExtension(conn);
-            _vecAttempted = true;
+            lock (_vecLock)
+            {
+                TryLoadVecExtension(conn);
+            }
         }
         else if (_vecAvailable && !string.IsNullOrEmpty(_resolvedVecPath))
         {

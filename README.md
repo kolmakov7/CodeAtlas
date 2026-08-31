@@ -1,144 +1,114 @@
-# CodeAtlas — CodeRAG
+# CodeAtlas
 
-Self-hosted система кодовой аналитики для OpenCode. Поиск по коду: FTS5 + Vector + Structural. (§1–§59 ТЗ)
+Self-hosted search and navigation for code. Connect Git repositories and get fast search across source, symbols, and relationships.
 
-## Быстрый старт
+> **⚠️ Deep alpha.** The DB schema, index format, and API change without migrations. On any update the DB may become incompatible — you'll need `rm -rf ./data && docker compose up -d` and a full reindex. Don't run in production without a backup.
+
+## Features
+
+- Search: exact (by FQN/name), full-text (FTS5 trigram), semantic (vector), structural (symbol relationships)
+- Navigation: definition / references / implementations / callers / callees
+- Web UI to manage repositories, search, and diagnose
+
+## Quick start
 
 ```bash
 docker compose up -d
-# открой http://localhost:8080
-# health: curl http://localhost:8080/health/ready
+# http://localhost:8080
+curl http://localhost:8080/health/ready  # 200 → ready
 ```
 
-Без профиля `embeddings` CodeRAG работает, semantic search деградирует (FTS only).
+Stop: `docker compose down`. Data lives in `./data` — don't delete it.
 
-## Deployment
+## How to use
 
-### Production (минимально)
+1. **Repositories → Add Repository** — Git URL, branch, proxy/credentials if needed
+2. **Jobs** — wait for indexing to finish
+3. **Search** — query + filter by repo/language/symbol type; click → view the file with highlighting
+
+## Analyzers
+
+| Language | Engine | What it extracts |
+|---|---|---|
+| **C#** | Roslyn (`CSharpCompilation`, `SemanticModel`) | namespace/class/interface/record/struct/enum/method/property/field/event, inheritance, implementations, calls, parameter/return types. Distinguishes overloads and `NsA.Foo` vs `NsB.Foo` |
+| **SQL** | `TSql170Parser` (ScriptDom) | `PROCEDURE/FUNCTION/VIEW/TABLE/TRIGGER` (CREATE/ALTER). Requires `GO` between batches |
+| **VBS/VBScript** | Regex `^(Sub\|Function\|Class\|Property)` | Sub/Function/Class/Property + Class→method nesting, chunks split on `End Sub/Class` |
+| **Python, JS/TS, Go, C++** | Tree-sitter | function/class/method + `Calls` by name. Medium depth, no full semantics. TS/TSX maps to `javascript` |
+
+Unknown languages — sliding-window chunking (800 tokens, overlap 80). A single broken file never kills indexing.
+
+Oversized symbol chunks (a whole class/method) are split into windows of at most `Indexer:MaxChunkChars` (default 1500 chars ≈ 375 tokens) so each embedding stays focused instead of being diluted by an entire file.
+
+## Git and embeddings
+
+**Git** — only through the local `git` CLI. Each repository gets a checkout in `/data/repos/<slug>`:
+`clone --branch`, `fetch origin <branch>`, `diff --name-status -M IndexedCommit..newHead`, `ls-tree`, `rev-parse`. Supports proxy (`http/https/socks5`), `Credentials` (token/SSH), and `ls-remote` for validation. Sync is polling on `sync_interval` (default 5 min) + manual Sync/Re-index.
+
+**Embeddings** — any OpenAI-compatible API:
+`POST {endpoint}/v1/embeddings` with `{model, input, encoding_format}`. Default `http://llama-embeddings:8080/v1/embeddings`, model `bge-m3` (1024 dim). Batching, retry with backoff, timeout, and an LRU cache. Without an endpoint, search degrades to FTS + structural (a warning in the UI/API).
+
+Enable the local model:
+```bash
+docker compose --profile embeddings up -d  # downloads bge-m3-Q8_0.gguf ~2GB, needs ~4GB RAM
+```
+
+Switch to an external API via settings (see below).
+
+## Settings
+
+Changeable without a rebuild: Web UI **Settings** → DB (`settings` table) → takes priority over `env CODERAG__*` and `/data/settings.json` (hot reload).
+
+| Group | Key | Default | What it does |
+|---|---|---|---|
+| **Search** | `Search:DefaultSearchMode` | `Hybrid` | default mode: `semantic` / `lexical` / `structural` / `hybrid` |
+| | `Search:LexicalWeight` | `0.35` | FTS weight in hybrid ranking |
+| | `Search:SemanticWeight` | `0.35` | vector weight |
+| | `Search:StructuralWeight` | `0.15` | relationship weight + `ExactBonus=1.0` |
+| | `Search:MinSemanticScore` | `0.25` | drop vector matches below this cosine score (0 disables the filter) |
+| | `Search:DefaultResultCount` | `20` | results per query (max 100) |
+| | `Search:PreviewMaxLines` | `20` | preview lines |
+| | `Search:VectorTopK` | `50` | candidates from the vector index |
+| **Embedding** | `Embedding:Endpoint` | `http://llama-embeddings:8080/v1/embeddings` | OpenAI-compatible URL |
+| | `Embedding:Model` | `bge-m3` | model name, part of invalidation |
+| | `Embedding:Dimensions` | `1024` | dimensionality |
+| | `Embedding:BatchSize` / `Timeout` / `MaxRetries` | `32 / 30s / 3` | batching and retry |
+| | `Embedding:ApiKey` / `ProxyUrl` | — | key and proxy for an external API |
+| **Indexer** | `Indexer:MaxConcurrentIndexers` | `2` | parallel jobs |
+| | `Indexer:DefaultSyncIntervalSeconds` | `300` | repo polling |
+| | `Indexer:FullReindexThreshold` | `0.5` | >50% of files changed → full reindex |
+| | `Indexer:MaxChunkChars` | `1500` | split oversized symbol chunks into windows of at most this many chars |
+| | `Indexer:EnableFileWatcher` | `false` | FS watcher is dev-only |
+| **Git** | `Git:ReposRoot` | `/data/repos` | where to clone |
+| | `Git:DefaultTimeoutSeconds` | `120` | git command timeout |
+| | `Git:EnableFileWatcher` | `false` | — |
+
+Per-repository: `branch`, `proxy_id`, `credential_id`, `sync_interval_seconds`, `enabled`.
+
+Example `.env` for an external embedding:
+```
+CODERAG__Embedding__Endpoint=https://api.openai.com/v1/embeddings
+CODERAG__Embedding__Model=text-embedding-3-small
+CODERAG__Embedding__ApiKey=sk-...
+CODERAG__Embedding__Dimensions=1536
+```
+
+## MCP
 
 ```bash
-mkdir -p ./data
-docker compose up -d
-docker compose logs -f coderag
-curl -f http://localhost:8080/health/ready   # 200 → ready
-curl -f http://localhost:8080/api/health     # { database, vector, embedding, indexer, storage }
+docker compose --profile mcp up -d  # sidecar with /data:ro, stdio
 ```
 
-Persist: единый volume `./data:/data` (§6 deployment.md):
-
-```
-./data/
-  coderag.db          # SQLite
-  coderag.db-wal/shm
-  vector/             # векторный индекс (sqlite-vec / FAISS) — если внешний
-  repos/<slug>/       # Git checkouts
-  keys/               # DataProtection keys + SSH keys (chmod 700)
-  models/             # embedding GGUF (если профиль embeddings)
-  settings.json       # переопределяемые настройки (приоритет над env)
-```
-
-Конфигурация без пересборки (§34, deployment.md §7): `appsettings.json` + env `CODERAG__*` + `/data/settings.json` (последний — приоритет, hot reload через `IOptionsMonitor`). Секреты — через env или Docker secrets, логи без секретов.
-
-### С эмбеддингами (профиль `embeddings`)
-
-Автоматическое скачивание модели `bge-m3-Q8_0.gguf` при первом запуске (§57):
+## Updating and backup
 
 ```bash
-docker compose --profile embeddings up -d
-# модель скачивается один раз в ./data/models/bge-m3-Q8_0.gguf
-# проверить: docker compose logs llama-embeddings
-curl -f http://localhost:8081/health   # llama.cpp
-curl -f http://localhost:8080/api/health | jq .embedding
-```
+docker compose pull && docker compose up -d  # migrations run at start
 
-Переопределение модели через `.env` (см. `.env.example`):
-
-```
-MODEL_URL=https://huggingface.co/BAAI/bge-m3/resolve/main/bge-m3-Q8_0.gguf
-MODEL_FILE=/models/bge-m3-Q8_0.gguf
-LLAMA_ARGS=--embedding --port 8080 --threads 4
-CODERAG__Embedding__Endpoint=http://llama-embeddings:8080/v1/embeddings
-CODERAG__Embedding__Model=bge-m3
-```
-
-Требования: RAM ≥ 4GB для `bge-m3-Q8_0` (2GB модель + overhead), GPU опционально (`ghcr.io/ggerganov/llama.cpp:server-cuda`).
-
-Альтернатива — `MODEL_URL` для `nomic-embed-text`, `e5-mistral`.
-
-### Dev
-
-```bash
-docker compose -f docker-compose.dev.yml up -d
-# ASPNETCORE_ENVIRONMENT=Development, логи Debug
-docker compose -f docker-compose.dev.yml --profile embeddings up -d
-```
-
-### Health & Diagnostics (§35)
-
-```
-GET /health/live   → 200 если процесс жив
-GET /health/ready  → 200 если DB + Vector + Indexer готовы (embedding — не блокирует)
-GET /api/health    → детально: { database, vector, embedding, indexer, storage }
-```
-
-Web UI Diagnostics — из `/api/health`.
-
-### Backup
-
-Копия `./data` при остановленном writer или `VACUUM INTO`:
-
-```bash
-# Остановить запись
+# backup (stop writes)
 docker compose stop coderag
 cp -a ./data ./data.backup-$(date +%F)
-# или SQLite online backup:
-sqlite3 ./data/coderag.db "VACUUM INTO './data/coderag.backup.db'"
 docker compose start coderag
 ```
 
-Для vector index (`sqlite-vec`) — тот же механизм (файл в `./data/`).
+If `health/ready != 200` or the schema is incompatible after an update — delete `./data` and reindex.
 
-### Обновление
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-Миграции применяются автоматически при старте (`DbInitializer`, `schema_migrations`).
-
-### MCP (optional)
-
-```bash
-docker compose --profile mcp up -d
-# coderag-mcp — stdio sidecar, volume /data:ro, зависит от coderag
-```
-
-Если MCP — тот же процесс что Api — `coderag-mcp` не нужен.
-
-## Архитектура
-
-См. `docs/architecture.md` (исключена из git, локально). Слои: `Domain`, `Application`, `Infrastructure` (SQLite+FTS5+Vector), `Git`, `Embeddings`, `Indexer`, `Analyzers` (Roslyn / Tree-sitter / SQL), `Api`, `Mcp`.
-
-## Тестирование
-
-```bash
-dotnet test --collect:"XPlat Code Coverage"
-docker compose -f docker-compose.test.yml up --exit-code-from api-tests  # интеграционные
-```
-
-См. `docs/testing.md`.
-
-## Performance
-
-Синтетический генератор: `python tests/perf/generate.py --repos 50 --chunks 1000000 -o ./data/perf`
-
-Baseline: `docs/progress/perf-baseline.md`.
-
-## CI
-
-`.github/workflows/ci.yml` — `test` + `docker` jobs.
-
-## Лицензия
-
-TBD
+Diagnostics: `docker compose logs coderag`, `GET /api/health` (database/vector/embedding/indexer/storage), `GET /health/ready`.

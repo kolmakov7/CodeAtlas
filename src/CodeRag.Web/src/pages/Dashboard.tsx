@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useGlobalStatistics, useRepositories, useJobs, useActivity } from "@/api/hooks";
+import { useGlobalStatistics, useRepositories, useJobs, useActivity, useDiagnostics, useRepositoryActions } from "@/api/hooks";
 import { StatCard, SkeletonCard } from "@/components/StatCard";
 import { formatBytes, formatDate } from "@/utils/format";
 
@@ -8,6 +8,9 @@ export default function Dashboard() {
   const reposQ = useRepositories();
   const jobsQ = useJobs();
   const activityQ = useActivity(10);
+  const diagQ = useDiagnostics();
+  const { rebuildAll } = useRepositoryActions();
+  const staleIndex = diagQ.data?.vectorIndex?.stale === true;
 
   if (statsQ.isLoading) {
     return (
@@ -33,14 +36,16 @@ export default function Dashboard() {
     );
   }
   const sRaw: any = statsQ.data!;
+  const repoStatsArray = Array.isArray(sRaw.repositories) ? sRaw.repositories : [];
+  const repoCount = typeof sRaw.repositories === 'number' ? sRaw.repositories : repoStatsArray.length;
   // API returns RepositoryCount/FileCount... but Web expects repositories/files — handle both
   const s = {
-    repositories: sRaw.repositories ?? sRaw.repositoryCount ?? 0,
-    files: sRaw.files ?? sRaw.fileCount ?? 0,
-    symbols: sRaw.symbols ?? sRaw.symbolCount ?? 0,
-    chunks: sRaw.chunks ?? sRaw.chunkCount ?? 0,
+    repositories: repoCount,
+    files: sRaw.files ?? sRaw.fileCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.files ?? r.FileCount ?? 0), 0),
+    symbols: sRaw.symbols ?? sRaw.symbolCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.symbols ?? r.SymbolCount ?? 0), 0),
+    chunks: sRaw.chunks ?? sRaw.chunkCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.chunks ?? r.ChunkCount ?? 0), 0),
     relations: sRaw.relations ?? 0,
-    embeddingsIndexed: sRaw.embeddingsIndexed ?? sRaw.vectorCount ?? 0,
+    embeddingsIndexed: sRaw.embeddingsIndexed ?? sRaw.vectorCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.embeddingsIndexed ?? r.VectorCount ?? 0), 0),
     embeddingsPending: sRaw.embeddingsPending ?? 0,
     embeddingsFailed: sRaw.embeddingsFailed ?? 0,
     indexingRunning: sRaw.indexingRunning ?? 0,
@@ -56,6 +61,29 @@ export default function Dashboard() {
     <div>
       <h1 style={{ marginBottom: 4 }}>Global Dashboard</h1>
       <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>Aggregated index state across all repositories</p>
+
+      {staleIndex && (
+        <div className="card" style={{ marginBottom: 16, borderColor: "var(--danger)", background: "color-mix(in srgb, var(--danger) 12%, transparent)" }}>
+          <div style={{ fontWeight: 600, color: "var(--danger)", fontSize: 14 }}>Vector index is stale</div>
+          <div style={{ fontSize: 13, marginTop: 4, color: "var(--text-muted)" }}>
+            {diagQ.data?.vectorIndex?.reason ?? "Stored vectors don't match the current embedding model."}
+          </div>
+          <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              className="primary"
+              disabled={rebuildAll.isPending}
+              onClick={() => {
+                if (window.confirm("Rebuild the vector index for all repositories? This re-embeds every chunk with the current model.")) {
+                  rebuildAll.mutate();
+                }
+              }}
+            >
+              {rebuildAll.isPending ? "Rebuilding…" : "Rebuild all"}
+            </button>
+            {rebuildAll.isError && <span style={{ fontSize: 13, color: "var(--danger)" }}>Failed to start rebuild.</span>}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-5">
         <StatCard label="Repositories" value={s.repositories} />

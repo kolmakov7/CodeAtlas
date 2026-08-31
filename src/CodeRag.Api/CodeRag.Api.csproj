@@ -4,14 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <WebRoot>$(MSBuildThisFileDirectory)wwwroot\</WebRoot>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\CodeRag.Domain\CodeRag.Domain.csproj" />
+    <ProjectReference Include="..\CodeRag.Application\CodeRag.Application.csproj" />
     <ProjectReference Include="..\CodeRag.Infrastructure\CodeRag.Infrastructure.csproj" />
     <ProjectReference Include="..\CodeRag.Git\CodeRag.Git.csproj" />
     <ProjectReference Include="..\CodeRag.Embeddings\CodeRag.Embeddings.csproj" />
@@ -20,5 +23,26 @@
     <ProjectReference Include="..\CodeRag.Analyzers.Abstractions\CodeRag.Analyzers.Abstractions.csproj" />
     <ProjectReference Include="..\CodeRag.Analyzers.CSharp\CodeRag.Analyzers.CSharp.csproj" />
   </ItemGroup>
+
+  <!--
+    Web UI build (React + Vite): при `dotnet build` (Release) / `dotnet publish`
+    автоматически собирает src/CodeRag.Web/dist и копирует в wwwroot/.
+    В Docker Dockerfile уже делает то же самое в отдельной stage.
+    Для пропуска: SkipWebBuild=true (env или /p:SkipWebBuild=true).
+  -->
+  <Target Name="BuildWebUI" BeforeTargets="BeforePublish" Condition="'$(SkipWebBuild)' != 'true' AND Exists('$(MSBuildThisFileDirectory)..\CodeRag.Web\package.json')">
+    <PropertyGroup>
+      <WebProjectDir>$(MSBuildThisFileDirectory)..\CodeRag.Web\</WebProjectDir>
+      <WebDistDir>$(WebProjectDir)dist\</WebDistDir>
+      <WebNodeModules>$(WebProjectDir)node_modules\</WebNodeModules>
+    </PropertyGroup>
+    <Message Text="Building Web UI (React + Vite) from $(WebProjectDir)..." Importance="high" />
+    <Exec Command="npm ci --silent" WorkingDirectory="$(WebProjectDir)" Condition="!Exists('$(WebNodeModules)')" />
+    <Exec Command="npm run build" WorkingDirectory="$(WebProjectDir)" />
+    <ItemGroup>
+      <_WebDistFiles Include="$(WebDistDir)**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_WebDistFiles)" DestinationFiles="@(_WebDistFiles->'$(WebRoot)%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

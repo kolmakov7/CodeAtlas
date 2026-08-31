@@ -41,6 +41,35 @@ public sealed class InMemoryVectorStore : IVectorStore
         return Task.CompletedTask;
     }
 
+    public Task DeleteByRepositoryAsync(Guid repositoryId, CancellationToken ct = default)
+    {
+        foreach (var kv in _store.Where(x => x.Value.RepositoryId == repositoryId).ToList())
+            _store.TryRemove(kv.Key, out _);
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> ResetIndexAsync(int expectedDim, CancellationToken ct = default)
+    {
+        var stale = _store.Values.Any(v => v.Embedding.Length != expectedDim);
+        if (stale)
+        {
+            _store.Clear();
+            _logger.LogInformation("InMemoryVectorStore cleared: stored dim differs from expected {Dim}", expectedDim);
+        }
+        return Task.FromResult(stale);
+    }
+
+    public Task<VectorIndexSummary> GetIndexSummaryAsync(CancellationToken ct = default)
+    {
+        var stored = _store.Values
+            .GroupBy(v => (v.Model, v.Dim, v.ContextLength))
+            .Select(g => new VectorIndexModelInfo(g.Key.Model, g.Key.Dim, g.Key.ContextLength, g.Count()))
+            .OrderBy(x => x.Model)
+            .ThenBy(x => x.Dim)
+            .ToList();
+        return Task.FromResult(new VectorIndexSummary(stored));
+    }
+
     public Task<IReadOnlyList<ScoredChunk>> SearchAsync(float[] queryVector, int k, VectorSearchFilter? filter, CancellationToken ct = default)
     {
         if (queryVector is null || queryVector.Length == 0)
@@ -87,4 +116,8 @@ public sealed class InMemoryVectorStore : IVectorStore
 
     // Exposed for diagnostics
     public int Count => _store.Count;
+
+    public void Clear() => _store.Clear();
+
+    public bool HasDimensionMismatch(int dim) => _store.Values.Any(v => v.Embedding.Length != dim);
 }

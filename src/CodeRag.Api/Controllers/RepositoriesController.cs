@@ -2,8 +2,9 @@ using CodeRag.Api.Models;
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Exceptions;
+using CodeRag.Domain.Ports;
+using CodeRag.Git.Helpers;
 using CodeRag.Git.Services;
-using CodeRag.Infrastructure.Stores;
 using CodeRag.Indexer;
 using Microsoft.AspNetCore.Mvc;
 
@@ -15,17 +16,18 @@ public sealed class RepositoriesController : ControllerBase
 {
     private readonly IRepositoryService _repoService;
     private readonly IRepositoryStore _repoStore;
-    private readonly IndexingJobStore _jobStore;
     private readonly IJobRunner _jobRunner;
     private readonly ILogger<RepositoriesController> _logger;
+    private readonly string _reposRoot;
 
-    public RepositoriesController(IRepositoryService repoService, IRepositoryStore repoStore, IndexingJobStore jobStore, IJobRunner jobRunner, ILogger<RepositoriesController> logger)
+    public RepositoriesController(IRepositoryService repoService, IRepositoryStore repoStore, IJobRunner jobRunner, ILogger<RepositoriesController> logger, CodeRag.Infrastructure.Persistence.SqliteConnectionFactory factory)
     {
         _repoService = repoService;
         _repoStore = repoStore;
-        _jobStore = jobStore;
         _jobRunner = jobRunner;
         _logger = logger;
+        var dataDir = Path.GetDirectoryName(factory.DbPath) ?? "/data";
+        _reposRoot = Path.Combine(dataDir, "repos");
     }
 
     [HttpPost]
@@ -42,17 +44,22 @@ public sealed class RepositoriesController : ControllerBase
         var localPath = req.LocalPath;
         if (string.IsNullOrWhiteSpace(localPath))
         {
-            // Auto-generate inside /data/repos/<slug>
+            // Auto-generate inside {dataDir}/repos/<slug> (supports debug /tmp/debug-data2)
             var slug = ToSlug(req.Name);
-            localPath = $"/data/repos/{slug}";
+            localPath = Path.Combine(_reposRoot, slug);
         }
 
-        try
-        {
-            _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}'", req.Name, MaskUrl(req.GitUrl));
-            var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, req.ProxyId, req.CredentialId, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
-            return CreatedAtAction(nameof(GetById), new { id = repo.Id }, Map(repo));
-        }
+try
+            {
+                _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}'", req.Name, MaskUrl(req.GitUrl));
+                var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, req.ProxyId, req.CredentialId, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
+                
+                // Enqueue initial sync job to start indexing immediately
+                var job = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Sync);
+                await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
+                
+                return CreatedAtAction(nameof(GetById), new { id = repo.Id }, Map(repo));
+            }
         catch (DomainValidationException ex) { return Problem(title: ex.Message, statusCode: 422); }
         catch (ArgumentException ex) { return Problem(title: ex.Message, statusCode: 400); }
         catch (InvalidOperationException ex) { return Problem(title: ex.Message, statusCode: 422); }
@@ -147,6 +154,45 @@ public sealed class RepositoriesController : ControllerBase
         return Accepted(new { jobId = job.Id });
     }
 
+    [HttpPost("{id:guid}/reindex")]
+    public async Task<IActionResult> Reindex(Guid id, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
+
+        _logger.LogInformation("POST /api/repositories/{Id}/reindex", id);
+        var job = IndexingJob.Create(Guid.NewGuid(), id, JobType.Rebuild);
+        await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
+        return Accepted(new { jobId = job.Id });
+    }
+
+    [HttpPost("{id:guid}/reembed")]
+    public async Task<IActionResult> Reembed(Guid id, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
+
+        _logger.LogInformation("POST /api/repositories/{Id}/reembed", id);
+        var job = IndexingJob.Create(Guid.NewGuid(), id, JobType.Embedding);
+        await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
+        return Accepted(new { jobId = job.Id });
+    }
+
+    [HttpPost("rebuild-all")]
+    public async Task<IActionResult> RebuildAll(CancellationToken ct)
+    {
+        var repos = await _repoStore.ListAsync(ct).ConfigureAwait(false);
+        var jobIds = new List<Guid>(repos.Count);
+        foreach (var repo in repos)
+        {
+            var job = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Rebuild);
+            await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
+            jobIds.Add(job.Id);
+        }
+        _logger.LogInformation("POST /api/repositories/rebuild-all count={Count}", jobIds.Count);
+        return Accepted(new { jobIds });
+    }
+
     [HttpPost("{id:guid}/pause")]
     public async Task<IActionResult> Pause(Guid id, CancellationToken ct)
     {
@@ -184,8 +230,6 @@ public sealed class RepositoriesController : ControllerBase
 
     private static string MaskUrl(string url)
     {
-        try { return new string(url.Select(c => c).ToArray()); } catch { return "***"; }
-        // Simple: do not log token in url (mask)
-        // Leverage Git.Helpers.SecretMasker if available
+        try { return SecretMasker.Mask(url); } catch { return "***"; }
     }
 }

@@ -9,5 +9,8 @@ obj/
 # Test output
 TestResults/
 
+# Web UI build output (Vite dist → wwwroot, auto-copied by CodeRag.Api.csproj)
+src/CodeRag.Api/wwwroot/
+
 # Local data (when running outside Docker)
 data/

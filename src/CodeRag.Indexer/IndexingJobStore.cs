@@ -1,6 +1,6 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Indexer;
@@ -9,11 +9,11 @@ namespace CodeRag.Indexer;
 /// Persistence для indexing_jobs (indexing.md §4, storage.md §2).
 /// Хранит JobType/JobStatus как строки, progress 0..1.
 /// </summary>
-public sealed class IndexingJobStore
+public sealed class IndexingJobStore : IIndexingJobStore
 {
-    private readonly SqliteConnectionFactory _factory;
+    private readonly IDbConnectionFactory _factory;
 
-    public IndexingJobStore(SqliteConnectionFactory factory) => _factory = factory;
+    public IndexingJobStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(IndexingJob job, CancellationToken ct = default)
     {

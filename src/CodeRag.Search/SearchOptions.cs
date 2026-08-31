@@ -22,6 +22,14 @@ public sealed class SearchOptions
     /// <summary>k for vector search (spec k=50)</summary>
     public int VectorTopK { get; set; } = 50;
 
+    /// <summary>
+    /// Minimum cosine similarity for a vector match to count as relevant. Vector candidates below this
+    /// are dropped so a weak/ambiguous query returns no results instead of "least-irrelevant" random
+    /// code. Calibrated to this codebase: genuinely relevant matches score ~0.31+, random noise ~0.21-;
+    /// 0.25 sits in the gap. Set to 0 to disable filtering.
+    /// </summary>
+    public double MinSemanticScore { get; set; } = 0.25;
+
     /// <summary>exactBonus +1.0</summary>
     public double ExactBonus { get; set; } = 1.0;
 }

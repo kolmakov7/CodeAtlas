@@ -18,21 +18,22 @@ public sealed class SearchService : ISearchService
     private readonly IVectorStore _vectorStore;
     private readonly IEmbeddingProvider? _embeddingProvider;
     private readonly ILogger<SearchService> _logger;
-    private readonly SearchOptions _options;
+    private readonly IOptionsMonitor<SearchOptions> _optionsMonitor;
+    private SearchOptions Opts => _optionsMonitor.CurrentValue;
 
     public SearchService(
         SqliteConnectionFactory factory,
         FtsHelper fts,
         IVectorStore vectorStore,
         ILogger<SearchService> logger,
-        IOptions<SearchOptions> options,
+        IOptionsMonitor<SearchOptions> options,
         IServiceProvider serviceProvider)
     {
         _factory = factory;
         _fts = fts;
         _vectorStore = vectorStore;
         _logger = logger;
-        _options = options?.Value ?? new SearchOptions();
+        _optionsMonitor = options;
         // Optional embedding provider (graceful degradation)
         _embeddingProvider = serviceProvider.GetService(typeof(IEmbeddingProvider)) as IEmbeddingProvider;
     }
@@ -42,7 +43,7 @@ public sealed class SearchService : ISearchService
         var sw = Stopwatch.StartNew();
         var query = req.Query?.Trim() ?? string.Empty;
         var warnings = new List<string>();
-        var limit = req.Limit <= 0 ? _options.DefaultResultCount : Math.Min(req.Limit, _options.MaxResultCount);
+        var limit = req.Limit <= 0 ? Opts.DefaultResultCount : Math.Min(req.Limit, Opts.MaxResultCount);
         var offset = Math.Max(0, req.Offset);
         var mode = req.Mode;
 
@@ -84,7 +85,7 @@ public sealed class SearchService : ISearchService
                     }
                     acc.Origins.Add("exact");
                     acc.HasExact = true;
-                    acc.ExactBonus = _options.ExactBonus;
+                    acc.ExactBonus = Opts.ExactBonus;
                 }
                 exactCount = chunkIds.Count;
             }
@@ -124,7 +125,10 @@ public sealed class SearchService : ISearchService
         if (runVector)
         {
             var vecResults = await GetVectorCandidatesAsync(query, repoFilter, warnings, ct).ConfigureAwait(false);
-            foreach (var r in vecResults)
+            // Drop low-confidence vector matches so weak/ambiguous queries return no results instead of
+            // "least-irrelevant" random code (see SearchOptions.MinSemanticScore).
+            var relevantVec = vecResults.Where(r => r.Score >= Opts.MinSemanticScore).ToList();
+            foreach (var r in relevantVec)
             {
                 if (!candidates.TryGetValue(r.ChunkId, out var acc))
                 {
@@ -139,7 +143,7 @@ public sealed class SearchService : ISearchService
                     acc.VectorDistance = r.Distance;
                 }
             }
-            vectorCount = vecResults.Count;
+            vectorCount = relevantVec.Count;
         }
 
         // Structural branch (only for Hybrid)
@@ -178,7 +182,7 @@ public sealed class SearchService : ISearchService
             _logger.LogInformation(
                 "Search query={Query} mode={Mode} latency={Latency}ms candidates=0 exact={Exact} fts={Fts} vector={Vec} struct={Struct} total=0 weights lex={Lex} sem={Sem} struct={StructW} warnings={Warnings}",
                 query, mode, sw.ElapsedMilliseconds, exactCount, ftsCount, vectorCount, structCount,
-                _options.LexicalWeight, _options.SemanticWeight, _options.StructuralWeight,
+                Opts.LexicalWeight, Opts.SemanticWeight, Opts.StructuralWeight,
                 warnings.Count == 0 ? "none" : string.Join(",", warnings));
             return new SearchResult(Array.Empty<SearchResultItem>(), 0, warnings) { ElapsedMs = sw.ElapsedMilliseconds };
         }
@@ -219,7 +223,7 @@ public sealed class SearchService : ISearchService
             _logger.LogInformation(
                 "Search query={Query} mode={Mode} latency={Latency}ms candidates={Cand} filtered=0 weights lex={Lex} sem={Sem} struct={StructW}",
                 query, mode, sw.ElapsedMilliseconds, candidates.Count,
-                _options.LexicalWeight, _options.SemanticWeight, _options.StructuralWeight);
+                Opts.LexicalWeight, Opts.SemanticWeight, Opts.StructuralWeight);
             return new SearchResult(Array.Empty<SearchResultItem>(), 0, warnings) { ElapsedMs = sw.ElapsedMilliseconds };
         }
 
@@ -238,6 +242,14 @@ public sealed class SearchService : ISearchService
         var scored = new List<(CandidateAccumulator acc, ChunkInfo info, double finalScore)>(filtered.Count);
         foreach (var (acc, info) in filtered)
         {
+            // Semantic-only mode: rank by absolute cosine similarity (0..1) — meaningful, comparable scores
+            if (mode == SearchMode.Semantic)
+            {
+                var semScore = Math.Clamp(acc.VectorScore ?? 0.0, 0.0, 1.0);
+                scored.Add((acc, info, semScore));
+                continue;
+            }
+
             double normFts = 0, normVec = 0;
             if (acc.FtsRank.HasValue)
             {
@@ -250,11 +262,11 @@ public sealed class SearchService : ISearchService
                 else normVec = (acc.VectorScore.Value - vecMin) / (vecMax - vecMin);
             }
             double structuralBoost = acc.HasStructural ? 1.0 : 0.0;
-            double exactBonus = acc.HasExact ? _options.ExactBonus : 0.0;
+            double exactBonus = acc.HasExact ? Opts.ExactBonus : 0.0;
 
-            double finalScore = _options.LexicalWeight * normFts
-                              + _options.SemanticWeight * normVec
-                              + _options.StructuralWeight * structuralBoost
+            double finalScore = Opts.LexicalWeight * normFts
+                              + Opts.SemanticWeight * normVec
+                              + Opts.StructuralWeight * structuralBoost
                               + exactBonus;
             scored.Add((acc, info, finalScore));
         }
@@ -274,7 +286,7 @@ public sealed class SearchService : ISearchService
         var items = new List<SearchResultItem>(paged.Count);
         foreach (var (acc, info, score) in paged)
         {
-            var preview = BuildPreview(info.Source, _options.PreviewMaxLines);
+            var preview = BuildPreview(info.Source, Opts.PreviewMaxLines);
             var origin = string.Join(",", acc.Origins.OrderBy(o => o, StringComparer.Ordinal));
             var startLine = info.StartLine ?? 1;
             var endLine = info.EndLine ?? startLine;
@@ -302,7 +314,7 @@ public sealed class SearchService : ISearchService
             "Search query={Query} mode={Mode} latency={Latency}ms candidates={Cand} total={Total} returned={Returned} exact={Exact} fts={Fts} vector={Vec} struct={Struct} weights lex={Lex} sem={Sem} structW={StructW} warnings={Warnings}",
             query, mode, sw.ElapsedMilliseconds, candidates.Count, total, items.Count,
             exactCount, ftsCount, vectorCount, structCount,
-            _options.LexicalWeight, _options.SemanticWeight, _options.StructuralWeight,
+            Opts.LexicalWeight, Opts.SemanticWeight, Opts.StructuralWeight,
             warnings.Count == 0 ? "none" : string.Join(",", warnings));
 
         return new SearchResult(items, total, warnings) { ElapsedMs = sw.ElapsedMilliseconds };
@@ -479,7 +491,7 @@ public sealed class SearchService : ISearchService
         int end = req.EndLine.HasValue ? Math.Clamp(req.EndLine.Value, start, totalLines) : totalLines;
 
         // Limit preview 20 lines
-        int maxLines = _options.PreviewMaxLines;
+        int maxLines = Opts.PreviewMaxLines;
         if (end - start + 1 > maxLines)
             end = start + maxLines - 1;
 
@@ -608,7 +620,7 @@ public sealed class SearchService : ISearchService
         try
         {
             var filter = (repoIds != null && repoIds.Length > 0) ? new VectorSearchFilter(repoIds) : VectorSearchFilter.Empty;
-            var results = await _vectorStore.SearchAsync(queryVector, _options.VectorTopK, filter, ct).ConfigureAwait(false);
+            var results = await _vectorStore.SearchAsync(queryVector, Opts.VectorTopK, filter, ct).ConfigureAwait(false);
             return results;
         }
         catch (Exception ex)

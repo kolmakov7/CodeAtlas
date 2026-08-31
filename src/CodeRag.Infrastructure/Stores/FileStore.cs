@@ -1,13 +1,13 @@
 using CodeRag.Domain.Entities;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
 
-public sealed class FileStore : IFileStore
+public sealed class FileStore : CodeRag.Domain.Ports.IFileStore, IFileStore
 {
-    private readonly SqliteConnectionFactory _factory;
-    public FileStore(SqliteConnectionFactory factory) => _factory = factory;
+    private readonly IDbConnectionFactory _factory;
+    public FileStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(FileEntry file, CancellationToken ct = default)
     {

@@ -4,7 +4,7 @@ import { useSearch, useRepositories, useFileContent } from "@/api/hooks";
 import type { SearchMode, SearchHit } from "@/api/types";
 import { SourceView, PreviewWithHighlight } from "@/components/SourceView";
 
-const modes: SearchMode[] = ["Hybrid", "FullText", "Semantic", "Symbol"];
+const modes: SearchMode[] = ["Hybrid", "Semantic", "FullText", "Symbol"];
 const languages = ["C#", "SQL", "Python", "JavaScript", "C++", "Go", "VBS"];
 
 export default function SearchPage() {
@@ -124,7 +124,7 @@ export default function SearchPage() {
               </div>
             </>
           ) : (
-            <div style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 12 }}>Enter a query (≥2 chars) to search. Try <code>Hybrid</code> for best recall.</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 12 }}>Enter a query (≥2 chars) to search. Default is <code>Hybrid</code> (semantic + lexical + exact); switch modes above to compare.</div>
           )}
         </div>
 
