@@ -92,7 +92,8 @@ public sealed class SearchMappersTests
     [InlineData("", SearchMode.Hybrid)]
     [InlineData("hybrid", SearchMode.Hybrid)]
     [InlineData("Semantic", SearchMode.Semantic)]
-    [InlineData("fts", SearchMode.Hybrid)] // unknown -> Hybrid fallback (default mode)
+    [InlineData("fts", SearchMode.FullText)] // alias -> FullText
+    [InlineData("foo", SearchMode.Hybrid)] // unknown -> Hybrid fallback (default mode)
     [InlineData("FullText", SearchMode.FullText)]
     public void ParseMode_should_handle_cases(string? input, SearchMode expected)
     {

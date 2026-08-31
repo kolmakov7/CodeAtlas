@@ -5,7 +5,9 @@ public enum SearchMode
     Hybrid = 0,
     FullText = 1,
     Semantic = 2,
-    Symbol = 3
+    Symbol = 3,
+    SemanticCode = 4,
+    SemanticText = 5
 }
 
 public sealed record SearchRequest(
@@ -30,7 +32,8 @@ public sealed record GetCodeRequest(
     Guid RepositoryId,
     string Path,
     int? StartLine = null,
-    int? EndLine = null);
+    int? EndLine = null,
+    int? MaxLines = null);
 
 public sealed record SourceSlice(
     Guid RepositoryId,

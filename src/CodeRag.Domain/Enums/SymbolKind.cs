@@ -6,6 +6,8 @@ public enum SymbolKind
     Unknown = 0,
     Class = 1,
     Interface = 2,
+    Record = 18,
+    Event = 19,
     Struct = 3,
     Enum = 4,
     EnumMember = 5,

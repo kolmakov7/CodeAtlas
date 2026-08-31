@@ -49,34 +49,47 @@ public sealed class CodeSearchTools : IMcpToolHandler
     [McpServerTool(Name = "repositories"), Description("Alias for Repositories")]
     public Task<string> Repositories() => RepositoriesAsync();
 
-    [McpServerTool, Description("Report the two independent embedding domains (code + text): configured model and vector dimensions for each endpoint.")]
-    public string EmbeddingStatus()
+    [McpServerTool, Description("Report the two independent embedding domains (code + text): status, configured model, vector dimensions and indexed/pending vector counts per domain. Use to verify which embedding endpoints the index was built against.")]
+    public async Task<string> EmbeddingStatus(CancellationToken ct = default)
     {
         _logger.LogInformation("MCP embedding_status");
+        IReadOnlyList<CodeRag.Domain.Ports.EmbeddingDomainStats>? global = null;
+        try
+        {
+            global = (await _stats.GetGlobalStatisticsAsync(ct).ConfigureAwait(false)).EmbeddingStats;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "MCP embedding_status: statistics unavailable");
+        }
+
         var sb = new StringBuilder();
         sb.AppendLine("Embedding domains:");
         foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
         {
+            var text = domain.ToText();
             try
             {
                 var provider = _embeddings.Get(domain);
-                sb.AppendLine($"- {domain.ToText()}: model={provider.Model} dimensions={provider.Dimensions}");
+                var stats = global?.FirstOrDefault(e => string.Equals(e.Domain, text, StringComparison.OrdinalIgnoreCase));
+                var status = stats is { Indexed: > 0 } ? "ready" : "configured, no vectors";
+                sb.AppendLine($"- {text}: status={status} model={provider.Model} dimensions={provider.Dimensions} vectors={stats?.Indexed ?? 0} pending={stats?.Pending ?? 0}");
             }
             catch (Exception ex)
             {
-                sb.AppendLine($"- {domain.ToText()}: unavailable ({ex.Message})");
+                sb.AppendLine($"- {text}: status=unavailable model=? dimensions=? ({ex.Message})");
             }
         }
         return sb.ToString();
     }
 
     [McpServerTool(Name = "embedding_status"), Description("Alias for EmbeddingStatus")]
-    public string EmbeddingStatusAlias() => EmbeddingStatus();
+    public Task<string> EmbeddingStatusAlias(CancellationToken ct = default) => EmbeddingStatus(ct);
 
-    [McpServerTool, Description("Code search (Hybrid by default: semantic + FullText + exact; Semantic = vectors only, no FTS; FullText = lexical only; Symbol = name lookup). Results include repositoryId, chunkId and symbolId so you can follow up with get_code / get_symbol / get_relations. Use to find code by query.")]
+    [McpServerTool, Description("Code search (Hybrid by default: semantic + FullText + exact; Semantic = vectors only code+text merged, SemanticCode = code domain only (http://192.168.137.25:8082), SemanticText = text/docs corpus only (http://192.168.137.25:8083), no FTS; FullText = lexical only; Symbol = name lookup). Results include repositoryId, chunkId and symbolId so you can follow up with get_code / get_symbol / get_relations. Use to find code by query.")]
     public async Task<string> SearchCodeAsync(
         [Description("Search query text")] string query,
-        [Description("Mode: Hybrid|FullText|Semantic|Symbol (default Hybrid)")] string? mode = null,
+        [Description("Mode: Hybrid|FullText|Semantic|SemanticCode|SemanticText|Symbol (default Hybrid)")] string? mode = null,
         [Description("Max results (1..100, default 20)")] int? limit = null,
         [Description("Offset for pagination (default 0)")] int? offset = null,
         [Description("Optional repository filter (Guid array)")] Guid[]? repositoryIds = null,
@@ -109,13 +122,13 @@ public sealed class CodeSearchTools : IMcpToolHandler
     [McpServerTool(Name = "search_code"), Description("Alias for SearchCode")]
     public Task<string> SearchCode(string query, string? mode = null, int? limit = null, int? offset = null, Guid[]? repositoryIds = null, double? minScore = null) => SearchCodeAsync(query, mode, limit, offset, repositoryIds, minScore: minScore);
 
-    [McpServerTool, Description("Get code slice for indexed file. Path traversal protected. Default 200 lines.")]
+    [McpServerTool, Description("Get source code of an indexed file (exact lines). Path traversal protected. Default 200 lines; when truncated the output says which line to continue from.")]
     public async Task<string> GetCodeAsync(
         [Description("Repository Id (Guid)")] Guid repositoryId,
         [Description("File path relative to repo root (indexed only)")] string path,
         [Description("Start line 1-based (optional)")] int? startLine = null,
         [Description("End line inclusive (optional)")] int? endLine = null,
-        [Description("Max preview lines (default 200, max 1000)")] int? maxLines = null,
+        [Description("Max lines to return (default 200, max 1000)")] int? maxLines = null,
         CancellationToken ct = default)
     {
         if (repositoryId == Guid.Empty) return "Error: repositoryId required";
@@ -126,13 +139,14 @@ public sealed class CodeSearchTools : IMcpToolHandler
         _logger.LogInformation("MCP get_code repo={Repo} path='{Path}'", repositoryId, path);
         try
         {
-            var slice = await _search.GetCodeAsync(new GetCodeRequest(repositoryId, path, startLine, endLine), ct).ConfigureAwait(false);
-            var preview = Truncate(slice.Preview, limit);
+            var slice = await _search.GetCodeAsync(new GetCodeRequest(repositoryId, path, startLine, endLine, limit), ct).ConfigureAwait(false);
+            var requestedEnd = endLine ?? slice.TotalLines;
+            var truncated = slice.EndLine < requestedEnd;
             var sb = new StringBuilder();
             sb.AppendLine($"File: {slice.Path} language:{slice.Language} lines {slice.StartLine}-{slice.EndLine}/{slice.TotalLines}");
-            sb.AppendLine($"Preview ({Math.Min(limit, slice.Content.Split('\n').Length)} lines):");
-            sb.AppendLine(Indent(preview));
-            sb.AppendLine($"Full content length: {slice.Content.Length} chars");
+            sb.AppendLine(Indent(Truncate(slice.Content, limit)));
+            if (truncated)
+                sb.AppendLine($"[truncated at maxLines={limit}; continue with startLine={slice.EndLine + 1}]");
             return sb.ToString();
         }
         catch (Exception ex)
@@ -203,11 +217,11 @@ public sealed class CodeSearchTools : IMcpToolHandler
         return incoming[0].FromSymbol;
     }
 
-    [McpServerTool, Description("Traverse relations of a symbol. direction: outgoing|incoming|both (default both). relationTypes: optional comma list (Calls, Inherits, Implements, DependsOn, Contains, Overrides). Returns relation type plus both endpoints with FQN, location and id — use the endpoint ids to keep traversing.")]
+    [McpServerTool, Description("Traverse relations of a symbol. direction: outgoing|incoming|both (default both). relationTypes: optional comma list; case-insensitive with aliases — 'calls', 'contains', 'depends_on', 'inherits', 'implements', 'overrides', 'refs' (references), 'uses', 'imports'. Returns relation type plus both endpoints with FQN, location and id — use the endpoint ids to keep traversing.")]
     public async Task<string> GetRelationsAsync(
         Guid symbolId,
         [Description("Direction: outgoing|incoming|both (default both)")] string? direction = null,
-        [Description("Optional comma-separated relation types, e.g. 'Calls,DependsOn'")] string? relationTypes = null,
+        [Description("Optional comma-separated relation types, e.g. 'calls,depends_on'. Case-insensitive; aliases like 'refs' accepted.")] string? relationTypes = null,
         [Description("Max relations (default 20, max 200)")] int? limit = null,
         CancellationToken ct = default)
     {
@@ -358,7 +372,17 @@ public sealed class CodeSearchTools : IMcpToolHandler
     private static SearchMode ParseMode(string? mode)
     {
         if (string.IsNullOrWhiteSpace(mode)) return SearchMode.Hybrid;
-        return Enum.TryParse<SearchMode>(mode, true, out var m) ? m : SearchMode.Hybrid;
+        var n = mode.Trim().ToLowerInvariant().Replace("-", "").Replace("_", "");
+        return n switch
+        {
+            "hybrid" => SearchMode.Hybrid,
+            "fulltext" or "fts" or "lexical" => SearchMode.FullText,
+            "semantic" => SearchMode.Semantic,
+            "semanticcode" or "code" or "codesemantic" => SearchMode.SemanticCode,
+            "semantictext" or "text" or "textsemantic" or "docs" => SearchMode.SemanticText,
+            "symbol" => SearchMode.Symbol,
+            _ => Enum.TryParse<SearchMode>(mode, true, out var m) ? m : SearchMode.Hybrid
+        };
     }
 
     private static string Truncate(string s, int maxLines)

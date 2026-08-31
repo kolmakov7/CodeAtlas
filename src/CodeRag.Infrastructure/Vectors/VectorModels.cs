@@ -1,3 +1,5 @@
+using CodeRag.Domain.Enums;
+
 namespace CodeRag.Infrastructure.Vectors;
 
 /// <summary>
@@ -36,7 +38,8 @@ public sealed record VectorIndexSummary(IReadOnlyList<VectorIndexModelInfo> Stor
 public sealed record ScoredChunk(
     Guid ChunkId,
     double Score,
-    double Distance
+    double Distance,
+    EmbeddingDomain Domain = EmbeddingDomain.Code
 );
 
 /// <summary>

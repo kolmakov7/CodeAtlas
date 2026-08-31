@@ -1,8 +1,9 @@
 # CodeAtlas → OpenCode (MCP) example
 
 Connect [OpenCode](https://opencode.ai) to a running [CodeAtlas](../../README.md) MCP
-server so the agent can do semantic + full-text + structural code search and navigation
-across repositories you've indexed.
+server so the agent can do semantic (code+text isolated) + full-text + structural code search and navigation
+across repositories you've indexed. Default `search_code` is Hybrid (lexical+semantic+exact+structural);
+explicit `SemanticCode` (`jina-code` @ `http://192.168.137.25:8082` — code chunks) and `SemanticText` (`jina-text` @ `http://192.168.137.25:8083` — docs/markdown) are isolated.
 
 This folder contains:
 
@@ -84,6 +85,19 @@ Use codeatlas to find where payment orchestration is implemented in the eShop re
 You should see the agent call `codeatlas_repositories` / `codeatlas_search_code` and
 return real vector + full-text results. To confirm the effective embedding config, ask it
 to call `codeatlas_embedding_status`.
+
+Minimal tool check (inside OpenCode):
+
+```
+- codeatlas_repositories → eShop should appear with files/chunks/symbols/relations
+- codeatlas_search_code("CatalogService", "Symbol") → exact CatalogService classes
+- codeatlas_search_code("catalog service retrieving products", "SemanticCode") → CatalogService code
+- codeatlas_search_code("How is the application configured?", "SemanticText") → docs
+- codeatlas_search_code("youtube", "Semantic") → 0 results (weak query filtered, not garbage)
+```
+
+Available tools: `codeatlas_repositories`, `codeatlas_embedding_status`, `codeatlas_search_code` (modes Hybrid|Semantic|SemanticCode|SemanticText|FullText|Symbol), `codeatlas_get_code`, `codeatlas_find_symbol`, `codeatlas_get_symbol`, `codeatlas_get_relations`, `codeatlas_find_references`, `codeatlas_find_implementations`, `codeatlas_find_callers`, `codeatlas_find_callees`.
+Chain: `search/find_symbol → get_symbol → get_relations → related symbolId → get_symbol/get_code`.
 
 ## Optional: override embedding endpoints
 

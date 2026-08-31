@@ -63,10 +63,11 @@ public sealed class SearchService : ISearchService
         int exactCount = 0, ftsCount = 0, vectorCount = 0, structCount = 0;
         List<Guid> exactSymbolIds = new();
 
-        // Determine which branches to run
+        // Determine which branches to run — SemanticCode/SemanticText are code/text-isolated variants of Semantic
+        bool isSemantic = mode == SearchMode.Semantic || mode == SearchMode.SemanticCode || mode == SearchMode.SemanticText;
         bool runExact = mode == SearchMode.Hybrid || mode == SearchMode.Symbol;
         bool runFts = mode == SearchMode.Hybrid || mode == SearchMode.FullText;
-        bool runVector = mode == SearchMode.Hybrid || mode == SearchMode.Semantic;
+        bool runVector = mode == SearchMode.Hybrid || isSemantic;
         bool runStructural = mode == SearchMode.Hybrid;
 
         // Exact / Symbol branch
@@ -121,14 +122,20 @@ public sealed class SearchService : ISearchService
             }
         }
 
-        // Vector branch
+        // Vector branch — pass mode to isolate code vs text domains (SemanticCode/SemanticText)
         if (runVector)
         {
-            var vecResults = await GetVectorCandidatesAsync(query, repoFilter, warnings, ct).ConfigureAwait(false);
+            var vecResults = await GetVectorCandidatesAsync(query, repoFilter, warnings, mode, ct).ConfigureAwait(false);
             // Drop low-confidence vector matches so weak/ambiguous queries return no results instead of
-            // noise. Request may override the configured floor.
+            // noise. Request may override the configured floor. Filtering is on raw cosine (0..1),
+            // not per-domain normalized, so weak queries correctly yield 0 instead of inflated normalized 1.0.
+            // The text model scores irrelevant prose high (0.33-0.46), so text-domain candidates use a
+            // higher absolute floor (MinTextSemanticScore) to keep junk docs out of results.
             var minScore = req.MinScore ?? Opts.MinSemanticScore;
-            var relevantVec = vecResults.Where(r => r.Score >= minScore).ToList();
+            var textFloor = Math.Max(minScore, Opts.MinTextSemanticScore);
+            var relevantVec = vecResults
+                .Where(r => r.Score >= (r.Domain == EmbeddingDomain.Text ? textFloor : minScore))
+                .ToList();
             foreach (var r in relevantVec)
             {
                 if (!candidates.TryGetValue(r.ChunkId, out var acc))
@@ -142,6 +149,7 @@ public sealed class SearchService : ISearchService
                 {
                     acc.VectorScore = r.Score;
                     acc.VectorDistance = r.Distance;
+                    acc.VectorDomain = r.Domain;
                 }
             }
             vectorCount = relevantVec.Count;
@@ -234,20 +242,43 @@ public sealed class SearchService : ISearchService
         double ftsMax = ftsRanks.Count > 0 ? ftsRanks.Max() : 0;
         bool ftsHasRange = ftsRanks.Count > 0 && Math.Abs(ftsMax - ftsMin) > 1e-9;
 
-        var vecScores = filtered.Where(x => x.acc.VectorScore.HasValue).Select(x => x.acc.VectorScore!.Value).ToList();
-        double vecMin = vecScores.Count > 0 ? vecScores.Min() : 0;
-        double vecMax = vecScores.Count > 0 ? vecScores.Max() : 0;
-        bool vecHasRange = vecScores.Count > 0 && Math.Abs(vecMax - vecMin) > 1e-9;
+        // Per-domain vector bounds: code and text live in separate embedding spaces (different models),
+        // so their raw cosines are NOT comparable. Normalize each domain within its own min/max before
+        // merging; otherwise the domain whose model happens to score higher (typically text on prose
+        // queries) always dominates Hybrid/Semantic results.
+        var vecBounds = new Dictionary<EmbeddingDomain, (double Min, double Max, bool HasRange)>();
+        foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
+        {
+            var scores = filtered
+                .Where(x => x.acc.VectorScore.HasValue && x.acc.VectorDomain == domain)
+                .Select(x => x.acc.VectorScore!.Value)
+                .ToList();
+            if (scores.Count == 0) continue;
+            vecBounds[domain] = (scores.Min(), scores.Max(), Math.Abs(scores.Max() - scores.Min()) > 1e-9);
+        }
+
+        // Normalize a vector score within its own domain. The text domain is down-weighted
+        // (TextDomainWeight) so code questions are not out-ranked by doc chunks.
+        double NormVec(CandidateAccumulator acc)
+        {
+            if (!acc.VectorScore.HasValue) return 0;
+            if (!vecBounds.TryGetValue(acc.VectorDomain, out var b)) return 1.0;
+            var norm = !b.HasRange ? 1.0 : (acc.VectorScore.Value - b.Min) / (b.Max - b.Min);
+            return acc.VectorDomain == EmbeddingDomain.Text ? norm * Opts.TextDomainWeight : norm;
+        }
 
         // Compute final scores
         var scored = new List<(CandidateAccumulator acc, ChunkInfo info, double finalScore)>(filtered.Count);
         foreach (var (acc, info) in filtered)
         {
-            // Semantic-only mode: rank by the merged semantic score (0..1). This is the per-domain
-            // min-max-normalized cosine similarity from the code/text vector spaces (see GetVectorCandidatesAsync).
-            if (mode == SearchMode.Semantic)
+            // Semantic-only modes: no lexical/structural/exact components.
+            if (mode == SearchMode.Semantic || mode == SearchMode.SemanticCode || mode == SearchMode.SemanticText)
             {
-                var semScore = Math.Clamp(acc.VectorScore ?? 0.0, 0.0, 1.0);
+                // Single-domain modes rank by raw cosine; merged Semantic ranks by per-domain
+                // normalized score so code and text chunks are comparable across models.
+                var semScore = mode == SearchMode.Semantic
+                    ? NormVec(acc)
+                    : Math.Clamp(acc.VectorScore ?? 0.0, 0.0, 1.0);
                 scored.Add((acc, info, semScore));
                 continue;
             }
@@ -258,11 +289,7 @@ public sealed class SearchService : ISearchService
                 if (!ftsHasRange) normFts = 1.0;
                 else normFts = (ftsMax - acc.FtsRank.Value) / (ftsMax - ftsMin);
             }
-            if (acc.VectorScore.HasValue)
-            {
-                if (!vecHasRange) normVec = 1.0;
-                else normVec = (acc.VectorScore.Value - vecMin) / (vecMax - vecMin);
-            }
+            normVec = NormVec(acc);
             double structuralBoost = acc.HasStructural ? 1.0 : 0.0;
             double exactBonus = acc.HasExact ? Opts.ExactBonus : 0.0;
 
@@ -356,7 +383,12 @@ public sealed class SearchService : ISearchService
             p.Add("kind", req.SymbolKind.Trim());
         }
 
-        sql.Append(" ORDER BY s.fqn, s.name LIMIT @limit OFFSET @offset;");
+        // Prefer exact name match and higher-value kinds (Class/Interface) so agent sees relevant symbol first.
+        p.Add("exact", q);
+        sql.Append(@" ORDER BY
+            CASE WHEN s.name = @exact COLLATE NOCASE THEN 0 WHEN s.fqn = @exact COLLATE NOCASE THEN 1 ELSE 2 END,
+            CASE s.kind WHEN 'Class' THEN 0 WHEN 'Interface' THEN 1 WHEN 'Record' THEN 2 WHEN 'Struct' THEN 3 WHEN 'Enum' THEN 4 WHEN 'Method' THEN 5 ELSE 6 END,
+            length(s.fqn), s.fqn LIMIT @limit OFFSET @offset;");
 
         var rows = await conn.QueryAsync<SymbolRow>(sql.ToString(), p).ConfigureAwait(false);
         return rows.Select(MapSymbolRow).ToList();
@@ -405,14 +437,25 @@ public sealed class SearchService : ISearchService
             CodeRag.Domain.Enums.RelationDirection.Incoming => "r.to_symbol_id = @id",
             _ => "(r.from_symbol_id = @id OR r.to_symbol_id = @id)",
         };
-        var sql = $"SELECT r.from_symbol_id, r.to_symbol_id, r.relation_type FROM relations r WHERE {cond};";
+        var sql = $"SELECT r.from_symbol_id, r.to_symbol_id, r.relation_type FROM relations r WHERE {cond}";
         var p = new Dapper.DynamicParameters();
         p.Add("id", symbolId.ToString());
         if (types is { Length: > 0 })
         {
-            sql += " AND r.relation_type IN (" + string.Join(",", types.Select((_, i) => $"@t{i}")) + ")";
-            for (int i = 0; i < types.Length; i++) p.Add($"t{i}", types[i]);
+            // Normalize tokens so agent-style spellings (lowercase / snake_case / aliases) match the
+            // canonical PascalCase relation_type values stored by the extractors.
+            var normalized = types
+                .Select(NormalizeRelationType)
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (normalized.Length > 0)
+            {
+                sql += " AND r.relation_type IN (" + string.Join(",", normalized.Select((_, i) => $"@t{i}")) + ")";
+                for (int i = 0; i < normalized.Length; i++) p.Add($"t{i}", normalized[i]);
+            }
         }
+        sql += ";";
 
         var rows = (await conn.QueryAsync<RelationRow>(sql, p).ConfigureAwait(false)).ToList();
         if (rows.Count == 0) return Array.Empty<RelationEntry>();
@@ -433,6 +476,28 @@ public sealed class SearchService : ISearchService
                 symbols.TryGetValue(Guid.Parse(r.from_symbol_id), out var f) ? f : null,
                 symbols.TryGetValue(Guid.Parse(r.to_symbol_id), out var t) ? t : null))
             .ToList();
+    }
+
+    // Maps agent-facing relation type tokens (any casing, snake_case, common aliases) onto the
+    // canonical PascalCase names the extractors persist (Calls, Contains, DependsOn, Inherits,
+    // Implements, Overrides) plus the reference-family names (References, Uses, Imports).
+    internal static string? NormalizeRelationType(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return null;
+        var key = new string(token.Trim().ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+        return key switch
+        {
+            "call" or "calls" => "Calls",
+            "contain" or "contains" => "Contains",
+            "depend" or "depends" or "dependson" => "DependsOn",
+            "inherit" or "inherits" => "Inherits",
+            "implement" or "implements" => "Implements",
+            "override" or "overrides" => "Overrides",
+            "ref" or "refs" or "reference" or "references" => "References",
+            "use" or "uses" => "Uses",
+            "import" or "imports" => "Imports",
+            _ => token.Trim()
+        };
     }
 
     public async Task<IReadOnlyList<Symbol>> FindImplementationsAsync(Guid symbolId, CancellationToken ct = default)
@@ -479,10 +544,9 @@ public sealed class SearchService : ISearchService
         // Normalize slashes
         var normalizedReq = requestedPath.Replace('\\', '/').TrimStart('/');
         if (normalizedReq.Contains("..")) throw new ArgumentException("Path traversal not allowed: '..' in path.", nameof(req));
-        if (Path.IsPathRooted(requestedPath) && !requestedPath.StartsWith("/data/repos", StringComparison.Ordinal))
+        if (Path.IsPathRooted(requestedPath))
         {
-            // Disallow absolute outside /data/repos
-            throw new ArgumentException("Absolute path not allowed outside /data/repos.", nameof(req));
+            throw new ArgumentException("Absolute path not allowed: use path relative to repository root.", nameof(req));
         }
 
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
@@ -494,11 +558,7 @@ public sealed class SearchService : ISearchService
 
         var localPath = repoRow.local_path;
         if (string.IsNullOrWhiteSpace(localPath)) throw new InvalidOperationException("Repository local_path is empty.");
-        // Ensure repo path inside /data/repos (Domain LocalPath already ensures, but double-check)
         var normalizedLocal = Path.GetFullPath(localPath);
-        var reposRoot = Path.GetFullPath("/data/repos");
-        if (!normalizedLocal.StartsWith(reposRoot, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Repository local_path must be inside {reposRoot}: '{localPath}'");
 
         // Load file entry
         var fileRow = await conn.QuerySingleOrDefaultAsync<FileRow>(
@@ -557,14 +617,18 @@ public sealed class SearchService : ISearchService
         int start = req.StartLine.HasValue ? Math.Clamp(req.StartLine.Value, 1, totalLines) : 1;
         int end = req.EndLine.HasValue ? Math.Clamp(req.EndLine.Value, start, totalLines) : totalLines;
 
-        // Limit preview 20 lines
-        int maxLines = Opts.PreviewMaxLines;
+        // Content honors the caller's MaxLines (clamped 1..1000); when not supplied the
+        // conservative PreviewMaxLines default applies. Preview stays short (PreviewMaxLines).
+        int maxLines = req.MaxLines.HasValue ? Math.Clamp(req.MaxLines.Value, 1, 1000) : Opts.PreviewMaxLines;
         if (end - start + 1 > maxLines)
             end = start + maxLines - 1;
 
         var sliceLines = lines.Skip(start - 1).Take(end - start + 1).ToArray();
         var content = string.Join("\n", sliceLines);
-        var preview = content; // preview same as content but limited to 20 lines already
+        var previewLines = sliceLines.Length > Opts.PreviewMaxLines
+            ? sliceLines.Take(Opts.PreviewMaxLines).ToArray()
+            : sliceLines;
+        var preview = string.Join("\n", previewLines);
 
         return new SourceSlice(
             RepositoryId: req.RepositoryId,
@@ -651,16 +715,23 @@ public sealed class SearchService : ISearchService
         }
     }
 
-    private async Task<IReadOnlyList<ScoredChunk>> GetVectorCandidatesAsync(string query, Guid[]? repoIds, List<string> warnings, CancellationToken ct)
+    private async Task<IReadOnlyList<ScoredChunk>> GetVectorCandidatesAsync(string query, Guid[]? repoIds, List<string> warnings, SearchMode mode, CancellationToken ct)
     {
-        // ДВА независимых семантических пространства: code и text. Запрос эмбеддится
-        // каждой моделью отдельно, ищем в своём store, нормализуем распределение скор
-        // каждого домена в [0,1] и сливаем в один семантический сигнал.
+        // ДВА независимых семантических пространства: code и text. Hybrid и generic Semantic
+        // мерджат оба, но SemanticCode/SemanticText изолируют домен (code=8082, text=8083).
+        // Raw cosine сохраняется без per-domain min-max нормализации, чтобы weak-запросы
+        // фильтровались по абсолютному порогу (0.25) и не инфлятились до 1.0.
         var merged = new List<ScoredChunk>();
         var filter = (repoIds != null && repoIds.Length > 0) ? new VectorSearchFilter(repoIds) : VectorSearchFilter.Empty;
         var anySucceeded = false;
 
-        foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
+        var domains = mode switch
+        {
+            SearchMode.SemanticCode => new[] { EmbeddingDomain.Code },
+            SearchMode.SemanticText => new[] { EmbeddingDomain.Text },
+            _ => new[] { EmbeddingDomain.Code, EmbeddingDomain.Text }
+        };
+        foreach (var domain in domains)
         {
             IEmbeddingProvider provider;
             IVectorStore store;
@@ -710,16 +781,12 @@ public sealed class SearchService : ISearchService
             if (results.Count == 0) continue;
             anySucceeded = true;
 
-            // Мин-макс нормализация ВРЯДУ с распределением скор этого домена, чтобы
-            // две разные модели давали сопоставимые значения до слияния.
-            var scores = results.Select(r => r.Score).ToArray();
-            var min = scores.Min();
-            var max = scores.Max();
-            var range = max - min;
+            // Keep raw cosine (clamped 0..1) — filtering on absolute score so weak queries
+            // (youtube/timeout/endpoint) correctly yield 0 instead of normalized 1.0.
+            // Tag each result with its domain so floors and normalization can be per-domain.
             foreach (var r in results)
             {
-                var norm = range <= 1e-9 ? 1.0 : (r.Score - min) / range;
-                merged.Add(new ScoredChunk(r.ChunkId, (double)Math.Clamp(norm, 0.0, 1.0), r.Distance));
+                merged.Add(new ScoredChunk(r.ChunkId, (double)Math.Clamp(r.Score, 0.0, 1.0), r.Distance, domain));
             }
         }
 
@@ -907,6 +974,7 @@ WHERE c.id IN ({placeholders});";
         public double? FtsRank { get; set; }
         public double? VectorScore { get; set; }
         public double? VectorDistance { get; set; }
+        public EmbeddingDomain VectorDomain { get; set; }
         public bool HasExact { get; set; }
         public double ExactBonus { get; set; }
         public bool HasStructural { get; set; }

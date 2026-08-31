@@ -479,7 +479,7 @@ public sealed class IndexingService
                 {
                     var domainChunk = Domain.Entities.Chunk.Create(
                         Guid.NewGuid(), repo.Id, fileId, ac.Source,
-                        language: language, startLine: ac.StartLine, endLine: ac.EndLine, domain: domain);
+                        symbolId: ac.SymbolId, language: language, startLine: ac.StartLine, endLine: ac.EndLine, domain: domain);
                     chunksToStore.Add(domainChunk);
                 }
 

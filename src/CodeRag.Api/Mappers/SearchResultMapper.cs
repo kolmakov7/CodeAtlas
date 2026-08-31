@@ -44,6 +44,16 @@ public static class SearchResultMapper
     public static SearchMode ParseMode(string? mode)
     {
         if (string.IsNullOrWhiteSpace(mode)) return SearchMode.Hybrid;
-        return Enum.TryParse<SearchMode>(mode, true, out var m) ? m : SearchMode.Hybrid;
+        var n = mode.Trim().ToLowerInvariant().Replace("-", "").Replace("_", "");
+        return n switch
+        {
+            "hybrid" => SearchMode.Hybrid,
+            "fulltext" or "fts" or "lexical" => SearchMode.FullText,
+            "semantic" => SearchMode.Semantic,
+            "semanticcode" or "code" or "codesemantic" => SearchMode.SemanticCode,
+            "semantictext" or "text" or "textsemantic" or "docs" => SearchMode.SemanticText,
+            "symbol" => SearchMode.Symbol,
+            _ => Enum.TryParse<SearchMode>(mode, true, out var m) ? m : SearchMode.Hybrid
+        };
     }
 }
