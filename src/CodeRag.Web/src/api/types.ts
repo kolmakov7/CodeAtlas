@@ -40,6 +40,11 @@ export interface EmbeddingProfile {
   timeoutSeconds?: number;
 }
 
+export interface RelationTypeStats {
+  relationType: string;
+  count: number;
+}
+
 export interface RepositoryStatistics {
   repositoryId: string;
   name: string;
@@ -47,6 +52,8 @@ export interface RepositoryStatistics {
   symbolCount: number;
   chunkCount: number;
   vectorCount: number;
+  relationCount?: number;
+  relationsByType?: RelationTypeStats[];
   embeddingStats: EmbeddingDomainStats[];
   embeddingsFailed: number;
   indexedCommit?: string | null;
@@ -60,7 +67,9 @@ export interface GlobalStatistics {
   files: number;
   symbols: number;
   chunks: number;
-  relations: number;
+  relations?: number;
+  relationCount?: number;
+  relationsByType?: RelationTypeStats[];
   embeddingStats: EmbeddingDomainStats[];
   embeddingsFailed: number;
   indexingRunning: number;

@@ -51,7 +51,7 @@ export default function Dashboard() {
     files: sRaw.files ?? sRaw.fileCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.files ?? r.FileCount ?? 0), 0),
     symbols: sRaw.symbols ?? sRaw.symbolCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.symbols ?? r.SymbolCount ?? 0), 0),
     chunks: sRaw.chunks ?? sRaw.chunkCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.chunks ?? r.ChunkCount ?? 0), 0),
-    relations: sRaw.relations ?? 0,
+    relations: sRaw.relations ?? sRaw.relationCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.relationCount ?? r.RelationCount ?? 0), 0),
     embeddingsIndexed: embeddingsIndexed || (sRaw.embeddingsIndexed ?? sRaw.vectorCount ?? repoStatsArray.reduce((a: number, r: any) => a + (r.VectorCount ?? 0), 0)),
     embeddingsPending,
     embeddingsCode: embCode?.indexed ?? null,

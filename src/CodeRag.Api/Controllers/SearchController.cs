@@ -114,6 +114,26 @@ public sealed class SearchController : ControllerBase
         catch (InvalidOperationException ex) { return Problem(title: ex.Message, statusCode: 404); }
     }
 
+    [HttpGet("symbols/{id:guid}/relations")]
+    [ProducesResponseType(typeof(IReadOnlyList<CodeRag.Search.Models.RelationEntry>), 200)]
+    public async Task<IActionResult> GetSymbolRelations(
+        Guid id,
+        [FromQuery] string? direction,
+        [FromQuery] string[]? types,
+        CancellationToken ct)
+    {
+        var dir = CodeRag.Domain.Enums.RelationDirection.Both;
+        if (!string.IsNullOrWhiteSpace(direction) &&
+            !Enum.TryParse<CodeRag.Domain.Enums.RelationDirection>(direction, ignoreCase: true, out dir))
+            return Problem(title: "direction must be outgoing, incoming or both", statusCode: 400);
+        try
+        {
+            var relations = await _search.GetRelationsAsync(id, dir, types, ct).ConfigureAwait(false);
+            return Ok(relations);
+        }
+        catch (KeyNotFoundException ex) { return Problem(title: ex.Message, statusCode: 404); }
+    }
+
     [HttpGet("repositories/{id:guid}/file")]
     [ProducesResponseType(typeof(GetCodeResponseDto), 200)]
     public async Task<IActionResult> GetCode(Guid id, [FromQuery] string path, [FromQuery] string? lines, CancellationToken ct)

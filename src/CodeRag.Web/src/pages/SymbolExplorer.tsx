@@ -1,5 +1,5 @@
 import { useParams, useSearchParams, Link } from "react-router-dom";
-import { useSymbolDefinition, useSymbolReferences, useSymbolImplementations, useSymbolCallers, useSymbolCallees, useFileContent } from "@/api/hooks";
+import { useSymbolDefinition, useSymbolRelations, useSymbolImplementations, useSymbolCallers, useSymbolCallees, useFileContent } from "@/api/hooks";
 import { SourceView } from "@/components/SourceView";
 
 type Tab = "definition" | "references" | "implementations" | "callers" | "callees";
@@ -17,7 +17,7 @@ export default function SymbolExplorer() {
   const tab = (sp.get("tab") as Tab) ?? "definition";
 
   const defQ = useSymbolDefinition(symbolId);
-  const refsQ = useSymbolReferences(tab === "references" ? symbolId : undefined);
+  const refsQ = useSymbolRelations(tab === "references" ? symbolId : undefined, "incoming");
   const implQ = useSymbolImplementations(tab === "implementations" ? symbolId : undefined);
   const callersQ = useSymbolCallers(tab === "callers" ? symbolId : undefined);
   const calleesQ = useSymbolCallees(tab === "callees" ? symbolId : undefined);

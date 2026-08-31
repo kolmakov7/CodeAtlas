@@ -34,9 +34,10 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         foreach (var domain in DomainTokens)
             embeddingStats.Add(await GetDomainStatsAsync(conn, rid, domain, ct).ConfigureAwait(false));
         var failed = await GetFailedJobsAsync(conn, rid, ct).ConfigureAwait(false);
+        var (relationCount, relationsByType) = await GetRelationStatsAsync(conn, rid, ct).ConfigureAwait(false);
 
         return new RepositoryStatistics(repositoryId, repoRow.name, (int)fileCount, (int)symbolCount, (int)chunkCount, (int)vectorCount,
-            embeddingStats, failed, repoRow.indexed_commit, repoRow.current_commit, repoRow.status);
+            relationCount, relationsByType, embeddingStats, failed, repoRow.indexed_commit, repoRow.current_commit, repoRow.status);
     }
 
     public async Task<GlobalStatistics> GetGlobalStatisticsAsync(CancellationToken ct = default)
@@ -58,20 +59,22 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
             foreach (var domain in DomainTokens)
                 embeddingStats.Add(await GetDomainStatsAsync(conn, rid, domain, ct).ConfigureAwait(false));
             var failed = await GetFailedJobsAsync(conn, rid, ct).ConfigureAwait(false);
+            var (relationCount, relationsByType) = await GetRelationStatsAsync(conn, rid, ct).ConfigureAwait(false);
 
-            repoStats.Add(new RepositoryStatistics(Guid.Parse(r.id), r.name, (int)fileCount, (int)symbolCount, (int)chunkCount, (int)vectorCount, embeddingStats, failed, r.indexed_commit, r.current_commit, r.status));
+            repoStats.Add(new RepositoryStatistics(Guid.Parse(r.id), r.name, (int)fileCount, (int)symbolCount, (int)chunkCount, (int)vectorCount, relationCount, relationsByType, embeddingStats, failed, r.indexed_commit, r.current_commit, r.status));
         }
         var totalFiles = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM files;").ConfigureAwait(false);
         var totalSymbols = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM symbols;").ConfigureAwait(false);
         var totalChunks = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks;").ConfigureAwait(false);
         var totalJobs = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM indexing_jobs;").ConfigureAwait(false);
+        var (totalRelations, globalRelationsByType) = await GetRelationStatsAsync(conn, null, ct).ConfigureAwait(false);
 
         var globalEmbeddingStats = new List<EmbeddingDomainStats>();
         foreach (var domain in DomainTokens)
             globalEmbeddingStats.Add(await GetDomainStatsAsync(conn, null, domain, ct).ConfigureAwait(false));
         var globalFailed = await GetFailedJobsAsync(conn, null, ct).ConfigureAwait(false);
 
-        return new GlobalStatistics(repoStats.Count, (int)totalFiles, (int)totalSymbols, (int)totalChunks, (int)totalJobs, globalEmbeddingStats, globalFailed, repoStats);
+        return new GlobalStatistics(repoStats.Count, (int)totalFiles, (int)totalSymbols, (int)totalChunks, totalRelations, globalRelationsByType, (int)totalJobs, globalEmbeddingStats, globalFailed, repoStats);
     }
 
     /// <summary>Per-domain embedding progress (indexed = has vector, pending = no vector) for a repo (or null = global).</summary>
@@ -118,6 +121,44 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         }
     }
 
+    /// <summary>Total relations and per-type breakdown for a repo (or null = global).</summary>
+    private async Task<(int Count, IReadOnlyList<RelationTypeStats> ByType)> GetRelationStatsAsync(IDbConnection conn, string? rid, CancellationToken ct)
+    {
+        int count;
+        try
+        {
+            if (rid is null)
+                count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM relations;").ConfigureAwait(false);
+            else
+                count = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM relations WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Relation count query failed for {Repo}", rid ?? "global");
+            count = 0;
+        }
+
+        var byType = new List<RelationTypeStats>();
+        try
+        {
+            if (rid is null)
+            {
+                var rows = await conn.QueryAsync<RelTypeRow>("SELECT relation_type, COUNT(*) AS cnt FROM relations GROUP BY relation_type ORDER BY cnt DESC;").ConfigureAwait(false);
+                byType.AddRange(rows.Select(r => new RelationTypeStats(r.relation_type, r.cnt)));
+            }
+            else
+            {
+                var rows = await conn.QueryAsync<RelTypeRow>("SELECT relation_type, COUNT(*) AS cnt FROM relations WHERE repository_id=@rid GROUP BY relation_type ORDER BY cnt DESC;", new { rid }).ConfigureAwait(false);
+                byType.AddRange(rows.Select(r => new RelationTypeStats(r.relation_type, r.cnt)));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Relation by-type query failed for {Repo}", rid ?? "global");
+        }
+        return (count, byType);
+    }
+
     public Task<StorageSizes> GetStorageSizesAsync(CancellationToken ct = default)
     {
         long sqliteBytes = 0, vectorBytes = 0, reposBytes = 0;
@@ -139,5 +180,11 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         public string status { get; set; } = "";
         public string? current_commit { get; set; }
         public string? indexed_commit { get; set; }
+    }
+
+    private sealed class RelTypeRow
+    {
+        public string relation_type { get; set; } = "";
+        public int cnt { get; set; }
     }
 }

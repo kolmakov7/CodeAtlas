@@ -20,4 +20,6 @@ public static class RelationType
     public const string FieldType = "FieldType";
     public const string PropertyType = "PropertyType";
     public const string Creates = "Creates";
+    public const string Overrides = "Overrides";
+    public const string DependsOn = "DependsOn";
 }

@@ -86,3 +86,10 @@ public sealed record Reference(
     Guid FromSymbolId,
     Guid ToSymbolId,
     string RelationType);
+
+public sealed record RelationEntry(
+    Guid FromSymbolId,
+    Guid ToSymbolId,
+    string RelationType,
+    Symbol? FromSymbol,
+    Symbol? ToSymbol);

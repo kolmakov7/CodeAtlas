@@ -56,6 +56,8 @@ public sealed record RepositoryDto(
 
 public sealed record EmbeddingDomainStatsDto(string Domain, int Indexed, int Pending);
 
+public sealed record RelationTypeStatsDto(string RelationType, int Count);
+
 public sealed record RepositoryStatisticsDto(
     Guid RepositoryId,
     string Name,
@@ -63,6 +65,8 @@ public sealed record RepositoryStatisticsDto(
     int SymbolCount,
     int ChunkCount,
     int VectorCount,
+    int RelationCount,
+    IReadOnlyList<RelationTypeStatsDto> RelationsByType,
     IReadOnlyList<EmbeddingDomainStatsDto> EmbeddingStats,
     int EmbeddingsFailed,
     string? IndexedCommit,
@@ -74,6 +78,8 @@ public sealed record GlobalStatisticsDto(
     int FileCount,
     int SymbolCount,
     int ChunkCount,
+    int RelationCount,
+    IReadOnlyList<RelationTypeStatsDto> RelationsByType,
     int JobCount,
     IReadOnlyList<EmbeddingDomainStatsDto> EmbeddingStats,
     int EmbeddingsFailed,

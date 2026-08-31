@@ -51,7 +51,7 @@ export default function RepositoryDashboard() {
         <StatCard label="Files" value={s?.fileCount ?? "—"} />
         <StatCard label="Symbols" value={s?.symbolCount ?? "—"} />
         <StatCard label="Chunks" value={s?.chunkCount ?? "—"} />
-        <StatCard label="Relations" value={"—"} />
+        <StatCard label="Relations" value={s?.relationCount ?? 0} sub={s?.relationsByType?.length ? s.relationsByType.map((r) => `${r.relationType} ${r.count}`).join(" · ") : undefined} />
         {(() => {
           const stats = s?.embeddingStats ?? [];
           const code = stats.find((d) => d.domain?.toLowerCase() === "code");

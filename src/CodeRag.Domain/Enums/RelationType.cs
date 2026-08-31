@@ -10,5 +10,6 @@ public enum RelationType
     Contains = 4,
     Imports = 5,
     Overrides = 6,
-    Uses = 7
+    Uses = 7,
+    DependsOn = 8
 }

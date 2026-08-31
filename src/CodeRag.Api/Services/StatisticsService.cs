@@ -18,14 +18,19 @@ public sealed class StatisticsService
     {
         var g = await _query.GetGlobalStatisticsAsync(ct).ConfigureAwait(false);
         var repoStats = g.Repositories.Select(MapRepository).ToList();
-        return new GlobalStatisticsDto(g.RepositoryCount, g.FileCount, g.SymbolCount, g.ChunkCount, g.JobCount,
+        return new GlobalStatisticsDto(g.RepositoryCount, g.FileCount, g.SymbolCount, g.ChunkCount,
+            g.RelationCount, MapRelations(g.RelationsByType), g.JobCount,
             g.EmbeddingStats.Select(MapDomain).ToList(), g.EmbeddingsFailed, repoStats);
     }
 
     private static EmbeddingDomainStatsDto MapDomain(CodeRag.Domain.Ports.EmbeddingDomainStats d) => new(d.Domain, d.Indexed, d.Pending);
 
+    private static IReadOnlyList<RelationTypeStatsDto> MapRelations(IReadOnlyList<CodeRag.Domain.Ports.RelationTypeStats> in_) =>
+        in_.Select(r => new RelationTypeStatsDto(r.RelationType, r.Count)).ToList();
+
     private static RepositoryStatisticsDto MapRepository(CodeRag.Domain.Ports.RepositoryStatistics s) => new(
         s.RepositoryId, s.Name, s.FileCount, s.SymbolCount, s.ChunkCount, s.VectorCount,
+        s.RelationCount, MapRelations(s.RelationsByType),
         s.EmbeddingStats.Select(d => new EmbeddingDomainStatsDto(d.Domain, d.Indexed, d.Pending)).ToList(),
         s.EmbeddingsFailed, s.IndexedCommit, s.CurrentCommit, s.Status);
 }

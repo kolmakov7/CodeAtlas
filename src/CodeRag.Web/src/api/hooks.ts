@@ -149,6 +149,13 @@ export function useSymbolReferences(symbolId: string | undefined) {
     enabled: !!symbolId,
   });
 }
+export function useSymbolRelations(symbolId: string | undefined, direction: "outgoing" | "incoming" | "both" = "both") {
+  return useQuery({
+    queryKey: ["symbol", symbolId, "relations", direction],
+    queryFn: () => unwrap<RelationEntry[]>(apiClient.get(`/symbols/${symbolId}/relations`, { params: { direction } })),
+    enabled: !!symbolId,
+  });
+}
 export function useSymbolImplementations(symbolId: string | undefined) {
   return useQuery({
     queryKey: ["symbol", symbolId, "implementations"],

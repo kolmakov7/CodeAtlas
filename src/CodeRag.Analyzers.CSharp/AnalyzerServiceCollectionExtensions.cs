@@ -19,6 +19,9 @@ public static class AnalyzerServiceCollectionExtensions
         services.AddSingleton<ICodeAnalyzer, TreeSitter.TreeSitterAnalyzer>();
         services.AddSingleton<ICodeAnalyzer, Sql.SqlAnalyzer>();
         services.AddSingleton<ICodeAnalyzer, Vbs.VbsAnalyzer>();
+
+        // Relation extractors (whole-repo, per language). C# uses Roslyn.
+        services.AddSingleton<IRelationExtractor, RoslynRelationExtractor>();
         return services;
     }
 

@@ -52,6 +52,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<CodeRag.Infrastructure.Stores.ISymbolStore, SymbolStore>(sp => (SymbolStore)sp.GetRequiredService<CodeRag.Domain.Ports.ISymbolStore>());
         services.AddSingleton<CodeRag.Domain.Ports.IChunkStore, ChunkStore>();
         services.AddSingleton<CodeRag.Infrastructure.Stores.IChunkStore, ChunkStore>(sp => (ChunkStore)sp.GetRequiredService<CodeRag.Domain.Ports.IChunkStore>());
+        services.AddSingleton<CodeRag.Domain.Ports.IRelationStore, RelationStore>();
+        services.AddSingleton<CodeRag.Analyzers.Abstractions.ISymbolCatalog, DapperSymbolCatalog>();
         services.AddSingleton<IIndexingErrorStore, IndexingErrorStore>();
 
         // Persistence adapters (Activity, Settings, Statistics, Health)

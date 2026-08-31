@@ -6,6 +6,9 @@ namespace CodeRag.Domain.Ports;
 /// </summary>
 public sealed record EmbeddingDomainStats(string Domain, int Indexed, int Pending);
 
+/// <summary>Число связей одного типа (relations.relation_type).</summary>
+public sealed record RelationTypeStats(string RelationType, int Count);
+
 public sealed record RepositoryStatistics(
     Guid RepositoryId,
     string Name,
@@ -13,6 +16,8 @@ public sealed record RepositoryStatistics(
     int SymbolCount,
     int ChunkCount,
     int VectorCount,
+    int RelationCount,
+    IReadOnlyList<RelationTypeStats> RelationsByType,
     IReadOnlyList<EmbeddingDomainStats> EmbeddingStats,
     int EmbeddingsFailed,
     string? IndexedCommit,
@@ -24,6 +29,8 @@ public sealed record GlobalStatistics(
     int FileCount,
     int SymbolCount,
     int ChunkCount,
+    int RelationCount,
+    IReadOnlyList<RelationTypeStats> RelationsByType,
     int JobCount,
     IReadOnlyList<EmbeddingDomainStats> EmbeddingStats,
     int EmbeddingsFailed,

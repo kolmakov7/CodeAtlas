@@ -29,6 +29,8 @@ public sealed class IndexingService
     private readonly IndexingJobStore _jobStore;
     private readonly IOptionsMonitor<IndexerOptions> _indexerOptions;
     private readonly CodeRag.Domain.Ports.IIndexingErrorStore _errorStore;
+    private readonly CodeRag.Domain.Ports.IRelationStore _relationStore;
+    private readonly IEnumerable<IRelationExtractor> _relationExtractors;
     private readonly ILogger<IndexingService> _logger;
 
     public IndexingService(
@@ -44,6 +46,8 @@ public sealed class IndexingService
         IndexingJobStore jobStore,
         IOptionsMonitor<IndexerOptions> indexerOptions,
         CodeRag.Domain.Ports.IIndexingErrorStore errorStore,
+        CodeRag.Domain.Ports.IRelationStore relationStore,
+        IEnumerable<IRelationExtractor> relationExtractors,
         ILogger<IndexingService> logger)
     {
         _repoStore = repoStore;
@@ -58,6 +62,8 @@ public sealed class IndexingService
         _jobStore = jobStore;
         _indexerOptions = indexerOptions;
         _errorStore = errorStore;
+        _relationStore = relationStore;
+        _relationExtractors = relationExtractors;
         _logger = logger;
     }
 
@@ -247,10 +253,14 @@ public sealed class IndexingService
         var processed = 0;
         var lastProgressSave = DateTime.UtcNow;
         var pendingChunks = new List<Domain.Entities.Chunk>();
+        var csharpTouched = false;
 
         foreach (var cf in diff.ChangedFiles)
         {
             ct.ThrowIfCancellationRequested();
+
+            if (IsCSharpPath(cf.Path) || (cf.Kind == GitChangeKind.Renamed && IsCSharpPath(cf.OldPath)))
+                csharpTouched = true;
 
             if (cf.Kind == GitChangeKind.Deleted)
             {
@@ -285,6 +295,21 @@ public sealed class IndexingService
             foreach (var group in pendingChunks.GroupBy(c => c.EmbeddingDomain))
             {
                 await EmbedAndUpsertAsync(group.ToList(), ct).ConfigureAwait(false);
+            }
+        }
+
+        // C# relations are rebuilt authoritatively from the whole repo once any C# file changed
+        // (per-file C# symbols get fresh IDs each run, so only a full-repo extraction stays consistent).
+        if (csharpTouched)
+        {
+            try
+            {
+                await RebuildCSharpRelationsAsync(repo, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Never fail the index run (and never leave the graph empty) if extraction misbehaves.
+                _logger.LogWarning(ex, "C# relation extraction failed for repo {Repo}; keeping existing relations", repo.Id);
             }
         }
 
@@ -459,8 +484,18 @@ public sealed class IndexingService
                 }
             }
 
-            // Relations — если анализатор вернул, вставить (пока stub)
-            // TODO: IRelationStore when available
+            // Relations: persist intra-file relations from the per-file analyzer for non-C# languages.
+            // C# relations are handled by the whole-repo extractor (C# per-file symbols get fresh IDs each
+            // run, so per-file C# relations would dangle after a reindex).
+            if (language != SupportedLanguages.CSharp && result.Relations.Count > 0)
+            {
+                var domainRelations = result.Relations
+                    .Select(ToDomainRelation)
+                    .Where(r => r is not null)!
+                    .ToList();
+                if (domainRelations.Count > 0)
+                    await _relationStore.UpsertBatchAsync(repo.Id, domainRelations, ct).ConfigureAwait(false);
+            }
 
             if (result.Errors.Count > 0)
                 foreach (var e in result.Errors)
@@ -684,6 +719,79 @@ public sealed class IndexingService
             startCol: s.StartColumn,
             endCol: s.EndColumn,
             signature: s.Signature);
+    }
+
+    private static bool IsCSharpPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        return Path.GetExtension(path) is ".cs" or ".csx";
+    }
+
+    private static CodeRag.Domain.Entities.Relation? ToDomainRelation(CodeRag.Analyzers.Abstractions.Relation r)
+    {
+        if (r.FromSymbolId == Guid.Empty || r.ToSymbolId == Guid.Empty) return null;
+        if (r.FromSymbolId == r.ToSymbolId) return null; // self-relations are noise
+        if (!Enum.TryParse<CodeRag.Domain.Enums.RelationType>(r.RelationType, true, out var t)) return null;
+        return new CodeRag.Domain.Entities.Relation(r.FromSymbolId, r.ToSymbolId, t);
+    }
+
+    private static readonly string[] CSharpExcludedDirs =
+        { "bin", "obj", ".git", "node_modules", ".vs", "packages", ".nuget", "dist", "build", ".idea", ".gradle" };
+
+    private static bool HasExcludedSegment(string full)
+    {
+        foreach (var part in full.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            if (part.Length > 0 && CSharpExcludedDirs.Contains(part, StringComparer.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
+    private List<SourceFile> EnumerateCSharpFiles(string root, CancellationToken ct)
+    {
+        var files = new List<SourceFile>();
+        if (!Directory.Exists(root)) return files;
+        foreach (var pattern in new[] { "*.cs", "*.csx" })
+        {
+            foreach (var full in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (HasExcludedSegment(full)) continue;
+                try
+                {
+                    var content = File.ReadAllText(full);
+                    if (string.IsNullOrWhiteSpace(content)) continue;
+                    files.Add(new SourceFile(Path.GetRelativePath(root, full), content));
+                }
+                catch { /* skip unreadable file */ }
+            }
+        }
+        return files;
+    }
+
+    private async Task RebuildCSharpRelationsAsync(Domain.Entities.Repository repo, CancellationToken ct)
+    {
+        var extractor = _relationExtractors.FirstOrDefault(
+            e => string.Equals(e.Language, SupportedLanguages.CSharp, StringComparison.OrdinalIgnoreCase));
+        if (extractor is null)
+        {
+            _logger.LogInformation("No C# relation extractor registered for repo {Repo}; skipping relation rebuild", repo.Id);
+            return;
+        }
+
+        var files = EnumerateCSharpFiles(repo.LocalPath.Value, ct);
+        if (files.Count == 0)
+        {
+            // No C# source remains — clear all C# relations for the repo.
+            await _relationStore.ReplaceForLanguageAsync(repo.Id, SupportedLanguages.CSharp, Array.Empty<CodeRag.Domain.Entities.Relation>(), ct).ConfigureAwait(false);
+            return;
+        }
+
+        var context = new RelationExtractionContext(repo.Id, files);
+        var extracted = await extractor.ExtractAsync(context, ct).ConfigureAwait(false);
+        var domainRelations = extracted.Select(ToDomainRelation).Where(r => r is not null)!.ToList();
+
+        await _relationStore.ReplaceForLanguageAsync(repo.Id, SupportedLanguages.CSharp, domainRelations, ct).ConfigureAwait(false);
+        _logger.LogInformation("Rebuilt C# relations for repo {Repo}: {Files} files -> {Count} relations", repo.Id, files.Count, domainRelations.Count);
     }
 
     private static string ComputeHash(string source) => Domain.Entities.Chunk.ComputeHash(source);

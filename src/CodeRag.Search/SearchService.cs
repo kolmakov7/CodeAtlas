@@ -369,6 +369,50 @@ public sealed class SearchService : ISearchService
         return rows.Select(r => new Reference(Guid.Parse(r.from_symbol_id), Guid.Parse(r.to_symbol_id), r.relation_type)).ToList();
     }
 
+    public async Task<IReadOnlyList<RelationEntry>> GetRelationsAsync(
+        Guid symbolId,
+        CodeRag.Domain.Enums.RelationDirection direction = CodeRag.Domain.Enums.RelationDirection.Both,
+        string[]? types = null,
+        CancellationToken ct = default)
+    {
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+
+        var cond = direction switch
+        {
+            CodeRag.Domain.Enums.RelationDirection.Outgoing => "r.from_symbol_id = @id",
+            CodeRag.Domain.Enums.RelationDirection.Incoming => "r.to_symbol_id = @id",
+            _ => "(r.from_symbol_id = @id OR r.to_symbol_id = @id)",
+        };
+        var sql = $"SELECT r.from_symbol_id, r.to_symbol_id, r.relation_type FROM relations r WHERE {cond};";
+        var p = new Dapper.DynamicParameters();
+        p.Add("id", symbolId.ToString());
+        if (types is { Length: > 0 })
+        {
+            sql += " AND r.relation_type IN (" + string.Join(",", types.Select((_, i) => $"@t{i}")) + ")";
+            for (int i = 0; i < types.Length; i++) p.Add($"t{i}", types[i]);
+        }
+
+        var rows = (await conn.QueryAsync<RelationRow>(sql, p).ConfigureAwait(false)).ToList();
+        if (rows.Count == 0) return Array.Empty<RelationEntry>();
+
+        // Hydrate both endpoints in a single batched query.
+        var allIds = rows
+            .SelectMany(r => new[] { r.from_symbol_id, r.to_symbol_id })
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var symbols = (await LoadSymbolsByIdsAsync(allIds, ct).ConfigureAwait(false))
+            .ToDictionary(s => s.Id);
+
+        return rows
+            .Select(r => new RelationEntry(
+                Guid.Parse(r.from_symbol_id),
+                Guid.Parse(r.to_symbol_id),
+                r.relation_type,
+                symbols.TryGetValue(Guid.Parse(r.from_symbol_id), out var f) ? f : null,
+                symbols.TryGetValue(Guid.Parse(r.to_symbol_id), out var t) ? t : null))
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<Symbol>> FindImplementationsAsync(Guid symbolId, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
