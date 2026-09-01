@@ -125,8 +125,9 @@ public static class ChunkingHelper
             }
 
             var slice = source[windowStart..windowEnd];
-            var sLine = GetLineFromOffset(source, windowStart);
-            var eLine = GetLineFromOffset(source, Math.Min(windowEnd - (slice.EndsWith("\n") ? 1 : 0), totalLen - 1));
+            // GetLineFromOffset считает строки от начала `source` — переводим в абсолютные номера (source начинает с startLine)
+            var sLine = startLine + GetLineFromOffset(source, windowStart) - 1;
+            var eLine = startLine + GetLineFromOffset(source, Math.Min(windowEnd - (slice.EndsWith("\n") ? 1 : 0), totalLen - 1)) - 1;
             sLine = Math.Clamp(sLine, startLine, Math.Max(endLine, startLine));
             eLine = Math.Clamp(eLine, sLine, Math.Max(endLine, startLine));
 

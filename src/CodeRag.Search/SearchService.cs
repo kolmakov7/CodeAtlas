@@ -395,9 +395,10 @@ public sealed class SearchService : ISearchService
     }
 
     /// <summary>
-    /// Incoming "usage" relations for a symbol. The Roslyn extractor emits Calls/DependsOn/Implements/
-    /// Inherits/Overrides/Contains (the generic "References" type is unused), so reference lookup
-    /// covers all usage-bearing types rather than only "References".
+    /// Incoming "usage" relations for a symbol. The C# whole-repo extractor emits References for every
+    /// semantic reference (types, fields, calls, objects...), so References is the primary type.
+    /// Calls/DependsOn/Uses/Imports stay as fallbacks for languages whose extractors
+    /// (e.g. TreeSitter) don't emit the References type yet.
     /// </summary>
     private static readonly string[] ReferenceTypes =
     {
@@ -480,7 +481,8 @@ public sealed class SearchService : ISearchService
 
     // Maps agent-facing relation type tokens (any casing, snake_case, common aliases) onto the
     // canonical PascalCase names the extractors persist (Calls, Contains, DependsOn, Inherits,
-    // Implements, Overrides) plus the reference-family names (References, Uses, Imports).
+    // Implements, Overrides, References). The reference-family tokens (ref/refs/uses/imports)
+    // all map to the single canonical type References.
     internal static string? NormalizeRelationType(string? token)
     {
         if (string.IsNullOrWhiteSpace(token)) return null;
@@ -493,9 +495,7 @@ public sealed class SearchService : ISearchService
             "inherit" or "inherits" => "Inherits",
             "implement" or "implements" => "Implements",
             "override" or "overrides" => "Overrides",
-            "ref" or "refs" or "reference" or "references" => "References",
-            "use" or "uses" => "Uses",
-            "import" or "imports" => "Imports",
+            "ref" or "refs" or "reference" or "references" or "use" or "uses" or "import" or "imports" => "References",
             _ => token.Trim()
         };
     }

@@ -56,7 +56,7 @@ public sealed class IndexerOptions
     /// </summary>
     public string[] BinaryExtensions { get; set; } =
     {
-        "png", "jpg", "jpeg", "gif", "bmp", "ico", "tif", "tiff", "webp", "avif", "heic",
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "tif", "tiff", "webp", "avif", "heic", "svg",
         "mp3", "wav", "ogg", "flac", "m4a", "aac", "mid",
         "mp4", "mov", "avi", "mkv", "wmv", "flv", "webm",
         "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "iso",

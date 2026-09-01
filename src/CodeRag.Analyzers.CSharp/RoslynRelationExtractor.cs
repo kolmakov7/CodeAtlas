@@ -8,8 +8,10 @@ namespace CodeRag.Analyzers.CSharp;
 /// <summary>
 /// Целонаборный (whole-repository) экстрактор C# связей через Roslyn.
 /// Компилирует все C# файлы репозитория в единую CSharpCompilation, извлекает
-/// структурные связи (Contains/Inherits/Implements/DependsOn/Calls/Overrides)
+/// структурные связи (Contains/Inherits/Implements/DependsOn/Calls/Overrides/References)
 /// и сопоставляет концы связей с уже сохранёнными символами репозитория (ISymbolCatalog).
+/// References = любое семантическое обращение к символу (типы, поля, вызовы, объекты...)
+/// из декларации символа-источника. Error-символы (неразрешённые внешние типы) игнорируются.
 /// Возвращает только связи, чьи оба конца реально существуют в каталоге.
 /// </summary>
 public sealed class RoslynRelationExtractor : IRelationExtractor
@@ -100,14 +102,21 @@ public sealed class RoslynRelationExtractor : IRelationExtractor
                 if (ifaceId is not null) add(selfId.Value, ifaceId.Value, RelationType.Implements);
             }
 
+            // References from the type declaration itself (attributes, base/interface lists, type param defaults)
+            EmitTypeHeadReferences(selfId.Value, t, add);
+
             foreach (var member in t.GetMembers().Where(m => m.ContainingType == t && m.Locations.Any(l => l.IsInSource)))
             {
                 // Contains (type -> member)
                 var memberId = ResolveSymbol(member);
-                if (memberId is not null) add(selfId.Value, memberId.Value, RelationType.Contains);
+                if (memberId is null) continue;
+                add(selfId.Value, memberId.Value, RelationType.Contains);
 
                 // DependsOn (type -> referenced user types from member declarations)
                 EmitDependsOn(selfId.Value, member, add);
+
+                // References (member -> every symbol referenced in its declaration: types, fields, calls, ...)
+                EmitReferences(memberId.Value, member, add);
             }
         }
 
@@ -184,12 +193,105 @@ public sealed class RoslynRelationExtractor : IRelationExtractor
         if (id is not null) add(methodId, id.Value, RelationType.Overrides);
     }
 
+    /// <summary>References (member -> referenced symbol) for every resolved semantic reference in the member's declaration.</summary>
+    private void EmitReferences(Guid selfId, ISymbol member, Action<Guid, Guid, string> add)
+    {
+        var decl = GetSourceSyntax(member);
+        if (decl is null) return;
+        foreach (var node in decl.DescendantNodes())
+        {
+            var sym = GetReferencedSymbol(node);
+            if (sym is null || IsErrorSymbol(sym)) continue;
+            var id = ResolveSymbol(sym);
+            if (id is not null && id.Value != selfId) add(selfId, id.Value, RelationType.References);
+        }
+    }
+
+    /// <summary>References for the type declaration head: attributes, base/interface lists, type parameter constraints.</summary>
+    private void EmitTypeHeadReferences(Guid selfId, INamedTypeSymbol t, Action<Guid, Guid, string> add)
+    {
+        var decl = GetSourceSyntax(t);
+        if (decl is not TypeDeclarationSyntax tds) return;
+        // BaseList also carries type-parameter constraints (`where T : X`), so it covers all head references.
+        var heads = new List<SyntaxNode>();
+        heads.AddRange(tds.AttributeLists);
+        if (tds.BaseList is not null) heads.Add(tds.BaseList);
+        foreach (var head in heads)
+        {
+            foreach (var node in head.DescendantNodesAndSelf())
+            {
+                var sym = GetReferencedSymbol(node);
+                if (sym is null || IsErrorSymbol(sym)) continue;
+                var id = ResolveSymbol(sym);
+                if (id is not null && id.Value != selfId) add(selfId, id.Value, RelationType.References);
+            }
+        }
+    }
+
+    private static SyntaxNode? GetSourceSyntax(ISymbol symbol)
+    {
+        foreach (var sr in symbol.DeclaringSyntaxReferences)
+        {
+            try
+            {
+                // All trees in this compilation are source trees (whole-repo parse).
+                return sr.GetSyntax();
+            }
+            catch { /* ignore */ }
+        }
+        return null;
+    }
+
+    private ISymbol? GetReferencedSymbol(SyntaxNode node)
+    {
+        if (_compilation is null) return null;
+        var model = _compilation.GetSemanticModel(node.SyntaxTree);
+        switch (node)
+        {
+            case IdentifierNameSyntax:
+            case GenericNameSyntax:
+            case QualifiedNameSyntax:
+            case AliasQualifiedNameSyntax:
+            case MemberAccessExpressionSyntax:
+            case MemberBindingExpressionSyntax:
+                return model.GetSymbolInfo(node).Symbol;
+            case BaseObjectCreationExpressionSyntax: // covers new X(...), new base(...), new()
+            case TypeOfExpressionSyntax:
+            case SizeOfExpressionSyntax:
+            case RefTypeSyntax:
+            case DefaultExpressionSyntax:
+                return model.GetTypeInfo(node).Type;
+            case AttributeSyntax a:
+                return model.GetSymbolInfo(a.Name).Symbol;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>Error symbols (unresolved types) render as bare names and must never resolve to catalog symbols.</summary>
+    private static bool IsErrorSymbol(ISymbol? s)
+        => s is not null && s.GetType().Name == "ErrorTypeSymbol";
+
     private Guid? ResolveSymbol(ISymbol s)
     {
-        if (s is null) return null;
+        if (s is null || IsErrorSymbol(s)) return null;
         if (s is IMethodSymbol m) return ResolveMethod(m);
         if (s is INamedTypeSymbol nt) return ResolveFqn(nt.ToDisplayString(FqnFormat));
+        if (s is IPropertySymbol or IFieldSymbol or IEventSymbol)
+            return ResolveFqn(MemberFqn(s));
         return ResolveFqn(s.ToDisplayString(FqnFormat));
+    }
+
+    /// <summary>FQN for member symbols: `ContainingTypeFQN.MemberName` (member symbols render as bare names under FullyQualifiedFormat).</summary>
+    private static string MemberFqn(ISymbol member)
+    {
+        if (member.ContainingType is INamedTypeSymbol ct)
+        {
+            var ctFqn = ct.ToDisplayString(FqnFormat);
+            if (!string.IsNullOrWhiteSpace(ctFqn) && ctFqn != "global::<global namespace>")
+                return $"{ctFqn}.{member.Name}";
+        }
+        return member.ToDisplayString(FqnFormat);
     }
 
     private Guid? ResolveMethod(IMethodSymbol m)

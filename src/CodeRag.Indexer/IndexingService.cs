@@ -446,7 +446,7 @@ public sealed class IndexingService
 
         try
         {
-            var ctx = new FileContext(repo.Id, null, filePath, content, language ?? analyzer.Language);
+            var ctx = new FileContext(repo.Id, null, filePath, content, language ?? analyzer.Language, budgetMaxChars > 0 ? budgetMaxChars : _indexerOptions.CurrentValue.MaxChunkChars);
             var result = await analyzer.AnalyzeAsync(ctx, ct).ConfigureAwait(false);
 
             // Symbols

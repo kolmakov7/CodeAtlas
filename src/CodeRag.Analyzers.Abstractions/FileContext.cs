@@ -6,4 +6,5 @@ public sealed record FileContext(
     Guid? ProjectId,
     string FilePath,
     string Content,
-    string Language);
+    string Language,
+    int MaxChunkChars = 1500);

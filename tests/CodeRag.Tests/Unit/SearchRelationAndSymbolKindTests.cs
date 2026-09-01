@@ -167,12 +167,50 @@ public sealed class SearchRelationAndSymbolKindTests : IDisposable
     }
 
     [Fact]
+    public async Task GetRelations_reference_family_tokens_should_match_references_rows()
+    {
+        var service = await InitializeAsync();
+        using var conn = await _factory.CreateAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO relations(from_symbol_id,to_symbol_id,relation_type) VALUES(@f,@t,@t2)",
+            new { f = _symA.ToString(), t = _symB.ToString(), t2 = "References" });
+
+        var refs = await service.GetRelationsAsync(_symA, RelationDirection.Outgoing, new[] { "references" });
+        refs.Should().HaveCount(1);
+        ToSymbolName(refs[0]).Should().Be("IA");
+
+        var uses = await service.GetRelationsAsync(_symA, RelationDirection.Outgoing, new[] { "uses" });
+        uses.Should().HaveCount(1);
+        ToSymbolName(uses[0]).Should().Be("IA");
+
+        var imports = await service.GetRelationsAsync(_symA, RelationDirection.Outgoing, new[] { "imports" });
+        imports.Should().HaveCount(1);
+        ToSymbolName(imports[0]).Should().Be("IA");
+    }
+
+    [Fact]
     public async Task GetRelations_unknown_type_token_should_pass_through_without_error()
     {
         var service = await InitializeAsync();
 
         var custom = await service.GetRelationsAsync(_symA, RelationDirection.Outgoing, new[] { "References" });
         custom.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task FindReferences_should_include_references_rows()
+    {
+        var service = await InitializeAsync();
+        using var conn = await _factory.CreateAsync();
+        await conn.ExecuteAsync(
+            "INSERT INTO relations(from_symbol_id,to_symbol_id,relation_type) VALUES(@f,@t,@t2)",
+            new { f = _symD.ToString(), t = _symA.ToString(), t2 = "References" });
+
+        var refs = await service.FindReferencesAsync(_symA);
+        refs.Should().HaveCount(1);
+        refs[0].FromSymbolId.Should().Be(_symD);
+        refs[0].ToSymbolId.Should().Be(_symA);
+        refs[0].RelationType.Should().Be("References");
     }
 
     [Fact]
@@ -188,8 +226,8 @@ public sealed class SearchRelationAndSymbolKindTests : IDisposable
         SearchService.NormalizeRelationType("overrides").Should().Be("Overrides");
         SearchService.NormalizeRelationType("refs").Should().Be("References");
         SearchService.NormalizeRelationType("references").Should().Be("References");
-        SearchService.NormalizeRelationType("  uses ").Should().Be("Uses");
-        SearchService.NormalizeRelationType("imports").Should().Be("Imports");
+        SearchService.NormalizeRelationType("  uses ").Should().Be("References");
+        SearchService.NormalizeRelationType("imports").Should().Be("References");
         SearchService.NormalizeRelationType("UnknownType").Should().Be("UnknownType");
         SearchService.NormalizeRelationType(null).Should().BeNull();
         SearchService.NormalizeRelationType("  ").Should().BeNull();
