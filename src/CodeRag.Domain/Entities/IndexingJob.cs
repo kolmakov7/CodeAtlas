@@ -76,4 +76,19 @@ public sealed class IndexingJob
         Status = JobStatus.Cancelled;
         FinishedAt = at ?? DateTimeOffset.UtcNow;
     }
+
+    internal static IndexingJob Rehydrate(
+        Guid id, Guid repositoryId, JobType type, JobStatus status,
+        DateTimeOffset startedAt, DateTimeOffset? finishedAt,
+        double progress, string? error, string? fromCommit, string? toCommit)
+    {
+        return new IndexingJob(id, repositoryId, type, status, startedAt)
+        {
+            FinishedAt = finishedAt,
+            Progress = progress,
+            Error = string.IsNullOrWhiteSpace(error) ? null : error,
+            FromCommit = string.IsNullOrWhiteSpace(fromCommit) ? null : fromCommit.Trim(),
+            ToCommit = string.IsNullOrWhiteSpace(toCommit) ? null : toCommit.Trim()
+        };
+    }
 }

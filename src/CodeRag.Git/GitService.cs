@@ -66,10 +66,22 @@ public sealed class GitService : IGitService
         args.Add(normalized);
 
         var env = MergeEnv(auth.Env, proxyEnv);
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
-
+        var cloneTimeout = _options.CloneTimeoutSeconds > 0 ? _options.CloneTimeoutSeconds : _options.DefaultTimeoutSeconds;
+        GitRunResult result;
+        try
+        {
+            result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, cloneTimeout).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            try { if (Directory.Exists(normalized)) Directory.Delete(normalized, recursive: true); } catch { }
+            throw;
+        }
         if (result.ExitCode != 0)
+        {
+            try { if (Directory.Exists(normalized) && !Directory.Exists(Path.Combine(normalized, ".git"))) Directory.Delete(normalized, recursive: true); } catch { }
             throw CreateGitException("clone", result, proxyUrl);
+        }
     }
 
     public async Task FetchAsync(string localPath, string branch, ProxyConfig? proxy = null, Credential? credential = null, CancellationToken ct = default)

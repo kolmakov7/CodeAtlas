@@ -75,23 +75,11 @@ ON CONFLICT(id) DO UPDATE SET
         var type = Enum.TryParse<JobType>(r.type, out var t) ? t : JobType.Index;
         var status = Enum.TryParse<JobStatus>(r.status, out var s) ? s : JobStatus.Queued;
         var started = DateTimeOffset.TryParse(r.started_at, out var dt) ? dt : DateTimeOffset.UtcNow;
-        var job = IndexingJob.Create(id, repo, type, status, started, r.fromCommit, r.toCommit);
-        // Восстановить progress/error/finished
-        if (r.progress is not null)
-        {
-            try { job.UpdateProgress(r.progress.Value); } catch { }
-        }
-        if (r.finished_at is not null && DateTimeOffset.TryParse(r.finished_at, out var fin))
-        {
-            if (status == JobStatus.Completed) { try { job.MarkCompleted(fin); } catch { } }
-            else if (status == JobStatus.Failed) { try { job.MarkFailed(r.error ?? "failed", fin); } catch { } }
-            else if (status == JobStatus.Cancelled) { try { job.MarkCancelled(fin); } catch { } }
-        }
-        if (status == JobStatus.Failed && !string.IsNullOrWhiteSpace(r.error))
-        {
-            try { job.MarkFailed(r.error, r.finished_at is not null && DateTimeOffset.TryParse(r.finished_at, out var f) ? f : null); } catch { }
-        }
-        return job;
+        DateTimeOffset? finished = r.finished_at is not null && DateTimeOffset.TryParse(r.finished_at, out var fin) ? fin : null;
+        var from = r.fromCommit ?? r.from_commit;
+        var to = r.toCommit ?? r.to_commit;
+        var progress = r.progress ?? (status == JobStatus.Completed ? 1 : 0);
+        return IndexingJob.Rehydrate(id, repo, type, status, started, finished, progress, r.error, from, to);
     }
 
     private sealed class JobRow

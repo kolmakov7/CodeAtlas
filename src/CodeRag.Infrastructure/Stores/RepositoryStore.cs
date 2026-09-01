@@ -79,7 +79,19 @@ ON CONFLICT(id) DO UPDATE SET
                 lastError = repository.LastError
             };
         }
-        await conn.ExecuteAsync(sql, p).ConfigureAwait(false);
+        try
+        {
+            await conn.ExecuteAsync(sql, p).ConfigureAwait(false);
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
+        {
+            // UNIQUE constraint failed (likely repositories.name) — fallback to UPDATE by id
+            // Happens when two concurrent upserts race or name already exists with different id
+            var updateSql = hasGroup
+                ? @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id"
+                : @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id";
+            await conn.ExecuteAsync(updateSql, p).ConfigureAwait(false);
+        }
     }
 
     private static async Task<bool> HasColumnAsync(Microsoft.Data.Sqlite.SqliteConnection conn, string table, string column)

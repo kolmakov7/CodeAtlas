@@ -64,9 +64,23 @@ public sealed class CliGitService : IGitService
         args.Add(normalized);
 
         var env = MergeEnv(auth.Env, proxyEnv);
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        var cloneTimeout = _options.CloneTimeoutSeconds > 0 ? _options.CloneTimeoutSeconds : _options.DefaultTimeoutSeconds;
+        GitRunResult result;
+        try
+        {
+            result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, cloneTimeout).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            // Clean up partial clone so next retry can succeed (File exists)
+            try { if (Directory.Exists(normalized)) Directory.Delete(normalized, recursive: true); } catch { }
+            throw;
+        }
         if (result.ExitCode != 0)
+        {
+            try { if (Directory.Exists(normalized) && !Directory.Exists(Path.Combine(normalized, ".git"))) Directory.Delete(normalized, recursive: true); } catch { }
             throw new InvalidOperationException($"git clone failed (exit {result.ExitCode}): {SecretMasker.Mask(result.StdErr)} {SecretMasker.Mask(result.StdOut)}");
+        }
         _logger.LogInformation("Clone ok {Url} -> {Path}", SecretMasker.Mask(remoteUrl), normalized);
     }
 
