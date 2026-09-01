@@ -29,6 +29,10 @@ services:
 
   coderag-mcp:
     image: ghcr.io/kolmakov7/codeatlas-coderag-mcp:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mcp
     profiles: ["mcp"]
     volumes: ["./data:/data:ro"]
     environment:

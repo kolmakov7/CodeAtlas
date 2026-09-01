@@ -39,6 +39,9 @@ COPY . .
 # (avoids a second npm ci + npm run build inside this stage, see CodeRag.Api.csproj)
 RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish -p:SkipWebBuild=true
 RUN find /root/.nuget -name "vec0.so" -exec cp {} /app/publish/vec0.so \; 2>/dev/null; ls -lh /app/publish/vec0.so 2>&1 || echo "vec0 not found"
+# Publish Mcp (Release) — stdio sidecar, shares Storage/Search
+RUN dotnet publish src/CodeRag.Mcp/CodeRag.Mcp.csproj -c Release -o /app/mcp -p:SkipWebBuild=true
+RUN find /root/.nuget -name "vec0.so" -exec cp {} /app/mcp/vec0.so \; 2>/dev/null; ls -lh /app/mcp/vec0.so 2>&1 || echo "vec0 mcp not found"
 
 # Runtime image
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
@@ -73,3 +76,11 @@ HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=20s \
 USER 1000:1000
 
 ENTRYPOINT ["dotnet", "CodeRag.Api.dll"]
+
+# MCP stdio sidecar — same base, different entrypoint
+FROM runtime AS mcp
+# mcp already has Web UI/App copied, override entrypoint to Mcp
+COPY --from=build /app/mcp ./mcp/
+WORKDIR /app/mcp
+USER 1000:1000
+ENTRYPOINT ["dotnet", "CodeRag.Mcp.dll"]

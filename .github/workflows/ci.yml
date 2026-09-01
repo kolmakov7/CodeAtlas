@@ -72,15 +72,30 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          target: runtime
           push: false
           load: true
           tags: ghcr.io/kolmakov7/codeatlas-coderag:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Push image (main only)
+      - name: Build MCP image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: mcp
+          push: false
+          load: true
+          tags: ghcr.io/kolmakov7/codeatlas-coderag-mcp:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push images (main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: docker push ghcr.io/kolmakov7/codeatlas-coderag:latest
+        run: |
+          docker push ghcr.io/kolmakov7/codeatlas-coderag:latest
+          docker push ghcr.io/kolmakov7/codeatlas-coderag-mcp:latest
 
       - name: Compose up & healthcheck
         run: |
