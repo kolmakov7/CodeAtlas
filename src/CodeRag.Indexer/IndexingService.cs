@@ -355,7 +355,7 @@ public sealed class IndexingService
                 if (cf.Kind == GitChangeKind.Renamed && !string.IsNullOrWhiteSpace(cf.OldPath))
                     await DeleteFileAsync(repo, cf.OldPath!, ct).ConfigureAwait(false);
 
-                await IndexFileAsync(repo, cf.Path, pendingChunks, ct).ConfigureAwait(false);
+                await IndexFileAsync(repo, cf.Path, to!, pendingChunks, ct).ConfigureAwait(false);
             }
 
             processed++;
@@ -422,24 +422,64 @@ public sealed class IndexingService
         _logger.LogDebug("Deleted file {Path} ({Chunks} chunks)", filePath, chunkIds.Count);
     }
 
-    private async Task IndexFileAsync(Domain.Entities.Repository repo, string filePath, List<Domain.Entities.Chunk> pendingChunks, CancellationToken ct)
+    private async Task IndexFileAsync(Domain.Entities.Repository repo, string filePath, string commitSha, List<Domain.Entities.Chunk> pendingChunks, CancellationToken ct)
     {
         var fullPath = Path.Combine(repo.LocalPath.Value, filePath);
         string content;
-        try
+        // Пытаемся прочитать через git show (обходит NAME_MAX 255 и отсутствие working tree после неудачного checkout)
+        var useGitShow = !string.IsNullOrWhiteSpace(commitSha);
+        if (useGitShow)
         {
-            if (!File.Exists(fullPath))
+            try
             {
-                _logger.LogWarning("File not found on disk, deleting from index: {Full}", fullPath);
-                await DeleteFileAsync(repo, filePath, ct).ConfigureAwait(false);
+                content = await _git.ShowFileAsync(repo.LocalPath.Value, filePath, commitSha, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "git show failed for {Path}@{Commit}, fallback to filesystem", filePath, commitSha);
+                // Fallback to filesystem
+                try
+                {
+                    if (!File.Exists(fullPath))
+                    {
+                        _logger.LogWarning("File not found on disk, deleting from index: {Full}", fullPath);
+                        await DeleteFileAsync(repo, filePath, ct).ConfigureAwait(false);
+                        return;
+                    }
+                    content = await File.ReadAllTextAsync(fullPath, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex2)
+                {
+                    _logger.LogWarning(ex2, "Failed to read file {Path}, skipping", filePath);
+                    await LogIndexingErrorAsync(repo.Id, filePath, ex2.Message, ct).ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+        else
+        {
+            try
+            {
+                if (!File.Exists(fullPath))
+                {
+                    _logger.LogWarning("File not found on disk, deleting from index: {Full}", fullPath);
+                    await DeleteFileAsync(repo, filePath, ct).ConfigureAwait(false);
+                    return;
+                }
+                content = await File.ReadAllTextAsync(fullPath, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read file {Path}, skipping", filePath);
+                await LogIndexingErrorAsync(repo.Id, filePath, ex.Message, ct).ConfigureAwait(false);
                 return;
             }
-            content = await File.ReadAllTextAsync(fullPath, ct).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        if (string.IsNullOrWhiteSpace(content))
         {
-            _logger.LogWarning(ex, "Failed to read file {Path}, skipping", filePath);
-            await LogIndexingErrorAsync(repo.Id, filePath, ex.Message, ct).ConfigureAwait(false);
+            _logger.LogDebug("Skipping empty/whitespace file {Path}", filePath);
+            var existingEmpty = await _fileStore.GetByPathAsync(repo.Id, filePath, ct).ConfigureAwait(false);
+            if (existingEmpty is not null) await DeleteFileAsync(repo, filePath, ct).ConfigureAwait(false);
             return;
         }
 
@@ -769,7 +809,7 @@ public sealed class IndexingService
         window = Math.Max(256, window);
         overlap = Math.Clamp(overlap, 0, window - 1);
         var list = new List<Domain.Entities.Chunk>();
-        if (string.IsNullOrEmpty(content)) return list;
+        if (string.IsNullOrWhiteSpace(content)) return list;
         var lines = content.Split('\n');
         var sb = new System.Text.StringBuilder();
         // Простая реализация: режем по символам, сохраняя границы строк примерно
@@ -777,6 +817,7 @@ public sealed class IndexingService
         {
             var len = Math.Min(window, content.Length - pos);
             var slice = content.Substring(pos, len);
+            if (string.IsNullOrWhiteSpace(slice)) continue;
             // Оценка start/end line
             var prefix = content[..pos];
             var startLine = prefix.Count(c => c == '\n') + 1;

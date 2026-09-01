@@ -18,6 +18,9 @@ public interface IGitService
 
     Task<string> GetHeadAsync(string repoPath, string branch, CancellationToken ct);
 
+    /// <summary>Содержимое файла из git blob (не зависит от working tree, обходит NAME_MAX 255).</summary>
+    Task<string> ShowFileAsync(string repoPath, string filePath, string commitSha, CancellationToken ct);
+
     /// <summary>
     /// Инкрементальный diff IndexedCommit..HEAD (indexing.md §2).
     /// Fallback при force-push/rebase: IsAncestor==false → полный diff через ls-tree vs DB.

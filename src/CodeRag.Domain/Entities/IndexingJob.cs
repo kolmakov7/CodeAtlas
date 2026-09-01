@@ -77,7 +77,7 @@ public sealed class IndexingJob
         FinishedAt = at ?? DateTimeOffset.UtcNow;
     }
 
-    internal static IndexingJob Rehydrate(
+    public static IndexingJob Rehydrate(
         Guid id, Guid repositoryId, JobType type, JobStatus status,
         DateTimeOffset startedAt, DateTimeOffset? finishedAt,
         double progress, string? error, string? fromCommit, string? toCommit)

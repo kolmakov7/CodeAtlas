@@ -224,6 +224,19 @@ public sealed class CliGitService : IGitService
         return r.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
+    public async Task<string> ShowFileAsync(string repoPath, string filePath, string commitSha, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("filePath required", nameof(filePath));
+        if (string.IsNullOrWhiteSpace(commitSha)) throw new ArgumentException("commitSha required", nameof(commitSha));
+        // git show не требует working tree файла, обходит NAME_MAX 255
+        var spec = $"{commitSha}:{filePath}";
+        var args = new List<string> { "show", spec };
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, repoPath, null, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"git show failed for {spec} in {repoPath}: {result.StdErr}");
+        return result.StdOut;
+    }
+
     private static string EscapePath(string path) => "\"" + path.Replace("\"", "\\\"") + "\"";
 
     private static IReadOnlyList<GitChangedFile> ParseNameStatus(string stdout)
