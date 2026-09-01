@@ -1,5 +1,11 @@
 using System.Diagnostics;
+using CodeRag.Domain.Entities;
+using CodeRag.Git;
+using CodeRag.Git.Auth;
+using CodeRag.Git.Helpers;
+using CodeRag.Git.Proxy;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace CodeRag.Indexer;
 
@@ -10,14 +16,57 @@ namespace CodeRag.Indexer;
 public sealed class CliGitService : IGitService
 {
     private readonly ILogger<CliGitService> _logger;
+    private readonly GitOptions _options;
+    private readonly ICredentialProtector _protector;
 
-    public CliGitService(ILogger<CliGitService> logger) => _logger = logger;
+    public CliGitService(ILogger<CliGitService> logger, IOptions<GitOptions> options, ICredentialProtector protector)
+    {
+        _logger = logger;
+        _options = options.Value;
+        _protector = protector;
+    }
+
+    // New overload with Proxy/Credential (used by IndexingService after fix)
+    public async Task FetchAsync(string repoPath, string branch, ProxyConfig? proxy, Credential? credential, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(repoPath))
+            throw new ArgumentException("repoPath required", nameof(repoPath));
+        if (!Directory.Exists(repoPath))
+            throw new InvalidOperationException($"Local repo path does not exist: {repoPath}. Clone it first via IGitService/RepositoryService.");
+        if (!Directory.Exists(Path.Combine(repoPath, ".git")))
+            throw new InvalidOperationException($"Not a git repository: {repoPath} (.git missing). Clone it first.");
+
+        using var auth = GitAuthHelper.Build(credential, _protector, _options.SshKeysDir);
+        var proxyUrl = GitProxyHelper.BuildProxyUrl(proxy, _protector);
+        var proxyArgs = GitProxyHelper.BuildGitConfigArgs(proxyUrl);
+        var proxyEnv = GitProxyHelper.BuildEnv(proxyUrl, _options.NoProxy);
+        var env = MergeEnv(auth.Env, proxyEnv);
+
+        var args = new List<string>();
+        args.AddRange(proxyArgs);
+        args.AddRange(auth.ConfigArgs);
+        args.Add("fetch");
+        args.Add("origin");
+        if (!string.IsNullOrWhiteSpace(branch))
+            args.Add(branch.Trim());
+
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, repoPath, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"git fetch failed in {repoPath}: {SecretMasker.Mask(result.StdErr)} {SecretMasker.Mask(result.StdOut)}");
+        _logger.LogDebug("git fetch ok {Repo} branch={Branch}", repoPath, branch);
+    }
 
     public async Task FetchAsync(string repoPath, string branch, string? proxyUrl, CancellationToken ct)
     {
+        // Backward compat: proxyUrl string -> delegate to helper without credential
+        // Build env/args via legacy helpers to keep old callers working
+        if (!Directory.Exists(repoPath))
+            throw new InvalidOperationException($"Local repo path does not exist: {repoPath}. Clone it first via IGitService/RepositoryService.");
+        if (!Directory.Exists(Path.Combine(repoPath, ".git")))
+            throw new InvalidOperationException($"Not a git repository: {repoPath} (.git missing). Clone it first.");
+
         var env = BuildProxyEnv(proxyUrl);
         var args = string.IsNullOrWhiteSpace(branch) ? "fetch origin" : $"fetch origin {branch}";
-        // Если proxy через socks5h — используем -c http.proxy / https.proxy
         var proxyArgs = BuildProxyConfigArgs(proxyUrl);
         var fullArgs = string.IsNullOrEmpty(proxyArgs) ? args : $"{proxyArgs} {args}";
         var result = await RunGitAsync(repoPath, fullArgs, env, ct).ConfigureAwait(false);
@@ -168,8 +217,29 @@ public sealed class CliGitService : IGitService
         return $"-c http.proxy=\"{escaped}\" -c https.proxy=\"{escaped}\"";
     }
 
+    private static Dictionary<string, string> MergeEnv(IDictionary<string, string> a, IDictionary<string, string> b)
+    {
+        var res = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in a) res[kv.Key] = kv.Value;
+        foreach (var kv in b) res[kv.Key] = kv.Value;
+        res["GIT_TERMINAL_PROMPT"] = "0";
+        return res;
+    }
+
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(string workDir, string args, Dictionary<string, string?>? env, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(workDir))
+            throw new ArgumentException("workDir required", nameof(workDir));
+        if (!Directory.Exists(workDir))
+            throw new InvalidOperationException($"Local repo path does not exist: {workDir}. Clone it first via RepositoryService.");
+        if (!Directory.Exists(Path.Combine(workDir, ".git")) && !args.Contains("ls-remote"))
+        {
+            // For local ops (rev-parse/ls-tree/diff) require .git; ls-remote is remote-only
+            var needsGit = args.StartsWith("rev-parse") || args.StartsWith("ls-tree") || args.StartsWith("diff") || args.StartsWith("merge-base") || args.StartsWith("fetch");
+            if (needsGit)
+                throw new InvalidOperationException($"Not a git repository: {workDir} (.git missing). Clone it first.");
+        }
+
         var psi = new ProcessStartInfo("git", args)
         {
             WorkingDirectory = workDir,
@@ -178,6 +248,7 @@ public sealed class CliGitService : IGitService
             UseShellExecute = false,
             CreateNoWindow = true,
         };
+        psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
         if (env is not null)
             foreach (var kv in env)
                 if (kv.Value is not null) psi.Environment[kv.Key] = kv.Value;
@@ -188,7 +259,14 @@ public sealed class CliGitService : IGitService
         proc.OutputDataReceived += (_, e) => { if (e.Data is not null) stdout.AppendLine(e.Data); };
         proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
 
-        proc.Start();
+        try
+        {
+            proc.Start();
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.Message.Contains("No such file or directory"))
+        {
+            throw new InvalidOperationException($"Local repo path does not exist: {workDir}. Clone it first.", ex);
+        }
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
         await proc.WaitForExitAsync(ct).ConfigureAwait(false);

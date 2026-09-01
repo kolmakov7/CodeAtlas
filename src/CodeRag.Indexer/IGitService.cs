@@ -1,3 +1,5 @@
+using CodeRag.Domain.Entities;
+
 namespace CodeRag.Indexer;
 
 /// <summary>
@@ -6,7 +8,11 @@ namespace CodeRag.Indexer;
 /// </summary>
 public interface IGitService
 {
-    Task FetchAsync(string repoPath, string branch, string? proxyUrl, CancellationToken ct);
+    Task FetchAsync(string repoPath, string branch, ProxyConfig? proxy, Credential? credential, CancellationToken ct);
+
+    // Backward compat overload for callers that pass proxyUrl string
+    Task FetchAsync(string repoPath, string branch, string? proxyUrl, CancellationToken ct)
+        => FetchAsync(repoPath, branch, null, null, ct);
 
     Task<string> GetHeadAsync(string repoPath, string branch, CancellationToken ct);
 

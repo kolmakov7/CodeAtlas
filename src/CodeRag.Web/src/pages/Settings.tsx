@@ -25,6 +25,7 @@ export default function SettingsPage() {
   const [credForm, setCredForm] = useState({ kind: "https_token", username: "", secret: "" });
   const [groupForm, setGroupForm] = useState({ name: "", proxyId: "", credentialId: "" });
   const [editingGroup, setEditingGroup] = useState<string | null>(null);
+  const [editingProxy, setEditingProxy] = useState<string | null>(null);
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
   const [groupError, setGroupError] = useState<string | null>(null);
@@ -246,39 +247,56 @@ export default function SettingsPage() {
               <input placeholder="Password (optional)" type="password" value={proxyForm.password} onChange={e => setProxyForm({ ...proxyForm, password: e.target.value })} style={{ flex: 1 }} />
             </div>
             {proxyError && <div style={{ color: "var(--danger)", fontSize: 12 }}>{proxyError}</div>}
-            <button className="primary" onClick={async () => {
-              setProxyError(null);
-              if (!proxyForm.host || !isValidHost(proxyForm.host)) { setProxyError("Host must be a valid DNS name (e.g. proxy.example.com) or IP (e.g. 192.168.1.10), optionally with http:// or https:// prefix"); return; }
-              try {
-                const r = await fetch("/api/proxies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: proxyForm.name, scheme: proxyForm.scheme, host: proxyForm.host, port: proxyForm.port, username: proxyForm.username || undefined, password: proxyForm.password || undefined }) });
-                if (!r.ok) throw new Error(await r.text());
-                setProxyForm({ name: "", scheme: "http", host: "", port: 8080, username: "", password: "" });
-                proxiesQ.refetch();
-              } catch (e: any) { setProxyError(e.message); }
-            }}>Add Proxy</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="primary" onClick={async () => {
+                setProxyError(null);
+                if (!proxyForm.host || !isValidHost(proxyForm.host)) { setProxyError("Host must be a valid DNS name (e.g. proxy.example.com) or IP (e.g. 192.168.1.10), optionally with http:// or https:// prefix"); return; }
+                try {
+                  if (editingProxy) {
+                    const r = await fetch(`/api/proxies/${editingProxy}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: proxyForm.name, scheme: proxyForm.scheme, host: proxyForm.host, port: proxyForm.port, username: proxyForm.username || undefined, password: proxyForm.password || undefined }) });
+                    if (!r.ok) throw new Error(await r.text());
+                    setEditingProxy(null);
+                  } else {
+                    const r = await fetch("/api/proxies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: proxyForm.name, scheme: proxyForm.scheme, host: proxyForm.host, port: proxyForm.port, username: proxyForm.username || undefined, password: proxyForm.password || undefined }) });
+                    if (!r.ok) throw new Error(await r.text());
+                  }
+                  setProxyForm({ name: "", scheme: "http", host: "", port: 8080, username: "", password: "" });
+                  proxiesQ.refetch();
+                } catch (e: any) { setProxyError(e.message); }
+              }}>{editingProxy ? "Update Proxy" : "Add Proxy"}</button>
+              {editingProxy && <button onClick={() => { setEditingProxy(null); setProxyForm({ name: "", scheme: "http", host: "", port: 8080, username: "", password: "" }); setProxyError(null); }}>Cancel</button>}
+            </div>
           </div>
           {proxiesQ.isLoading ? <div className="skeleton" style={{ height: 80 }} /> : proxiesQ.data?.length ? (
-            <table className="table" style={{ tableLayout: "fixed", width: "100%" }}>
-              <colgroup>
-                <col style={{ width: "75%" }} />
-                <col style={{ width: "5%" }} />
-                <col style={{ width: "8%" }} />
-                <col style={{ width: "5%" }} />
-                <col style={{ width: "7%" }} />
-              </colgroup>
-              <thead><tr><th>Name</th><th>Type</th><th>Host</th><th>Port</th><th>Actions</th></tr></thead>
-              <tbody>
-                {(proxiesQ.data as any[]).map((p: any) => (
-                  <tr key={p.id}>
-                    <td style={{ wordBreak: "break-all", whiteSpace: "normal" }} title={p.name}>{p.name}</td>
-                    <td style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{p.scheme}</td>
-                    <td style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{p.host}</td>
-                    <td>{p.port}</td>
-                    <td style={{ display: "flex", gap: 4 }}><button style={{ fontSize: 12 }} onClick={() => fetch(`/api/proxies/${p.id}/test`, { method: "POST" }).then(async r => alert(await r.text())).catch(e => alert(e.message))}>Test</button><button style={{ fontSize: 12 }} onClick={async () => { if (confirm(`Delete proxy ${p.name}?`)) { const r = await fetch(`/api/proxies/${p.id}`, { method: "DELETE" }); if (!r.ok) { const t = await r.text(); alert(t); } proxiesQ.refetch(); }}}>Delete</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div style={{ overflowX: "auto" }}>
+              <table className="table" style={{ width: "100%", minWidth: 520 }}>
+                <colgroup>
+                  <col style={{ width: "28%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "30%" }} />
+                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "20%" }} />
+                </colgroup>
+                <thead><tr><th>Name</th><th>Type</th><th>Host</th><th>Port</th><th>Actions</th></tr></thead>
+                <tbody>
+                  {(proxiesQ.data as any[]).map((p: any) => (
+                    <tr key={p.id}>
+                      <td style={{ wordBreak: "break-all", whiteSpace: "normal" }} title={p.name}>{p.name}</td>
+                      <td style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{p.scheme}</td>
+                      <td style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={p.host}>{p.host}</td>
+                      <td>{p.port}</td>
+                      <td>
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                          <button style={{ fontSize: 12, whiteSpace: "nowrap" }} onClick={() => { setEditingProxy(p.id); setProxyForm({ name: p.name, scheme: (p.scheme || "http").toLowerCase(), host: p.host, port: p.port, username: p.username || "", password: "" }); setProxyError(null); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Edit</button>
+                          <button style={{ fontSize: 12, whiteSpace: "nowrap" }} onClick={() => fetch(`/api/proxies/${p.id}/test`, { method: "POST" }).then(async r => alert(await r.text())).catch(e => alert(e.message))}>Test</button>
+                          <button style={{ fontSize: 12, whiteSpace: "nowrap" }} onClick={async () => { if (confirm(`Delete proxy ${p.name}?`)) { const r = await fetch(`/api/proxies/${p.id}`, { method: "DELETE" }); if (!r.ok) { const t = await r.text(); alert(t); } proxiesQ.refetch(); }}}>Delete</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No proxies configured.</div>}
         </div>
       )}

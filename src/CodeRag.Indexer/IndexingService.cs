@@ -32,6 +32,9 @@ public sealed class IndexingService
     private readonly CodeRag.Domain.Ports.IIndexingErrorStore _errorStore;
     private readonly CodeRag.Domain.Ports.IRelationStore _relationStore;
     private readonly IEnumerable<IRelationExtractor> _relationExtractors;
+    private readonly CodeRag.Domain.Ports.IRepositoryGroupStore _groupStore;
+    private readonly CodeRag.Git.Stores.IProxyStore _proxyStore;
+    private readonly CodeRag.Git.Stores.ICredentialStore _credStore;
     private readonly ILogger<IndexingService> _logger;
 
     public IndexingService(
@@ -50,6 +53,9 @@ public sealed class IndexingService
         CodeRag.Domain.Ports.IIndexingErrorStore errorStore,
         CodeRag.Domain.Ports.IRelationStore relationStore,
         IEnumerable<IRelationExtractor> relationExtractors,
+        CodeRag.Domain.Ports.IRepositoryGroupStore groupStore,
+        CodeRag.Git.Stores.IProxyStore proxyStore,
+        CodeRag.Git.Stores.ICredentialStore credStore,
         ILogger<IndexingService> logger)
     {
         _repoStore = repoStore;
@@ -67,6 +73,9 @@ public sealed class IndexingService
         _errorStore = errorStore;
         _relationStore = relationStore;
         _relationExtractors = relationExtractors;
+        _groupStore = groupStore;
+        _proxyStore = proxyStore;
+        _credStore = credStore;
         _logger = logger;
     }
 
@@ -182,14 +191,21 @@ public sealed class IndexingService
         repo.MarkSyncing();
         await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
 
-        // Proxy per-repo (git-proxy-auth.md §2) — берём из proxy_id если есть
-        string? proxyUrl = null; // TODO: resolve from proxies table via ProxyConfig if needed
+        var (proxy, cred) = await GetEffectiveProxyAndCredAsync(repo, ct).ConfigureAwait(false);
+
+        // Если локального клона ещё нет — пропускаем fetch, клонирование делает RepositoryService (GitService).
+        // Раньше здесь падал Win32Exception No such file or directory из-за WorkingDirectory.
+        if (!Directory.Exists(repo.LocalPath.Value) || !Directory.Exists(Path.Combine(repo.LocalPath.Value, ".git")))
+        {
+            _logger.LogWarning("Sync skipped fetch for {Repo}: local path {Path} not cloned yet, waiting for RepositoryService clone", repo.Id, repo.LocalPath.Value);
+            throw new InvalidOperationException($"Local repo path does not exist: {repo.LocalPath.Value}. Clone it first via RepositoryService (check proxy/credential for group {repo.GroupId}).");
+        }
 
         try
         {
             // 1) Update the local working copy + resolve the new HEAD.
             await SetJobProgressAsync(job, 0.25, ct).ConfigureAwait(false);
-            await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxyUrl, ct).ConfigureAwait(false);
+            await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
             var newHead = await _git.GetHeadAsync(repo.LocalPath.Value, repo.Branch, ct).ConfigureAwait(false);
 
             repo.UpdateCurrentCommit(newHead);
@@ -814,6 +830,17 @@ public sealed class IndexingService
     private static string ComputeHash(string source) => Domain.Entities.Chunk.ComputeHash(source);
 
     private static string TruncateError(string msg) => msg.Length <= 2000 ? msg : msg[..2000];
+
+    private async Task<(ProxyConfig? Proxy, Credential? Credential)> GetEffectiveProxyAndCredAsync(Domain.Entities.Repository repo, CancellationToken ct)
+    {
+        if (!repo.GroupId.HasValue) return (null, null);
+        var group = await _groupStore.GetByIdAsync(repo.GroupId.Value, ct).ConfigureAwait(false);
+        if (group is null) return (null, null);
+        ProxyConfig? proxy = group.ProxyId.HasValue ? await _proxyStore.GetByIdAsync(group.ProxyId.Value, ct).ConfigureAwait(false) : null;
+        Credential? cred = group.CredentialId.HasValue ? await _credStore.GetByIdAsync(group.CredentialId.Value, ct).ConfigureAwait(false) : null;
+        return (proxy, cred);
+    }
+
 
     private async Task LogIndexingErrorAsync(Guid repoId, string filePath, string message, CancellationToken ct)
     {

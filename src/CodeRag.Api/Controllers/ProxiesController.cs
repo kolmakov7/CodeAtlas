@@ -49,6 +49,35 @@ public sealed class ProxiesController : ControllerBase
         return Ok(new { id = p.Id, name = p.Name, scheme = p.Scheme.ToString().ToLower(), host = p.Host, port = p.Port, username = p.Username });
     }
 
+    [HttpPut("{id:guid}")]
+    public async Task<IActionResult> Update(Guid id, [FromBody] CreateProxyRequest req, CancellationToken ct)
+    {
+        var existing = await _store.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (existing is null) return NotFound();
+        var scheme = Enum.TryParse<ProxyScheme>(req.Scheme, true, out var s) ? s : existing.Scheme;
+        var name = string.IsNullOrWhiteSpace(req.Name) ? existing.Name : req.Name;
+        var host = string.IsNullOrWhiteSpace(req.Host) ? existing.Host : req.Host;
+        var port = req.Port != 0 ? req.Port : existing.Port;
+        // username/password: if explicitly null/empty string passed as "" we clear; if not provided keep existing
+        // For simplicity, treat empty string as clear, missing as keep (but req always has values)
+        var username = req.Username; // null means not set, "" means clear
+        var password = req.Password; // same
+        try
+        {
+            // If password is provided, use it; else keep existing encrypted
+            string? passEnc = password is not null ? (string.IsNullOrWhiteSpace(password) ? null : password) : existing.PasswordEncrypted;
+            string? user = username is not null ? (string.IsNullOrWhiteSpace(username) ? null : username) : existing.Username;
+            var proxy = ProxyConfig.Create(id, name, scheme, host, port, user, passEnc);
+            await _store.UpsertAsync(proxy, ct).ConfigureAwait(false);
+            _logger.LogInformation("PUT /api/proxies/{Id} updated {Name}", id, proxy.Name);
+            return Ok(new { id = proxy.Id, name = proxy.Name, scheme = proxy.Scheme.ToString().ToLower(), host = proxy.Host, port = proxy.Port, username = proxy.Username });
+        }
+        catch (CodeRag.Domain.Exceptions.DomainValidationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
     {

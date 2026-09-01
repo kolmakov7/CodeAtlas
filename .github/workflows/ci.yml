@@ -78,6 +78,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Push image (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: docker push ghcr.io/kolmakov7/codeatlas-coderag:latest
+
       - name: Compose up & healthcheck
         run: |
           set -e
