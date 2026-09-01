@@ -8,6 +8,8 @@ namespace CodeRag.Indexer;
 /// </summary>
 public interface IGitService
 {
+    Task CloneAsync(string remoteUrl, string localPath, string branch, ProxyConfig? proxy, Credential? credential, CancellationToken ct);
+
     Task FetchAsync(string repoPath, string branch, ProxyConfig? proxy, Credential? credential, CancellationToken ct);
 
     // Backward compat overload for callers that pass proxyUrl string

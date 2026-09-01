@@ -83,32 +83,12 @@ public sealed class RepositoryService : IRepositoryService
             return repo;
         }
 
-        // Attempt clone
-try
-            {
-                repo.MarkSyncing();
-                await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
-
-                await _git.CloneAsync(gitUrl, normalized, branch, proxy, cred, ct).ConfigureAwait(false);
-
-                var head = await _git.GetHeadAsync(normalized, branch, ct).ConfigureAwait(false);
-                repo.UpdateCurrentCommit(head);
-                repo.MarkActive();
-                repo.ClearError();
-                await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
-
-                _logger.LogInformation("Repository {Name} cloned at {Path} head {Sha}", name, normalized, head);
-
-                // Enqueue initial index job
-                // Note: This requires IJobRunner which is in CodeRag.Indexer - we'll handle via the background service polling instead
-            }
-        catch (Exception ex)
-        {
-            var masked = SecretMasker.Mask(ex.Message);
-            repo.MarkError(masked);
-            await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
-            _logger.LogError(ex, "Clone failed for {Name}: {Err}", name, masked);
-        }
+        // Clone теперь отдельный таск: не блокируем запрос Add на большой репо (таймаут 120s).
+        // Создаём репо в статусе Syncing — контроллер сразу поставит Sync job, который сделает clone+fetch в фоне.
+        // ls-remote уже проверил доступность, поэтому clone можно отложить.
+        repo.MarkSyncing();
+        await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+        _logger.LogInformation("Repository {Name} created at {Path}, clone deferred to Sync job", name, normalized);
 
         return repo;
     }

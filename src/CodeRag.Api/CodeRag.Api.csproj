@@ -8,6 +8,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
@@ -22,6 +24,7 @@
     <ProjectReference Include="..\CodeRag.Search\CodeRag.Search.csproj" />
     <ProjectReference Include="..\CodeRag.Analyzers.Abstractions\CodeRag.Analyzers.Abstractions.csproj" />
     <ProjectReference Include="..\CodeRag.Analyzers.CSharp\CodeRag.Analyzers.CSharp.csproj" />
+    <ProjectReference Include="..\CodeRag.Mcp\CodeRag.Mcp.csproj" />
   </ItemGroup>
 
   <!--

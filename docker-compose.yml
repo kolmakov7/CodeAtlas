@@ -27,6 +27,8 @@ services:
     restart: unless-stopped
     user: "1000:1000"
 
+  # coderag-mcp — deprecated: MCP теперь в основном API (http://coderag:8080/mcp, Streamable HTTP).
+  # Отдельный образ не нужен (stdio не используется). Оставлен для совместимости stdio через `profiles: ["mcp"]`.
   coderag-mcp:
     image: ghcr.io/kolmakov7/codeatlas-coderag-mcp:latest
     build:
@@ -37,6 +39,8 @@ services:
     volumes: ["./data:/data:ro"]
     environment:
       CODERAG__DataDir: /data
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-both}
+      ASPNETCORE_URLS: http://+:3001
       Embeddings__Code__Endpoint: ${CODE_EMBEDDINGS_ENDPOINT:-http://code-embeddings:8080/v1/embeddings}
       Embeddings__Code__Model: ${CODE_EMBEDDINGS_MODEL:-bge-m3}
       Embeddings__Code__Dimensions: ${CODE_EMBEDDINGS_DIMENSIONS:-0}

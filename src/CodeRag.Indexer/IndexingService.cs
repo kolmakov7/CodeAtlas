@@ -193,19 +193,21 @@ public sealed class IndexingService
 
         var (proxy, cred) = await GetEffectiveProxyAndCredAsync(repo, ct).ConfigureAwait(false);
 
-        // Если локального клона ещё нет — пропускаем fetch, клонирование делает RepositoryService (GitService).
-        // Раньше здесь падал Win32Exception No such file or directory из-за WorkingDirectory.
-        if (!Directory.Exists(repo.LocalPath.Value) || !Directory.Exists(Path.Combine(repo.LocalPath.Value, ".git")))
-        {
-            _logger.LogWarning("Sync skipped fetch for {Repo}: local path {Path} not cloned yet, waiting for RepositoryService clone", repo.Id, repo.LocalPath.Value);
-            throw new InvalidOperationException($"Local repo path does not exist: {repo.LocalPath.Value}. Clone it first via RepositoryService (check proxy/credential for group {repo.GroupId}).");
-        }
-
         try
         {
             // 1) Update the local working copy + resolve the new HEAD.
             await SetJobProgressAsync(job, 0.25, ct).ConfigureAwait(false);
-            await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
+            // Clone — отдельный таск: если клона нет, делаем clone здесь (видно в jobs), а не в AddAsync.
+            if (!Directory.Exists(repo.LocalPath.Value) || !Directory.Exists(Path.Combine(repo.LocalPath.Value, ".git")))
+            {
+                _logger.LogInformation("Sync: local path {Path} not cloned, cloning branch {Branch} via proxy/cred", repo.LocalPath.Value, repo.Branch);
+                await SetJobProgressAsync(job, 0.10, ct).ConfigureAwait(false);
+                await _git.CloneAsync(repo.GitUrl.Value, repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
+            }
             var newHead = await _git.GetHeadAsync(repo.LocalPath.Value, repo.Branch, ct).ConfigureAwait(false);
 
             repo.UpdateCurrentCommit(newHead);

@@ -8,8 +8,8 @@ public sealed class GitOptions
     /// <summary>Путь к исполняемому git (по умолчанию "git").</summary>
     public string GitExecutable { get; set; } = "git";
 
-    /// <summary>Таймаут по умолчанию для git команд (сек).</summary>
-    public int DefaultTimeoutSeconds { get; set; } = 120;
+    /// <summary>Таймаут по умолчанию для git команд (сек). Для больших репо clone через SOCKS может занять &gt;120s.</summary>
+    public int DefaultTimeoutSeconds { get; set; } = 600;
 
     /// <summary>Корень для локальных репо — должен быть /data/repos.</summary>
     public string ReposRoot { get; set; } = "/data/repos";

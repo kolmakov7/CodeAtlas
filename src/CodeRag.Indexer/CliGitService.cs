@@ -26,6 +26,45 @@ public sealed class CliGitService : IGitService
         _protector = protector;
     }
 
+    public async Task CloneAsync(string remoteUrl, string localPath, string branch, ProxyConfig? proxy, Credential? credential, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(remoteUrl)) throw new ArgumentException("remoteUrl required", nameof(remoteUrl));
+        if (string.IsNullOrWhiteSpace(localPath)) throw new ArgumentException("localPath required", nameof(localPath));
+        if (string.IsNullOrWhiteSpace(branch)) branch = "main";
+
+        var normalized = PathValidator.ValidateAndNormalize(localPath, _options.ReposRoot);
+
+        if (Directory.Exists(Path.Combine(normalized, ".git")))
+        {
+            _logger.LogInformation("Clone skipped, repo already exists at {Path}", normalized);
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(normalized) ?? normalized);
+        if (Directory.Exists(normalized) && Directory.EnumerateFileSystemEntries(normalized).Any())
+            throw new InvalidOperationException($"Local path {normalized} already exists and is not a git repository.");
+
+        using var auth = GitAuthHelper.Build(credential, _protector, _options.SshKeysDir);
+        var proxyUrl = GitProxyHelper.BuildProxyUrl(proxy, _protector);
+        var proxyArgs = GitProxyHelper.BuildGitConfigArgs(proxyUrl);
+        var proxyEnv = GitProxyHelper.BuildEnv(proxyUrl, _options.NoProxy);
+
+        var args = new List<string>();
+        args.AddRange(proxyArgs);
+        args.AddRange(auth.ConfigArgs);
+        args.Add("clone");
+        args.Add("--branch");
+        args.Add(branch.Trim());
+        args.Add(remoteUrl);
+        args.Add(normalized);
+
+        var env = MergeEnv(auth.Env, proxyEnv);
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"git clone failed (exit {result.ExitCode}): {SecretMasker.Mask(result.StdErr)} {SecretMasker.Mask(result.StdOut)}");
+        _logger.LogInformation("Clone ok {Url} -> {Path}", SecretMasker.Mask(remoteUrl), normalized);
+    }
+
     // New overload with Proxy/Credential (used by IndexingService after fix)
     public async Task FetchAsync(string repoPath, string branch, ProxyConfig? proxy, Credential? credential, CancellationToken ct)
     {

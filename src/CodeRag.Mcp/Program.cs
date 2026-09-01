@@ -17,7 +17,20 @@ public sealed class McpProgram
 {
     public static async Task Main(string[] args)
     {
-        var builder = Host.CreateApplicationBuilder(args);
+        var transport = (Environment.GetEnvironmentVariable("MCP_TRANSPORT")
+            ?? Environment.GetEnvironmentVariable("CODERAG__McpTransport")
+            ?? "both").ToLowerInvariant(); // stdio|http|both, default both for backward compat + remote
+        var useStdio = transport == "stdio" || transport == "both";
+        var useHttp = transport == "http" || transport == "both";
+
+        var builder = WebApplication.CreateBuilder(args);
+        // HTTP transport needs a listener; default 3001 if not set (prod: 3001, Api: 8080)
+        if (useHttp && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ASPNETCORE_URLS"))
+            && args.All(a => !a.Contains("--urls", StringComparison.OrdinalIgnoreCase)))
+        {
+            var httpPort = Environment.GetEnvironmentVariable("MCP_HTTP_PORT") ?? "3001";
+            builder.WebHost.UseUrls($"http://+:{httpPort}");
+        }
 
         var dataDir = Environment.GetEnvironmentVariable("CODERAG__DataDir")
             ?? builder.Configuration["CODERAG:DataDir"]
@@ -39,9 +52,9 @@ public sealed class McpProgram
         builder.Services.AddSingleton<CodeSearchTools>();
         builder.Services.AddSingleton<IMcpToolHandler>(sp => sp.GetRequiredService<CodeSearchTools>());
 
-        builder.Services.AddMcpServer()
-            .WithStdioServerTransport()
-            .WithToolsFromAssembly();
+        var mcp = builder.Services.AddMcpServer().WithToolsFromAssembly();
+        if (useStdio) mcp.WithStdioServerTransport();
+        if (useHttp) mcp.WithHttpTransport();
 
         builder.Logging.AddConsole();
         builder.Logging.SetMinimumLevel(LogLevel.Information);
@@ -59,17 +72,24 @@ public sealed class McpProgram
         builder.Configuration.Sources.Add(new SettingsTableConfigurationSource(settingsTableProvider));
         builder.Services.AddSingleton(settingsTableProvider);
 
-        var host = builder.Build();
-        settingsServiceProvider = host.Services;
+        var app = builder.Build();
+        settingsServiceProvider = app.Services;
 
-        using (var scope = host.Services.CreateScope())
+        if (useHttp)
         {
-            var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
+            app.MapMcp("/mcp");
+            app.MapGet("/health", () => Results.Ok(new { status = "Healthy", transport }));
+            app.MapGet("/", () => Results.Ok(new { name = "CodeAtlas MCP", transport, http = "/mcp", health = "/health" }));
+        }
+
+        using (var scope = app.Services.CreateScope())
+        {
+            var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
             var logger = loggerFactory.CreateLogger("CodeRag.Mcp");
             try
             {
                 await scope.ServiceProvider.InitializeDatabaseAsync().ConfigureAwait(false);
-                logger.LogInformation("MCP initialized DB at {DataDir}", dataDir);
+                logger.LogInformation("MCP initialized DB at {DataDir} transport={Transport}", dataDir, transport);
             }
             catch (Exception ex)
             {
@@ -77,6 +97,6 @@ public sealed class McpProgram
             }
         }
 
-        await host.RunAsync();
+        await app.RunAsync();
     }
 }

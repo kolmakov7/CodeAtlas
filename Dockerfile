@@ -77,10 +77,14 @@ USER 1000:1000
 
 ENTRYPOINT ["dotnet", "CodeRag.Api.dll"]
 
-# MCP stdio sidecar — same base, different entrypoint
+# MCP sidecar — supports stdio (local) + Streamable HTTP (remote, default both)
 FROM runtime AS mcp
-# mcp already has Web UI/App copied, override entrypoint to Mcp
 COPY --from=build /app/mcp ./mcp/
 WORKDIR /app/mcp
+EXPOSE 3001
+ENV ASPNETCORE_URLS=http://+:3001
+ENV MCP_TRANSPORT=both
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=10s \
+  CMD curl -f http://localhost:3001/health || exit 1
 USER 1000:1000
 ENTRYPOINT ["dotnet", "CodeRag.Mcp.dll"]

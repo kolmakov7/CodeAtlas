@@ -65,6 +65,13 @@ builder.Services.AddSingleton<HealthService>();
 builder.Services.AddSingleton<SettingsService>();
 builder.Services.AddSingleton<StatisticsService>();
 
+// MCP remote (Streamable HTTP) — reuse tools from CodeRag.Mcp, exposed at /mcp
+// stdio не нужен, http достаточно для remote opencode (type: remote, url: http://host:8080/mcp)
+builder.Services.AddSingleton<CodeRag.Mcp.Tools.CodeSearchTools>();
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithToolsFromAssembly(typeof(CodeRag.Mcp.Tools.CodeSearchTools).Assembly);
+
 // Таблица settings → IConfiguration: значения из БД имеют приоритет над env/appsettings,
 // hot reload через FireReload() после Upsert (SettingsController).
 #pragma warning disable ASP0013 // источник добавляется после дефолтов; builder.Configuration (IConfiguration) Add не поддерживает
@@ -111,6 +118,10 @@ app.MapGet("/openapi/{documentName}.json", (string documentName, Swashbuckle.Asp
 });
 
 app.UseCors();
+
+// MCP Streamable HTTP — remote для opencode (type: remote, url: http://host:8080/mcp)
+app.MapMcp("/mcp");
+
 // Web UI static (React Vite dist → wwwroot) — MapStaticAssets on .NET9+/UseStaticFiles fallback
 app.UseDefaultFiles();
 app.UseStaticFiles();
