@@ -3,7 +3,7 @@
 
 export type RepositoryStatus = "Active" | "Syncing" | "Indexing" | "Paused" | "Error" | "Deleting";
 export type JobStatus = "Queued" | "Running" | "Completed" | "Failed" | "Canceled";
-export type JobType = "Sync" | "Index" | "Reindex" | "Delete";
+export type JobType = "Sync" | "Index" | "Reindex" | "Delete" | "Clone" | "Embedding" | "Rebuild";
 export type SearchMode = "Hybrid" | "FullText" | "Semantic" | "Symbol";
 export type SymbolKind = string; // e.g. Class, Interface, Method, Function, Property, Field, Enum, Namespace
 export type HealthStatus = "OK" | "FAIL" | "Degraded";

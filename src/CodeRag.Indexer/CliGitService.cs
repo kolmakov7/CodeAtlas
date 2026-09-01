@@ -41,8 +41,13 @@ public sealed class CliGitService : IGitService
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(normalized) ?? normalized);
-        if (Directory.Exists(normalized) && Directory.EnumerateFileSystemEntries(normalized).Any())
-            throw new InvalidOperationException($"Local path {normalized} already exists and is not a git repository.");
+        if (Directory.Exists(normalized))
+        {
+            if (Directory.EnumerateFileSystemEntries(normalized).Any())
+                throw new InvalidOperationException($"Local path {normalized} already exists and is not a git repository.");
+            // Empty directory exists — git clone requires non-existing target, remove it
+            try { Directory.Delete(normalized); } catch { }
+        }
 
         using var auth = GitAuthHelper.Build(credential, _protector, _options.SshKeysDir);
         var proxyUrl = GitProxyHelper.BuildProxyUrl(proxy, _protector);

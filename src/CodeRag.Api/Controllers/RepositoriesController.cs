@@ -66,8 +66,8 @@ public sealed class RepositoriesController : ControllerBase
                 }
                 var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, effectiveGroup, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
                 
-                // Enqueue initial sync job to start indexing immediately
-                var job = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Sync);
+                // Clone — отдельный уникальный таск сразу после добавления, Sync/Index после
+                var job = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Clone);
                 await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
                 
                 return CreatedAtAction(nameof(GetById), new { id = repo.Id }, await MapAsync(repo, ct).ConfigureAwait(false));
@@ -139,6 +139,18 @@ public sealed class RepositoriesController : ControllerBase
         return NoContent();
     }
 
+    [HttpPost("{id:guid}/clone")]
+    public async Task<IActionResult> Clone(Guid id, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
+        if (repo.Status == RepositoryStatus.Paused) return Problem(title: "Repository is paused", statusCode: 409);
+        _logger.LogInformation("POST /api/repositories/{Id}/clone", id);
+        var job = IndexingJob.Create(Guid.NewGuid(), id, JobType.Clone);
+        await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
+        return Accepted(new { jobId = job.Id });
+    }
+
     [HttpPost("{id:guid}/sync")]
     public async Task<IActionResult> Sync(Guid id, CancellationToken ct)
     {
@@ -149,8 +161,7 @@ public sealed class RepositoriesController : ControllerBase
         try
         {
             _logger.LogInformation("POST /api/repositories/{Id}/sync", id);
-            await _repoService.SyncAsync(id, ct).ConfigureAwait(false);
-            // Also enqueue Index job for sync? The indexer Service will handle polling but we also enqueue job for immediate indexing
+            // Sync теперь не блокирует clone — Clone отдельный таск, Sync только fetch
             var job = IndexingJob.Create(Guid.NewGuid(), id, JobType.Sync);
             await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
             return Accepted(new { jobId = job.Id });

@@ -36,12 +36,12 @@ public sealed class GitService : IGitService
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(normalized) ?? normalized);
-        // Ensure parent exists; remove empty stale dir if exists but not git
+        // Ensure parent exists; remove empty stale dir if exists but not git (git clone requires non-existing target)
         if (Directory.Exists(normalized))
         {
             if (!Directory.EnumerateFileSystemEntries(normalized).Any())
             {
-                // empty, ok to clone into it (git clone expects non-existing or empty)
+                try { Directory.Delete(normalized); } catch { }
             }
             else
             {

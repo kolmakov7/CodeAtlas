@@ -77,6 +77,15 @@ public sealed class IndexingService
         _proxyStore = proxyStore;
         _credStore = credStore;
         _logger = logger;
+
+        _strategies = new Dictionary<JobType, Func<IndexingJob, CancellationToken, Task>>
+        {
+            [JobType.Clone] = ExecuteCloneAsync,
+            [JobType.Sync] = ExecuteSyncAsync,
+            [JobType.Index] = ExecuteIndexAsync,
+            [JobType.Embedding] = ExecuteEmbeddingAsync,
+            [JobType.Rebuild] = ExecuteRebuildAsync
+        };
     }
 
     /// <summary>
@@ -117,6 +126,9 @@ public sealed class IndexingService
         return false;
     }
 
+    // Strategy: JobType -> handler (убирает switch, см. IIndexingJobHandler)
+    private readonly Dictionary<JobType, Func<IndexingJob, CancellationToken, Task>> _strategies;
+
     public async Task ExecuteAsync(IndexingJob job, CancellationToken ct)
     {
         _logger.LogInformation("Executing job {JobId} type={Type} repo={Repo}", job.Id, job.Type, job.RepositoryId);
@@ -126,23 +138,9 @@ public sealed class IndexingService
 
         try
         {
-            switch (job.Type)
-            {
-                case JobType.Sync:
-                    await ExecuteSyncAsync(job, ct).ConfigureAwait(false);
-                    break;
-                case JobType.Index:
-                    await ExecuteIndexAsync(job, ct).ConfigureAwait(false);
-                    break;
-                case JobType.Embedding:
-                    await ExecuteEmbeddingAsync(job, ct).ConfigureAwait(false);
-                    break;
-                case JobType.Rebuild:
-                    await ExecuteRebuildAsync(job, ct).ConfigureAwait(false);
-                    break;
-                default:
-                    throw new NotSupportedException($"Unknown job type {job.Type}");
-            }
+            if (!_strategies.TryGetValue(job.Type, out var handler))
+                throw new NotSupportedException($"Unknown job type {job.Type}");
+            await handler(job, ct).ConfigureAwait(false);
 
             job.MarkCompleted();
             await _jobStore.UpsertAsync(job, ct).ConfigureAwait(false);
@@ -236,6 +234,60 @@ public sealed class IndexingService
 
             repo.MarkActive();
             await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+            await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            repo.MarkError(TruncateError(ex.Message));
+            await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task ExecuteCloneAsync(IndexingJob job, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(job.RepositoryId, ct).ConfigureAwait(false)
+                   ?? throw new InvalidOperationException($"Repository {job.RepositoryId} not found");
+
+        if (!repo.Enabled || repo.Status == RepositoryStatus.Paused)
+        {
+            _logger.LogInformation("Clone skipped repo {Repo} status={Status}", repo.Id, repo.Status);
+            await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
+            return;
+        }
+
+        repo.MarkSyncing();
+        await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+        var (proxy, cred) = await GetEffectiveProxyAndCredAsync(repo, ct).ConfigureAwait(false);
+
+        try
+        {
+            await SetJobProgressAsync(job, 0.10, ct).ConfigureAwait(false);
+            // Idempotent: если уже склонирован — пропускаем
+            if (!Directory.Exists(Path.Combine(repo.LocalPath.Value, ".git")))
+            {
+                _logger.LogInformation("Clone job {JobId} cloning {Url} -> {Path} branch {Branch}", job.Id, repo.GitUrl.Value, repo.LocalPath.Value, repo.Branch);
+                await _git.CloneAsync(repo.GitUrl.Value, repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation("Clone job {JobId} already cloned, fetching instead", job.Id);
+                await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
+            }
+
+            await SetJobProgressAsync(job, 0.70, ct).ConfigureAwait(false);
+            var head = await _git.GetHeadAsync(repo.LocalPath.Value, repo.Branch, ct).ConfigureAwait(false);
+            repo.UpdateCurrentCommit(head);
+            repo.MarkActive();
+            repo.ClearError();
+            await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
+            _logger.LogInformation("Clone job {JobId} done head {Head}", job.Id, head);
+
+            // После клона — отдельный Index таск
+            var indexJob = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Index, JobStatus.Queued, DateTimeOffset.UtcNow, repo.IndexedCommit, head);
+            await _jobRunner.EnqueueAsync(indexJob, ct).ConfigureAwait(false);
+            _logger.LogInformation("Clone enqueued Index job {IndexJob}", indexJob.Id);
+
             await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
         }
         catch (Exception ex)

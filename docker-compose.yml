@@ -1,8 +1,10 @@
 services:
   coderag:
     image: ghcr.io/kolmakov7/codeatlas-coderag:latest
-    build: .
-    ports: ["8080:8080"]
+    build:
+      context: .
+      target: runtime
+    ports: ["8085:8080"]
     volumes: ["./data:/data"]
     environment:
       ASPNETCORE_ENVIRONMENT: Production
