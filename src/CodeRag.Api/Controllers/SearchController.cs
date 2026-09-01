@@ -114,6 +114,14 @@ public sealed class SearchController : ControllerBase
         catch (InvalidOperationException ex) { return Problem(title: ex.Message, statusCode: 404); }
     }
 
+    [HttpGet("symbols/{id:guid}")]
+    public async Task<IActionResult> GetSymbol(Guid id, CancellationToken ct)
+    {
+        var sym = await _search.GetSymbolAsync(id, ct).ConfigureAwait(false);
+        if (sym is null) return Problem(title: $"Symbol {id} not found", statusCode: 404);
+        return Ok(sym);
+    }
+
     [HttpGet("symbols/{id:guid}/relations")]
     [ProducesResponseType(typeof(IReadOnlyList<CodeRag.Search.Models.RelationEntry>), 200)]
     public async Task<IActionResult> GetSymbolRelations(

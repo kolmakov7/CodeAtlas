@@ -1,18 +1,23 @@
 import { useParams, Link } from "react-router-dom";
 import { useState } from "react";
-import { useRepository, useRepositoryStatistics, useRepositoryActions, useJobs } from "@/api/hooks";
+import { useRepository, useRepositoryStatistics, useRepositoryActions, useJobs, useRepositoryGroups } from "@/api/hooks";
 import { StatCard } from "@/components/StatCard";
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { ProgressBar } from "@/components/ProgressBar";
 import { formatDate } from "@/utils/format";
+import apiClient from "@/api/client";
+import { useQueryClient } from "@tanstack/react-query";
 
 export default function RepositoryDashboard() {
   const { id } = useParams<{ id: string }>();
   const repoQ = useRepository(id);
   const statsQ = useRepositoryStatistics(id);
   const jobsQ = useJobs(id);
+  const groupsQ = useRepositoryGroups();
+  const qc = useQueryClient();
   const actions = useRepositoryActions();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [groupError, setGroupError] = useState<string | null>(null);
 
   if (repoQ.isLoading) return <div className="skeleton" style={{ height: 200 }} />;
   if (repoQ.isError || !repoQ.data) return <div className="card">Repository not found. <Link to="/repositories">Back</Link></div>;
@@ -31,6 +36,22 @@ export default function RepositoryDashboard() {
               <div>Git: <code>{r.gitUrl}</code> · Branch: <code>{r.branch}</code></div>
               <div>HEAD: <code>{r.currentCommit ?? "—"}</code> · Indexed: <code>{r.indexedCommit ?? "—"}</code></div>
               <div>LastSync: {formatDate(r.lastSyncAt)} · LastIndex: {formatDate(r.lastIndexAt)}</div>
+              <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}>
+                <span>Group:</span>
+                <select value={(r as any).groupId ?? ""} onChange={async (e) => {
+                  setGroupError(null);
+                  try {
+                    const gid = e.target.value || null;
+                    await apiClient.put(`/repositories/${r.id}`, { groupId: gid });
+                    qc.invalidateQueries({ queryKey: ["repositories", r.id] });
+                    repoQ.refetch();
+                  } catch (err: any) { setGroupError(err.response?.data?.title ?? err.message); }
+                }}>
+                  <option value="">Default</option>
+                  {(groupsQ.data as any[] ?? []).map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                </select>
+              </div>
+              {groupError && <div style={{ color: "var(--danger)", fontSize: 11 }}>{groupError}</div>}
               {r.lastError && <div style={{ color: "var(--danger)", marginTop: 4 }}>Error: {r.lastError}</div>}
             </div>
           </div>

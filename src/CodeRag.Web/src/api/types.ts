@@ -18,6 +18,7 @@ export interface Repository {
   indexedCommit?: string | null;
   status: RepositoryStatus;
   enabled: boolean;
+  groupId?: string | null;
   proxyId?: string | null;
   credentialId?: string | null;
   syncIntervalSeconds?: number | null;

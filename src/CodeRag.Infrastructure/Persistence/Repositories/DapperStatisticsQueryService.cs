@@ -135,7 +135,18 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Relation count query failed for {Repo}", rid ?? "global");
-            count = 0;
+            // Fallback for DBs without repository_id column (pre-004): count via symbol's repository_id
+            if (rid is not null)
+            {
+                try
+                {
+                    count = await conn.ExecuteScalarAsync<int>(
+                        "SELECT COUNT(*) FROM relations r WHERE EXISTS (SELECT 1 FROM symbols s WHERE s.id = r.from_symbol_id AND s.repository_id=@rid);",
+                        new { rid }).ConfigureAwait(false);
+                }
+                catch { count = 0; }
+            }
+            else count = 0;
         }
 
         var byType = new List<RelationTypeStats>();
@@ -155,22 +166,55 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Relation by-type query failed for {Repo}", rid ?? "global");
+            if (rid is not null)
+            {
+                try
+                {
+                    var rows = await conn.QueryAsync<RelTypeRow>(
+                        "SELECT r.relation_type, COUNT(*) AS cnt FROM relations r WHERE EXISTS (SELECT 1 FROM symbols s WHERE s.id = r.from_symbol_id AND s.repository_id=@rid) GROUP BY r.relation_type ORDER BY cnt DESC;",
+                        new { rid }).ConfigureAwait(false);
+                    byType.AddRange(rows.Select(r => new RelationTypeStats(r.relation_type, r.cnt)));
+                } catch { }
+            }
         }
         return (count, byType);
     }
 
-    public Task<StorageSizes> GetStorageSizesAsync(CancellationToken ct = default)
+    public async Task<StorageSizes> GetStorageSizesAsync(CancellationToken ct = default)
     {
         long sqliteBytes = 0, vectorBytes = 0, reposBytes = 0;
         try { var fi = new FileInfo(_factory.DbPath); if (fi.Exists) sqliteBytes = fi.Length; } catch { }
         try { var vecPath = _factory.DbPath + "-vec"; if (File.Exists(vecPath)) vectorBytes = new FileInfo(vecPath).Length; } catch { }
+        // Fallback: sqlite-vec stores vectors inside the main DB file; the separate .vec file never exists.
+        // Estimate vector storage from vector count so Dashboard doesn't stay at 0 B.
+        if (vectorBytes == 0 && sqliteBytes > 0)
+        {
+            try
+            {
+                using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+                var cnt = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries;").ConfigureAwait(false);
+                if (cnt > 0)
+                {
+                    // Rough estimate: 1024 dim *4 bytes per float ≈4KB per vector + overhead. Also count vec_chunks tables.
+                    try
+                    {
+                        var codeCnt = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vec_chunks_code;").ConfigureAwait(false);
+                        var textCnt = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vec_chunks_text;").ConfigureAwait(false);
+                        cnt = Math.Max(cnt, codeCnt + textCnt);
+                    } catch { }
+                    vectorBytes = cnt * 1024 * 4; // ~4KB per vector
+                    // Cap at sqlite size if estimate exceeds
+                    if (vectorBytes > sqliteBytes) vectorBytes = sqliteBytes / 2;
+                }
+            } catch { }
+        }
         try
         {
             var reposRoot = Path.Combine(Path.GetDirectoryName(_factory.DbPath) ?? "/data", "repos");
             if (Directory.Exists(reposRoot))
                 reposBytes = Directory.GetFiles(reposRoot, "*", SearchOption.AllDirectories).Sum(f => { try { return new FileInfo(f).Length; } catch { return 0; } });
         } catch { }
-        return Task.FromResult(new StorageSizes(sqliteBytes, vectorBytes, reposBytes));
+        return new StorageSizes(sqliteBytes, vectorBytes, reposBytes);
     }
 
     private sealed class RepoRow

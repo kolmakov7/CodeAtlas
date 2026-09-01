@@ -46,6 +46,7 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // Infrastructure wiring
+builder.Services.AddHttpClient();
 builder.Services.AddInfrastructure(dataDir);
 builder.Services.AddGit();
 // Embeddings: single bind — Configuration normalizes "__" to ":" automatically

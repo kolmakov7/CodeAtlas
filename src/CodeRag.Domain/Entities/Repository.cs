@@ -33,8 +33,17 @@ public sealed class Repository
     public RepositoryStatus Status { get; private set; }
     public bool Enabled { get; private set; }
 
-    public Guid? ProxyId { get; private set; }
-    public Guid? CredentialId { get; private set; }
+    public Guid? GroupId { get; private set; }
+
+    // Legacy individual proxy/credential kept for migration compatibility; new code should use GroupId.
+    [Obsolete("Use GroupId")]
+    public Guid? ProxyIdLegacy { get; private set; }
+    [Obsolete("Use GroupId")]
+    public Guid? CredentialIdLegacy { get; private set; }
+
+    // Back-compat aliases — used by existing tests/stores that expect ProxyId/CredentialId
+    public Guid? ProxyId => ProxyIdLegacy;
+    public Guid? CredentialId => CredentialIdLegacy;
 
     public int? SyncIntervalSeconds { get; private set; }
     public DateTimeOffset? LastSyncAt { get; private set; }
@@ -62,8 +71,7 @@ public sealed class Repository
         string localPath,
         RepositoryStatus status = RepositoryStatus.Active,
         bool enabled = true,
-        Guid? proxyId = null,
-        Guid? credentialId = null,
+        Guid? groupId = null,
         int? syncIntervalSeconds = null)
     {
         if (id == Guid.Empty) throw new DomainValidationException("Repository Id must not be empty.");
@@ -77,11 +85,29 @@ public sealed class Repository
 
         var repo = new Repository(id, name.Trim(), git, branch.Trim(), lp, status, enabled)
         {
-            ProxyId = proxyId,
-            CredentialId = credentialId,
+            GroupId = groupId,
             SyncIntervalSeconds = syncIntervalSeconds
         };
         return repo;
+    }
+
+    [Obsolete("Use GroupId via RepositoryGroup")]
+    public static Repository CreateWithProxy(
+        Guid id,
+        string name,
+        string gitUrl,
+        string branch,
+        string localPath,
+        Guid? proxyId,
+        Guid? credentialId,
+        RepositoryStatus status = RepositoryStatus.Active,
+        bool enabled = true,
+        int? syncIntervalSeconds = null)
+    {
+        var r = Create(id, name, gitUrl, branch, localPath, status, enabled, null, syncIntervalSeconds);
+        r.ProxyIdLegacy = proxyId;
+        r.CredentialIdLegacy = credentialId;
+        return r;
     }
 
     // --- Мутаторы с валидацией ---
@@ -102,9 +128,12 @@ public sealed class Repository
 
     public void ChangeLocalPath(string localPath) => LocalPath = LocalPath.Create(localPath);
 
-    public void SetProxy(Guid? proxyId) => ProxyId = proxyId;
+    public void SetGroup(Guid? groupId) => GroupId = groupId;
 
-    public void SetCredential(Guid? credentialId) => CredentialId = credentialId;
+    [Obsolete("Use SetGroup")]
+    public void SetProxy(Guid? proxyId) => ProxyIdLegacy = proxyId;
+    [Obsolete("Use SetGroup")]
+    public void SetCredential(Guid? credentialId) => CredentialIdLegacy = credentialId;
 
     public void SetSyncInterval(int? seconds)
     {
@@ -223,14 +252,16 @@ public sealed class Repository
         Guid id, string name, string gitUrl, string branch, string localPath,
         string? currentCommit, string? indexedCommit, RepositoryStatus status, bool enabled,
         Guid? proxyId, Guid? credentialId, int? syncIntervalSeconds,
-        DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError)
+        DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError,
+        Guid? groupId = null)
     {
         var git = GitUrl.Create(gitUrl);
         var lp = LocalPath.Create(localPath);
         var repo = new Repository(id, name.Trim(), git, branch.Trim(), lp, status, enabled)
         {
-            ProxyId = proxyId,
-            CredentialId = credentialId,
+            GroupId = groupId,
+            ProxyIdLegacy = proxyId,
+            CredentialIdLegacy = credentialId,
             SyncIntervalSeconds = syncIntervalSeconds,
             CurrentCommit = string.IsNullOrWhiteSpace(currentCommit) ? null : currentCommit.Trim(),
             IndexedCommit = string.IsNullOrWhiteSpace(indexedCommit) ? null : indexedCommit.Trim(),
@@ -240,6 +271,13 @@ public sealed class Repository
         };
         return repo;
     }
+
+    internal static Repository RehydrateWithGroup(
+        Guid id, string name, string gitUrl, string branch, string localPath,
+        string? currentCommit, string? indexedCommit, RepositoryStatus status, bool enabled,
+        Guid? groupId, int? syncIntervalSeconds,
+        DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError)
+        => Rehydrate(id, name, gitUrl, branch, localPath, currentCommit, indexedCommit, status, enabled, null, null, syncIntervalSeconds, lastSyncAt, lastIndexAt, lastError, groupId);
 
     private static bool IsValidCommitSha(string sha)
     {

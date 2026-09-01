@@ -52,7 +52,15 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, scheme=excluded.scheme, host=e
     private static ProxyConfig Map(ProxyRow r)
     {
         var scheme = Enum.TryParse<ProxyScheme>(r.scheme, out var s) ? s : ProxyScheme.Http;
-        return ProxyConfig.Create(Guid.Parse(r.id), r.name, scheme, r.host, r.port, r.username, r.password_encrypted);
+        try
+        {
+            return ProxyConfig.Create(Guid.Parse(r.id), r.name, scheme, r.host, r.port, r.username, r.password_encrypted);
+        }
+        catch
+        {
+            // Legacy invalid host — hydrate without validation so List doesn't fail
+            return ProxyConfig.Rehydrate(Guid.Parse(r.id), r.name, scheme, r.host, r.port, r.username, r.password_encrypted);
+        }
     }
 
     private sealed class ProxyRow

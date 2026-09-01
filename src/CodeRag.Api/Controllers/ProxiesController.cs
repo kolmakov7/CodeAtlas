@@ -1,5 +1,6 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
+using CodeRag.Domain.Ports;
 using CodeRag.Git.Stores;
 using Microsoft.AspNetCore.Mvc;
 
@@ -10,8 +11,9 @@ namespace CodeRag.Api.Controllers;
 public sealed class ProxiesController : ControllerBase
 {
     private readonly IProxyStore _store;
+    private readonly IRepositoryGroupStore _groupStore;
     private readonly ILogger<ProxiesController> _logger;
-    public ProxiesController(IProxyStore store, ILogger<ProxiesController> logger) { _store = store; _logger = logger; }
+    public ProxiesController(IProxyStore store, IRepositoryGroupStore groupStore, ILogger<ProxiesController> logger) { _store = store; _groupStore = groupStore; _logger = logger; }
 
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
@@ -26,10 +28,17 @@ public sealed class ProxiesController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Host)) return BadRequest("Name and Host required");
         var scheme = Enum.TryParse<ProxyScheme>(req.Scheme, true, out var s) ? s : ProxyScheme.Http;
-        var proxy = ProxyConfig.Create(Guid.NewGuid(), req.Name, scheme, req.Host, req.Port, req.Username, req.Password);
-        await _store.UpsertAsync(proxy, ct).ConfigureAwait(false);
-        _logger.LogInformation("POST /api/proxies created {Id} {Name}", proxy.Id, proxy.Name);
-        return CreatedAtAction(nameof(Get), new { id = proxy.Id }, new { id = proxy.Id, name = proxy.Name, scheme = proxy.Scheme.ToString().ToLower(), host = proxy.Host, port = proxy.Port, username = proxy.Username });
+        try
+        {
+            var proxy = ProxyConfig.Create(Guid.NewGuid(), req.Name, scheme, req.Host, req.Port, req.Username, req.Password);
+            await _store.UpsertAsync(proxy, ct).ConfigureAwait(false);
+            _logger.LogInformation("POST /api/proxies created {Id} {Name}", proxy.Id, proxy.Name);
+            return CreatedAtAction(nameof(Get), new { id = proxy.Id }, new { id = proxy.Id, name = proxy.Name, scheme = proxy.Scheme.ToString().ToLower(), host = proxy.Host, port = proxy.Port, username = proxy.Username });
+        }
+        catch (CodeRag.Domain.Exceptions.DomainValidationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 
     [HttpGet("{id:guid}")]
@@ -43,6 +52,12 @@ public sealed class ProxiesController : ControllerBase
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
     {
+        var groups = await _groupStore.GetByProxyIdAsync(id, ct).ConfigureAwait(false);
+        if (groups.Count > 0)
+        {
+            var names = string.Join(", ", groups.Select(g => $"'{g.Name}'"));
+            return Problem(title: $"Proxy is used by group(s): {names}. Remove it from groups before deleting.", statusCode: 409);
+        }
         await _store.DeleteAsync(id, ct).ConfigureAwait(false);
         return NoContent();
     }

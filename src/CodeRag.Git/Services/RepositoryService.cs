@@ -1,9 +1,9 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
+using CodeRag.Domain.Ports;
 using CodeRag.Git.Helpers;
 using CodeRag.Git.Stores;
 using CodeRag.Infrastructure.Persistence;
-using CodeRag.Infrastructure.Stores;
 using Dapper;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,6 +15,7 @@ public sealed class RepositoryService : IRepositoryService
     private readonly IRepositoryStore _repoStore;
     private readonly IProxyStore _proxyStore;
     private readonly ICredentialStore _credStore;
+    private readonly IRepositoryGroupStore _groupStore;
     private readonly IGitService _git;
     private readonly SqliteConnectionFactory _factory;
     private readonly GitOptions _opts;
@@ -24,6 +25,7 @@ public sealed class RepositoryService : IRepositoryService
         IRepositoryStore repoStore,
         IProxyStore proxyStore,
         ICredentialStore credStore,
+        IRepositoryGroupStore groupStore,
         IGitService git,
         SqliteConnectionFactory factory,
         IOptions<GitOptions> opts,
@@ -32,32 +34,38 @@ public sealed class RepositoryService : IRepositoryService
         _repoStore = repoStore;
         _proxyStore = proxyStore;
         _credStore = credStore;
+        _groupStore = groupStore;
         _git = git;
         _factory = factory;
         _opts = opts.Value;
         _logger = logger;
     }
 
-    public async Task<Repository> AddAsync(string name, string gitUrl, string branch, string localPath, Guid? proxyId = null, Guid? credentialId = null, int? syncIntervalSeconds = null, CancellationToken ct = default)
+    public async Task<Repository> AddAsync(string name, string gitUrl, string branch, string localPath, Guid? groupId = null, int? syncIntervalSeconds = null, CancellationToken ct = default)
     {
         var id = Guid.NewGuid();
         var normalized = PathValidator.ValidateAndNormalize(localPath, _opts.ReposRoot);
 
-        // Validate proxy/credential exist if provided
+        // Resolve group — default to Default group if not specified
+        Guid? effectiveGroupId = groupId;
         ProxyConfig? proxy = null;
         Credential? cred = null;
-        if (proxyId.HasValue)
+        if (effectiveGroupId.HasValue)
         {
-            proxy = await _proxyStore.GetByIdAsync(proxyId.Value, ct).ConfigureAwait(false)
-                ?? throw new InvalidOperationException($"Proxy {proxyId} not found.");
+            var group = await _groupStore.GetByIdAsync(effectiveGroupId.Value, ct).ConfigureAwait(false)
+                ?? throw new InvalidOperationException($"RepositoryGroup {effectiveGroupId} not found.");
+            if (group.ProxyId.HasValue)
+                proxy = await _proxyStore.GetByIdAsync(group.ProxyId.Value, ct).ConfigureAwait(false);
+            if (group.CredentialId.HasValue)
+                cred = await _credStore.GetByIdAsync(group.CredentialId.Value, ct).ConfigureAwait(false);
         }
-        if (credentialId.HasValue)
+        else
         {
-            cred = await _credStore.GetByIdAsync(credentialId.Value, ct).ConfigureAwait(false)
-                ?? throw new InvalidOperationException($"Credential {credentialId} not found.");
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            if (def is not null) effectiveGroupId = def.Id;
         }
 
-        var repo = Repository.Create(id, name, gitUrl, branch, normalized, RepositoryStatus.Active, true, proxyId, credentialId, syncIntervalSeconds);
+        var repo = Repository.Create(id, name, gitUrl, branch, normalized, RepositoryStatus.Active, true, effectiveGroupId, syncIntervalSeconds);
         await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
 
         // Validate remote reachable via ls-remote перед клонированием (быстрая проверка)
@@ -109,7 +117,7 @@ try
 
     public Task<IReadOnlyList<Repository>> ListAsync(CancellationToken ct = default) => _repoStore.ListAsync(ct);
 
-    public async Task<Repository> UpdateAsync(Guid id, string? name = null, string? gitUrl = null, string? branch = null, string? localPath = null, Guid? proxyId = null, Guid? credentialId = null, int? syncIntervalSeconds = null, CancellationToken ct = default)
+    public async Task<Repository> UpdateAsync(Guid id, string? name = null, string? gitUrl = null, string? branch = null, string? localPath = null, Guid? groupId = null, int? syncIntervalSeconds = null, CancellationToken ct = default)
     {
         var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false) ?? throw new KeyNotFoundException($"Repository {id} not found.");
         if (repo.Status == RepositoryStatus.Deleting) throw new InvalidOperationException("Repository is being deleted.");
@@ -129,22 +137,21 @@ try
             var n = PathValidator.ValidateAndNormalize(localPath, _opts.ReposRoot);
             repo.ChangeLocalPath(n);
         }
-        if (proxyId is not null) repo.SetProxy(proxyId == Guid.Empty ? null : proxyId);
-        // Allow clearing: if caller passes Guid.Empty to clear, handle
-        // For syncInterval, null means clear, otherwise set
-        // But UpdateAsync signature uses nullable; if syncIntervalSeconds provided (including null) we need way to distinguish not provided vs clear.
-        // Convention: if parameter was explicitly passed (non-null) we update; to clear, caller must call SetSyncInterval(null) separately.
-        // Here treat provided value directly (if ct doesn't know, we'll update only if not null OR if caller wants clear they pass null and we don't know).
-        // For now: if syncIntervalSeconds is not null, update; else skip (keep).
+        if (groupId is not null)
+        {
+            var gid = groupId == Guid.Empty ? null : groupId;
+            if (gid.HasValue)
+            {
+                var g = await _groupStore.GetByIdAsync(gid.Value, ct).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException($"RepositoryGroup {gid} not found.");
+            }
+            repo.SetGroup(gid);
+        }
         if (syncIntervalSeconds.HasValue) repo.SetSyncInterval(syncIntervalSeconds);
-        else if (syncIntervalSeconds is null && proxyId is null && credentialId is null && name is null && gitUrl is null && branch is null && localPath is null)
+        else if (syncIntervalSeconds is null && groupId is null && name is null && gitUrl is null && branch is null && localPath is null)
         {
             // no-op
         }
-        if (credentialId is not null) repo.SetCredential(credentialId == Guid.Empty ? null : credentialId);
-
-        // If user wants to clear proxy/credential explicitly via separate call, support nullable with sentinel.
-        // We already handle Guid.Empty as clear.
 
         repo.ClearError();
         await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
@@ -160,6 +167,18 @@ try
         return repo;
     }
 
+    public async Task<(ProxyConfig? Proxy, Credential? Credential)> GetEffectiveCredentialsAsync(Guid repositoryId, CancellationToken ct = default)
+    {
+        var repo = await _repoStore.GetByIdAsync(repositoryId, ct).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Repository {repositoryId} not found.");
+        if (!repo.GroupId.HasValue) return (null, null);
+        var group = await _groupStore.GetByIdAsync(repo.GroupId.Value, ct).ConfigureAwait(false);
+        if (group is null) return (null, null);
+        ProxyConfig? proxy = group.ProxyId.HasValue ? await _proxyStore.GetByIdAsync(group.ProxyId.Value, ct).ConfigureAwait(false) : null;
+        Credential? cred = group.CredentialId.HasValue ? await _credStore.GetByIdAsync(group.CredentialId.Value, ct).ConfigureAwait(false) : null;
+        return (proxy, cred);
+    }
+
     public async Task SyncAsync(Guid id, CancellationToken ct = default)
     {
         var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false) ?? throw new KeyNotFoundException($"Repository {id} not found.");
@@ -170,8 +189,7 @@ try
         }
         if (repo.Status == RepositoryStatus.Deleting) return;
 
-        ProxyConfig? proxy = repo.ProxyId.HasValue ? await _proxyStore.GetByIdAsync(repo.ProxyId.Value, ct).ConfigureAwait(false) : null;
-        Credential? cred = repo.CredentialId.HasValue ? await _credStore.GetByIdAsync(repo.CredentialId.Value, ct).ConfigureAwait(false) : null;
+        var (proxy, cred) = await GetEffectiveCredentialsAsync(id, ct).ConfigureAwait(false);
 
         try
         {
@@ -236,8 +254,7 @@ try
         var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false) ?? throw new KeyNotFoundException($"Repository {id} not found.");
         if (repo.Status == RepositoryStatus.Deleting) return;
 
-        ProxyConfig? proxy = repo.ProxyId.HasValue ? await _proxyStore.GetByIdAsync(repo.ProxyId.Value, ct).ConfigureAwait(false) : null;
-        Credential? cred = repo.CredentialId.HasValue ? await _credStore.GetByIdAsync(repo.CredentialId.Value, ct).ConfigureAwait(false) : null;
+        var (proxy, cred) = await GetEffectiveCredentialsAsync(id, ct).ConfigureAwait(false);
 
         try
         {
@@ -376,5 +393,13 @@ try
             tx.Rollback();
             throw;
         }
+
+        try
+        {
+            using var vacConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+            await vacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
+            await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
+        }
+        catch { }
     }
 }

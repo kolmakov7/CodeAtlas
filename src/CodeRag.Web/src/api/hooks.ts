@@ -262,6 +262,12 @@ export function useCredentials() {
     queryFn: () => unwrap<CredentialInfo[]>(apiClient.get("/credentials")),
   });
 }
+export function useRepositoryGroups() {
+  return useQuery({
+    queryKey: ["repositoryGroups"],
+    queryFn: () => unwrap<any[]>(apiClient.get("/repository-groups")),
+  });
+}
 export function useActivity(limit = 20) {
   return useQuery({
     queryKey: ["activity", limit],

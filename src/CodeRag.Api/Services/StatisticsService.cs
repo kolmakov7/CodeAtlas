@@ -18,9 +18,11 @@ public sealed class StatisticsService
     {
         var g = await _query.GetGlobalStatisticsAsync(ct).ConfigureAwait(false);
         var repoStats = g.Repositories.Select(MapRepository).ToList();
+        var storageSizes = await _query.GetStorageSizesAsync(ct).ConfigureAwait(false);
+        var storage = new StorageDto(storageSizes.SqliteBytes, storageSizes.VectorBytes, storageSizes.ReposBytes);
         return new GlobalStatisticsDto(g.RepositoryCount, g.FileCount, g.SymbolCount, g.ChunkCount,
             g.RelationCount, MapRelations(g.RelationsByType), g.JobCount,
-            g.EmbeddingStats.Select(MapDomain).ToList(), g.EmbeddingsFailed, repoStats);
+            g.EmbeddingStats.Select(MapDomain).ToList(), g.EmbeddingsFailed, repoStats, storage);
     }
 
     private static EmbeddingDomainStatsDto MapDomain(CodeRag.Domain.Ports.EmbeddingDomainStats d) => new(d.Domain, d.Indexed, d.Pending);

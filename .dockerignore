@@ -1,11 +1,40 @@
-bin/
-obj/
-data/
-TestResults/
+# VCS / IDE
 .git/
 .gitignore
-docs/
-tests/perf/output/
 .vs/
 .idea/
-*.md
+
+# .NET build outputs.
+# NOTE: use **/ prefix — a bare "bin/" only matches the context root in the
+# legacy builder's pattern matcher, so nested src/*/bin would still be copied.
+**/bin/
+**/obj/
+**/*.user
+**/TestResults/
+**/coverage*.xml
+
+# Node / Web UI outputs — rebuilt inside the image (web-build stage + BuildWebUI target).
+# package.json / package-lock.json must stay!
+**/node_modules/
+src/CodeRag.Web/dist/
+src/CodeRag.Api/wwwroot/
+
+# Local runtime data & secrets
+data/
+.env
+**/*.db
+**/*.sqlite
+
+# Docs, CI config and host-side tooling — not needed in the image
+docs/
+**/*.md
+.github/
+examples/
+scripts/
+.env.example
+Dockerfile
+docker-compose.yml
+docker-compose.dev.yml
+
+# Test artifacts
+tests/perf/

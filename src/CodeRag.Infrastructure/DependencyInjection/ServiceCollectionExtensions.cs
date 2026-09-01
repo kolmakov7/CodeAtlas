@@ -53,6 +53,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<CodeRag.Domain.Ports.IChunkStore, ChunkStore>();
         services.AddSingleton<CodeRag.Infrastructure.Stores.IChunkStore, ChunkStore>(sp => (ChunkStore)sp.GetRequiredService<CodeRag.Domain.Ports.IChunkStore>());
         services.AddSingleton<CodeRag.Domain.Ports.IRelationStore, RelationStore>();
+        services.AddSingleton<CodeRag.Domain.Ports.IRepositoryGroupStore, RepositoryGroupStore>();
         services.AddSingleton<CodeRag.Analyzers.Abstractions.ISymbolCatalog, DapperSymbolCatalog>();
         services.AddSingleton<IIndexingErrorStore, IndexingErrorStore>();
 

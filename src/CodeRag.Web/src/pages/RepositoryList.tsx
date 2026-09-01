@@ -1,24 +1,27 @@
 import { Link } from "react-router-dom";
 import { useState } from "react";
-import { useRepositories } from "@/api/hooks";
+import { useRepositories, useRepositoryGroups } from "@/api/hooks";
 import { formatDate } from "@/utils/format";
 import apiClient from "@/api/client";
 import { useQueryClient } from "@tanstack/react-query";
 
 export default function RepositoryList() {
   const q = useRepositories();
+  const groupsQ = useRepositoryGroups();
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", gitUrl: "", branch: "main", localPath: "" });
+  const [form, setForm] = useState({ name: "", gitUrl: "", branch: "main", localPath: "", groupId: "" });
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const submit = async () => {
     setError(null); setSaving(true);
     try {
-      await apiClient.post("/repositories", { name: form.name, gitUrl: form.gitUrl, branch: form.branch || "main", localPath: form.localPath || undefined });
-      setForm({ name: "", gitUrl: "", branch: "main", localPath: "" }); setShowForm(false);
+      const payload: any = { name: form.name, gitUrl: form.gitUrl, branch: form.branch || "main", localPath: form.localPath || undefined };
+      if (form.groupId) payload.groupId = form.groupId;
+      await apiClient.post("/repositories", payload);
+      setForm({ name: "", gitUrl: "", branch: "main", localPath: "", groupId: "" }); setShowForm(false);
       qc.invalidateQueries({ queryKey: ["repositories"] }); qc.invalidateQueries({ queryKey: ["statistics"] });
-    } catch (e: any) { setError(e.response?.data?.title || e.response?.data?.detail || e.message); } finally { setSaving(false); }
+    } catch (e: any) { setError(e.response?.data?.title || e.response?.data?.detail || e.response?.data?.title || e.message); } finally { setSaving(false); }
   };
   if (q.isLoading) return <div className="skeleton" style={{ height: 200 }} />;
   if (q.isError) return <div className="card" style={{ borderColor: "var(--danger)" }}>Error: {(q.error as Error).message} <button onClick={() => q.refetch()} style={{ marginLeft: 8 }}>Retry</button></div>;
@@ -39,6 +42,12 @@ export default function RepositoryList() {
           <label>Git URL <input value={form.gitUrl} onChange={e => setForm({ ...form, gitUrl: e.target.value })} placeholder="https://github.com/org/repo.git or file:///tmp/repo.git or git@github.com:org/repo.git" /></label>
           <label>Branch <input value={form.branch} onChange={e => setForm({ ...form, branch: e.target.value })} placeholder="main" /></label>
           <label>Local path (optional) <input value={form.localPath} onChange={e => setForm({ ...form, localPath: e.target.value })} placeholder="/data/repos/my-repo (auto if empty)" /></label>
+          <label>Group <select value={form.groupId} onChange={e => setForm({ ...form, groupId: e.target.value })}>
+            <option value="">Default</option>
+            {(groupsQ.data as any[] ?? []).map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Repository inherits Proxy & Credentials from its group</span>
+          </label>
           {error && <div style={{ color: "var(--danger)", fontSize: 13 }}>{error}</div>}
           <button className="primary" onClick={submit} disabled={saving || !form.name || !form.gitUrl}>{saving ? "Saving…" : "Create"}</button>
         </div>

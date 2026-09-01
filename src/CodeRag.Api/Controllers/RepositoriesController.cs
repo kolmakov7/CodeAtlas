@@ -5,6 +5,7 @@ using CodeRag.Domain.Exceptions;
 using CodeRag.Domain.Ports;
 using CodeRag.Git.Helpers;
 using CodeRag.Git.Services;
+using CodeRag.Git.Stores;
 using CodeRag.Indexer;
 using Microsoft.AspNetCore.Mvc;
 
@@ -16,14 +17,16 @@ public sealed class RepositoriesController : ControllerBase
 {
     private readonly IRepositoryService _repoService;
     private readonly IRepositoryStore _repoStore;
+    private readonly IRepositoryGroupStore _groupStore;
     private readonly IJobRunner _jobRunner;
     private readonly ILogger<RepositoriesController> _logger;
     private readonly string _reposRoot;
 
-    public RepositoriesController(IRepositoryService repoService, IRepositoryStore repoStore, IJobRunner jobRunner, ILogger<RepositoriesController> logger, CodeRag.Infrastructure.Persistence.SqliteConnectionFactory factory)
+    public RepositoriesController(IRepositoryService repoService, IRepositoryStore repoStore, IRepositoryGroupStore groupStore, IJobRunner jobRunner, ILogger<RepositoriesController> logger, CodeRag.Infrastructure.Persistence.SqliteConnectionFactory factory)
     {
         _repoService = repoService;
         _repoStore = repoStore;
+        _groupStore = groupStore;
         _jobRunner = jobRunner;
         _logger = logger;
         var dataDir = Path.GetDirectoryName(factory.DbPath) ?? "/data";
@@ -49,16 +52,25 @@ public sealed class RepositoriesController : ControllerBase
             localPath = Path.Combine(_reposRoot, slug);
         }
 
-try
+ try
             {
                 _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}'", req.Name, MaskUrl(req.GitUrl));
-                var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, req.ProxyId, req.CredentialId, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
+                var gid = req.GroupId ?? req.ProxyId ?? req.CredentialId; // fallback for legacy clients
+                // If legacy proxy/cred supplied without group, try to resolve group that matches; otherwise use groupId directly
+                Guid? effectiveGroup = req.GroupId;
+                if (!effectiveGroup.HasValue && (req.ProxyId.HasValue || req.CredentialId.HasValue))
+                {
+                    // Try to find or create implicit group? For now use Default
+                    var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+                    effectiveGroup = def?.Id;
+                }
+                var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, effectiveGroup, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
                 
                 // Enqueue initial sync job to start indexing immediately
                 var job = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Sync);
                 await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
                 
-                return CreatedAtAction(nameof(GetById), new { id = repo.Id }, Map(repo));
+                return CreatedAtAction(nameof(GetById), new { id = repo.Id }, await MapAsync(repo, ct).ConfigureAwait(false));
             }
         catch (DomainValidationException ex) { return Problem(title: ex.Message, statusCode: 422); }
         catch (ArgumentException ex) { return Problem(title: ex.Message, statusCode: 400); }
@@ -69,7 +81,9 @@ try
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var repos = await _repoStore.ListAsync(ct).ConfigureAwait(false);
-        return Ok(repos.Select(Map).ToList());
+        var mapped = new List<RepositoryDto>();
+        foreach (var r in repos) mapped.Add(await MapAsync(r, ct).ConfigureAwait(false));
+        return Ok(mapped);
     }
 
     [HttpGet("{id:guid}")]
@@ -77,7 +91,7 @@ try
     {
         var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
         if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
-        return Ok(Map(repo));
+        return Ok(await MapAsync(repo, ct).ConfigureAwait(false));
     }
 
     [HttpPut("{id:guid}")]
@@ -97,7 +111,8 @@ try
         try
         {
             _logger.LogInformation("PUT /api/repositories/{Id} name='{Name}'", id, req.Name ?? "(unchanged)");
-            var updated = await _repoService.UpdateAsync(id, req.Name, req.GitUrl, req.Branch, req.LocalPath, req.ProxyId, req.CredentialId, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
+            var gid = req.GroupId ?? req.ProxyId; // legacy fallback
+            var updated = await _repoService.UpdateAsync(id, req.Name, req.GitUrl, req.Branch, req.LocalPath, gid, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
 
             // Handle enabled toggle
             if (req.Enabled.HasValue && req.Enabled.Value != updated.Enabled)
@@ -106,7 +121,7 @@ try
                 await _repoStore.UpsertAsync(updated, ct).ConfigureAwait(false);
             }
 
-            return Ok(Map(updated));
+            return Ok(await MapAsync(updated, ct).ConfigureAwait(false));
         }
         catch (DomainValidationException ex) { return Problem(title: ex.Message, statusCode: 422); }
         catch (KeyNotFoundException ex) { return Problem(title: ex.Message, statusCode: 404); }
@@ -215,10 +230,30 @@ try
         return Ok(new { status = "Active" });
     }
 
+    private async Task<RepositoryDto> MapAsync(Repository r, CancellationToken ct)
+    {
+        Guid? effProxy = null, effCred = null;
+        if (r.GroupId.HasValue)
+        {
+            var g = await _groupStore.GetByIdAsync(r.GroupId.Value, ct).ConfigureAwait(false);
+            if (g is not null) { effProxy = g.ProxyId; effCred = g.CredentialId; }
+        }
+        else
+        {
+            effProxy = r.ProxyId;
+            effCred = r.CredentialId;
+        }
+        return new RepositoryDto(
+            r.Id, r.Name, r.GitUrl.Value, r.Branch, r.LocalPath.Value,
+            r.CurrentCommit, r.IndexedCommit, r.Status.ToString(), r.Enabled,
+            r.GroupId, effProxy, effCred, r.SyncIntervalSeconds,
+            r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError);
+    }
+
     private static RepositoryDto Map(Repository r) => new(
         r.Id, r.Name, r.GitUrl.Value, r.Branch, r.LocalPath.Value,
         r.CurrentCommit, r.IndexedCommit, r.Status.ToString(), r.Enabled,
-        r.ProxyId, r.CredentialId, r.SyncIntervalSeconds,
+        r.GroupId, r.ProxyId, r.CredentialId, r.SyncIntervalSeconds,
         r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError);
 
     private static string ToSlug(string name)

@@ -26,6 +26,7 @@ COPY src/CodeRag.Git/CodeRag.Git.csproj src/CodeRag.Git/
 COPY src/CodeRag.Indexer/CodeRag.Indexer.csproj src/CodeRag.Indexer/
 COPY src/CodeRag.Search/CodeRag.Search.csproj src/CodeRag.Search/
 COPY src/CodeRag.Mcp/CodeRag.Mcp.csproj src/CodeRag.Mcp/
+COPY src/CodeRag.Application/CodeRag.Application.csproj src/CodeRag.Application/
 COPY src/CodeRag.Api/CodeRag.Api.csproj src/CodeRag.Api/
 COPY tests/CodeRag.Tests/CodeRag.Tests.csproj tests/CodeRag.Tests/
 
@@ -34,8 +35,9 @@ RUN dotnet restore CodeAtlas.sln
 # Copy remaining source
 COPY . .
 
-# Publish Api (Release)
-RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish
+# Publish Api (Release). SkipWebBuild: Web UI is already built in the web-build stage
+# (avoids a second npm ci + npm run build inside this stage, see CodeRag.Api.csproj)
+RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish -p:SkipWebBuild=true
 RUN find /root/.nuget -name "vec0.so" -exec cp {} /app/publish/vec0.so \; 2>/dev/null; ls -lh /app/publish/vec0.so 2>&1 || echo "vec0 not found"
 
 # Runtime image

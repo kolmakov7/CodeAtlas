@@ -14,7 +14,44 @@ public sealed class RepositoryStore : CodeRag.Domain.Ports.IRepositoryStore, IRe
     public async Task UpsertAsync(Repository repository, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        const string sql = @"
+        // Check if group_id column exists (migration 005 may not have run yet — fallback to old schema)
+        bool hasGroup = await HasColumnAsync(conn, "repositories", "group_id").ConfigureAwait(false);
+        string sql;
+        object p;
+        if (hasGroup)
+        {
+            sql = @"
+INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, group_id, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error)
+VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@groupId,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, git_url=excluded.git_url, branch=excluded.branch, local_path=excluded.local_path,
+  current_commit=excluded.current_commit, indexed_commit=excluded.indexed_commit, status=excluded.status,
+  enabled=excluded.enabled, group_id=excluded.group_id, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
+  sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
+  last_index_at=excluded.last_index_at, last_error=excluded.last_error;";
+            p = new
+            {
+                id = repository.Id.ToString(),
+                name = repository.Name,
+                gitUrl = repository.GitUrl.Value,
+                branch = repository.Branch,
+                localPath = repository.LocalPath.Value,
+                currentCommit = repository.CurrentCommit,
+                indexedCommit = repository.IndexedCommit,
+                status = repository.Status.ToString(),
+                enabled = repository.Enabled ? 1 : 0,
+                groupId = repository.GroupId?.ToString(),
+                proxyId = repository.ProxyId?.ToString(),
+                credentialId = repository.CredentialId?.ToString(),
+                syncInterval = repository.SyncIntervalSeconds,
+                lastSyncAt = repository.LastSyncAt?.ToString("o"),
+                lastIndexAt = repository.LastIndexAt?.ToString("o"),
+                lastError = repository.LastError
+            };
+        }
+        else
+        {
+            sql = @"
 INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error)
 VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError)
 ON CONFLICT(id) DO UPDATE SET
@@ -23,26 +60,40 @@ ON CONFLICT(id) DO UPDATE SET
   enabled=excluded.enabled, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
   sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
   last_index_at=excluded.last_index_at, last_error=excluded.last_error;";
-
-        var p = new
-        {
-            id = repository.Id.ToString(),
-            name = repository.Name,
-            gitUrl = repository.GitUrl.Value,
-            branch = repository.Branch,
-            localPath = repository.LocalPath.Value,
-            currentCommit = repository.CurrentCommit,
-            indexedCommit = repository.IndexedCommit,
-            status = repository.Status.ToString(),
-            enabled = repository.Enabled ? 1 : 0,
-            proxyId = repository.ProxyId?.ToString(),
-            credentialId = repository.CredentialId?.ToString(),
-            syncInterval = repository.SyncIntervalSeconds,
-            lastSyncAt = repository.LastSyncAt?.ToString("o"),
-            lastIndexAt = repository.LastIndexAt?.ToString("o"),
-            lastError = repository.LastError
-        };
+            p = new
+            {
+                id = repository.Id.ToString(),
+                name = repository.Name,
+                gitUrl = repository.GitUrl.Value,
+                branch = repository.Branch,
+                localPath = repository.LocalPath.Value,
+                currentCommit = repository.CurrentCommit,
+                indexedCommit = repository.IndexedCommit,
+                status = repository.Status.ToString(),
+                enabled = repository.Enabled ? 1 : 0,
+                proxyId = repository.ProxyId?.ToString(),
+                credentialId = repository.CredentialId?.ToString(),
+                syncInterval = repository.SyncIntervalSeconds,
+                lastSyncAt = repository.LastSyncAt?.ToString("o"),
+                lastIndexAt = repository.LastIndexAt?.ToString("o"),
+                lastError = repository.LastError
+            };
+        }
         await conn.ExecuteAsync(sql, p).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> HasColumnAsync(Microsoft.Data.Sqlite.SqliteConnection conn, string table, string column)
+    {
+        try
+        {
+            var rows = await conn.QueryAsync<dynamic>($"PRAGMA table_info({table});").ConfigureAwait(false);
+            foreach (var r in rows)
+            {
+                string name = r.name ?? r.Name ?? "";
+                if (string.Equals(name, column, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        } catch { }
+        return false;
     }
 
     public async Task<Repository?> GetByIdAsync(Guid id, CancellationToken ct = default)
@@ -106,11 +157,23 @@ ON CONFLICT(id) DO UPDATE SET
             tx.Rollback();
             throw;
         }
+
+        // Reclaim space: SQLite file keeps free pages after DELETE, dashboard would still show 117MB.
+        // VACUUM (outside transaction) rewrites the DB file to minimal size.
+        try
+        {
+            // Ensure WAL is checkpointed before VACUUM
+            using var vacConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+            await vacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
+            await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
+        }
+        catch { /* best-effort, dashboard will still show correct logical counts */ }
     }
 
     private static Repository Map(RepoRow r)
     {
         var status = Enum.TryParse<RepositoryStatus>(r.status, out var st) ? st : RepositoryStatus.Active;
+        Guid? groupId = string.IsNullOrWhiteSpace(r.group_id) ? null : Guid.Parse(r.group_id);
         var repo = Repository.Rehydrate(
             Guid.Parse(r.id),
             r.name,
@@ -126,7 +189,8 @@ ON CONFLICT(id) DO UPDATE SET
             r.sync_interval_seconds,
             ParseDate(r.last_sync_at),
             ParseDate(r.last_index_at),
-            r.last_error);
+            r.last_error,
+            groupId);
 
         // Preserve status transitions that Rehydrate cannot express (Paused/Error without error)
         // Rehydrate already sets status, so only need to ensure error flag if needed.
@@ -156,6 +220,7 @@ ON CONFLICT(id) DO UPDATE SET
         public int enabled { get; set; }
         public string? proxy_id { get; set; }
         public string? credential_id { get; set; }
+        public string? group_id { get; set; }
         public int? sync_interval_seconds { get; set; }
         public string? last_sync_at { get; set; }
         public string? last_index_at { get; set; }

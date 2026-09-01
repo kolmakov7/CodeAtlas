@@ -23,19 +23,21 @@ public sealed record CreateRepositoryRequest(
     string GitUrl,
     string Branch = "main",
     string? LocalPath = null,
+    Guid? GroupId = null,
+    int? SyncIntervalSeconds = null,
     Guid? ProxyId = null,
-    Guid? CredentialId = null,
-    int? SyncIntervalSeconds = null);
+    Guid? CredentialId = null);
 
 public sealed record UpdateRepositoryRequest(
     string? Name = null,
     string? GitUrl = null,
     string? Branch = null,
     string? LocalPath = null,
-    Guid? ProxyId = null,
-    Guid? CredentialId = null,
+    Guid? GroupId = null,
     int? SyncIntervalSeconds = null,
-    bool? Enabled = null);
+    bool? Enabled = null,
+    Guid? ProxyId = null,
+    Guid? CredentialId = null);
 
 public sealed record RepositoryDto(
     Guid Id,
@@ -47,12 +49,30 @@ public sealed record RepositoryDto(
     string? IndexedCommit,
     string Status,
     bool Enabled,
+    Guid? GroupId,
     Guid? ProxyId,
     Guid? CredentialId,
     int? SyncIntervalSeconds,
     string? LastSyncAt,
     string? LastIndexAt,
     string? LastError);
+
+public sealed record RepositoryGroupDto(
+    Guid Id,
+    string Name,
+    Guid? ProxyId,
+    Guid? CredentialId,
+    string CreatedAt);
+
+public sealed record CreateRepositoryGroupRequest(
+    string Name,
+    Guid? ProxyId = null,
+    Guid? CredentialId = null);
+
+public sealed record UpdateRepositoryGroupRequest(
+    string? Name = null,
+    Guid? ProxyId = null,
+    Guid? CredentialId = null);
 
 public sealed record EmbeddingDomainStatsDto(string Domain, int Indexed, int Pending);
 
@@ -73,6 +93,11 @@ public sealed record RepositoryStatisticsDto(
     string? CurrentCommit,
     string Status);
 
+public sealed record StorageDto(
+    long SqliteSizeBytes,
+    long VectorSizeBytes,
+    long RepositoriesSizeBytes);
+
 public sealed record GlobalStatisticsDto(
     int RepositoryCount,
     int FileCount,
@@ -83,7 +108,8 @@ public sealed record GlobalStatisticsDto(
     int JobCount,
     IReadOnlyList<EmbeddingDomainStatsDto> EmbeddingStats,
     int EmbeddingsFailed,
-    IReadOnlyList<RepositoryStatisticsDto> Repositories);
+    IReadOnlyList<RepositoryStatisticsDto> Repositories,
+    StorageDto? Storage = null);
 
 public sealed record JobDto(
     Guid Id,
