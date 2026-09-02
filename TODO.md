@@ -19,7 +19,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - [x] Research JavaScript (synthetic + real repo)
 - [x] Research HTML (synthetic + real repo)
 - [x] Research CSS (synthetic + real repo)
-- [x] Research XML / XSLT (parser built + verified; chunk rule decided; implementation pending with XML stage)
+- [x] Research XML / XSLT (synthetic + real repos)
 - [ ] Research SQL / T-SQL (SQL-ProcBench)
 - [ ] Write final research documentation (.md)
 - [ ] Final cross-check
@@ -114,8 +114,13 @@ experiment results, links/commits of investigated repositories, tests added, cod
    Other at-rules (`@import`, `@charset`, `@supports`) are not chunks; files without any rule
    fall back to sliding window. Comments at a level stay in that level's chunk (they are not
    part of the nested rule's range).
-7. XML: ship self-built `libtree-sitter-xml.so`; XML chunk set to be finalized after AST inspection
-   (root `document` not a chunk; candidates: named `element` nodes, depth/size heuristic TBD).
+ 7. XML/XSLT chunk set (FINAL): ship self-built `libtree-sitter-xml.so` under
+    `src/CodeRag.Analyzers.TreeSitter/runtimes/linux-x64/native/` (csproj Content item, propagates to all
+    consumers incl. CodeRag.Api). An `element` is a chunk iff it has ≥1 child element (`element` or
+    `EmptyElemTag`) in its `content` — "container elements"; name = tag name (with namespace prefix,
+    e.g. `xsl:template`); kind = new `SymbolKind.Element`. Text-only elements, self-closing tags
+    (`EmptyElemTag`), `document`/`prolog`/`Comment`/`PI` are NOT chunks. XSLT parses as plain XML —
+    stylesheet → templates → inner blocks is the natural semantic split. No XSLT-specific grammar exists.
 8. SQL stage stays on existing `SqlAnalyzer` (ScriptDom) — validate behavior + SQL-ProcBench;
    tree-sitter T-SQL noted as alternative only.
 
@@ -129,7 +134,9 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - `zxuqian/html-css-examples` — JS/HTML/CSS sample corpus. Cloned to `/tmp/htmlcss` at commit
   `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6` ("Add form example").
 - `microsoft/SQL-ProcBench` — main T-SQL procedure corpus (pin commit at clone; clone to /tmp).
-- `tree-sitter-grammars/tree-sitter-xml` — XML grammar source (pin commit at build).
+- `tree-sitter-grammars/tree-sitter-xml` — XML grammar source, built at commit
+  `5000ae8f22d11fbe93939b05c1e37cf21117162d` (v0.7.0).
+- `GNOME/libxml2`, `GNOME/libxslt` — real XML/XSLT corpora (shallow clones, `/tmp/xmlsrc`, `/tmp/xsltsrc`).
 - `mariusgreuel/tree-sitter-dotnet-bindings` — binding source, branch `main` (Language/NativeLibrary mechanics).
 - `xberg-io/tree-sitter-language-pack` (a.k.a. Kreuzberg TreeSitterLanguagePack) — alternative 306+ lang pack.
 
@@ -147,13 +154,21 @@ experiment results, links/commits of investigated repositories, tests added, cod
    inline `script`/`style` are chunks + excluded from parent `div#wrap`, external `<script src>` is not,
    `html`/`head`/`body` with id never chunks (sliding-window fallback kicks in),
    no-semantic-elements file falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact through exclusion).
- - `tests/CodeRag.Tests/Unit/TreeSitterCssChunkTests.cs` — 6 tests, all passing:
-   rule_set chunks named by selectors (`.a`, `:root`, `div > p`, symbol Language == "css"),
-   media_statement excludes all nested rule_set ranges (keeps its at-rule head, ends with `}`),
-   keyframes_statement keeps full content while from/to keyframe_blocks are NOT chunks,
-   mixed file (@import + 2x .top + media + keyframes → 4 chunks, media copy excluded from media chunk),
-   no-rules file (@import/@charset only) falls back to sliding window,
-   multi-byte UTF-8 (comment inside rule stays in rule chunk; comment at media level stays in media chunk).
+  - `tests/CodeRag.Tests/Unit/TreeSitterCssChunkTests.cs` — 6 tests, all passing:
+    rule_set chunks named by selectors (`.a`, `:root`, `div > p`, symbol Language == "css"),
+    media_statement excludes all nested rule_set ranges (keeps its at-rule head, ends with `}`),
+    keyframes_statement keeps full content while from/to keyframe_blocks are NOT chunks,
+    mixed file (@import + 2x .top + media + keyframes → 4 chunks, media copy excluded from media chunk),
+    no-rules file (@import/@charset only) falls back to sliding window,
+    multi-byte UTF-8 (comment inside rule stays in rule chunk; comment at media level stays in media chunk).
+ - `tests/CodeRag.Tests/Unit/TreeSitterXmlChunkTests.cs` — 6 tests, all passing:
+   container elements are chunks while text-only/self-closing elements and document are not
+   (+ symbol Language == "xml", kind Element; parent keeps non-chunk content),
+   nested containers (parent excludes child range, child keeps full content),
+   XSLT (xsl:stylesheet + 2x xsl:template chunks; multi-level template>html>body>for-each>div —
+   template source is a skeleton, leaf content in innermost div chunk; 2nd template keeps its text),
+   self-closing children make the parent a chunk (svg with rect/circle),
+   text-only root falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact).
 
 ## Code changes
 - `src/CodeRag.Analyzers.TreeSitter/TreeSitterAnalyzer.cs`:
@@ -177,7 +192,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
     `HandleRawTextElement` for `script_element`/`style_element` (chunk iff non-blank `raw_text`),
     shared `GetIdFromStartTag` helper (handles quoted and unquoted values).
   - Full test suite: 215 passed / 1 skipped / 0 failed.
-- CSS stage (this commit):
+- CSS stage (committed `1fcec5f`):
   - `SupportedLanguages.Css = "css"` (+ `All` set); `SymbolKind.Rule = "Rule"`.
   - `LanguageDetector`: `.css` → `css`.
   - `TreeSitterAnalyzer`: extension map `.css` → `"CSS"`, context map `"css"`,
@@ -185,6 +200,18 @@ experiment results, links/commits of investigated repositories, tests added, cod
     new `HandleCssRule` handler for `rule_set` (name = `selectors` text) and
     `media_statement`/`keyframes_statement` (name = first line up to `{`), names truncated to 200 chars.
   - Full test suite: 221 passed / 1 skipped / 0 failed.
+- XML stage (this commit):
+  - Shipped `src/CodeRag.Analyzers.TreeSitter/runtimes/linux-x64/native/libtree-sitter-xml.so`
+    (70 KB, built from tree-sitter-xml v0.7.0) + csproj `<Content CopyToOutputDirectory>` —
+    propagates through ProjectReference to all consumers (verified in test/Api outputs).
+  - `SupportedLanguages.Xml = "xml"` (+ `All` set); `SymbolKind.Element = "Element"`.
+  - `LanguageDetector`: `.xml`/`.xsl`/`.xslt` → `xml`.
+  - `TreeSitterAnalyzer`: extension map `.xml`/`.xsl`/`.xslt` → `"Xml"`, context map `"xml"`,
+    `TreeSitterToSupported["xml"] = Xml`; chunk condition extended to `SymbolKind.Element`;
+    `element` handler now dispatches by grammar (`HandleElement` → HTML vs XML logic);
+    new `HandleXmlElement` (chunk iff `content` has an `element`/`EmptyElemTag` child;
+    name = `STag > Name`, keeps namespace prefix).
+  - Full test suite: 227 passed / 1 skipped / 0 failed.
 
 ## JavaScript — real repo validation
 - Corpus: `zxuqian/html-css-examples` commit `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6`
@@ -239,31 +266,45 @@ experiment results, links/commits of investigated repositories, tests added, cod
   text = `CharData`; also `Comment`, `PI`, `CData`.
 - **XSLT verified**: parses as plain XML, `hasError=False`; all `xsl:*` namespaced tags are regular
   `element`/`EmptyElemTag` nodes with attributes. No XSLT-specific grammar needed.
-- **XML chunk rule (final)**: an `element` is a chunk iff it has ≥1 child element
-  (`element` or `EmptyElemTag` descendant in `content`) — i.e. "container elements".
-  Name from `STag > Name` (include attributes in display, e.g. `book[@id=bk101]` — keep simple: tag name).
+- **XML chunk rule (final, implemented)**: an `element` is a chunk iff it has ≥1 child element
+  (`element` or `EmptyElemTag`) in its `content` — i.e. "container elements".
+  Name from `STag > Name` (tag name, keeps namespace prefix, e.g. `xsl:template`).
   Leaf/text-only elements are NOT chunks (they stay inside the parent container's source).
   `document`, `prolog`, `Comment`, `PI` are NOT chunks. For XSLT this yields
   stylesheet → templates → inner blocks, which is the desired semantic split.
+
+## XML / XSLT — real repo validation
+- Corpora (shallow clones into /tmp): `GNOME/libxml2` (998 `.xml` test/doc files) and
+  `GNOME/libxslt` (583 `.xsl` + 340 `.xml` test files) — real XML incl. DocBook, XSD test suite,
+  intentionally malformed boundary tests, and real XSLT stylesheets.
+- Ran `TreeSitterAnalyzer` over all 1921 files (harness mode `repojs <dir> <ext> xml`):
+  27925 symbols, 27925 chunks, 856/1921 files contain nested chunks, 90 parse errors
+  (mostly intentionally malformed test files), 373 files with zero container elements →
+  sliding-window fallback by design.
+- Strict verification: **leafMismatch=0** on all corpora (every leaf chunk = exact source substring),
+  **rebuildMismatch=0** — new independent reconstruction check added to the harness: for every chunk
+  (leaf and parent) the expected source is recomputed from file byte offsets (range minus contained
+  child-chunk ranges, degenerate → full text) and compared — exact match on 2493 + 9926 + 3038 chunks.
+- String leak heuristic produced 5 "leaks" in `libxslt/tests/docbook/test/{article3,foottest}.xml` —
+  all false positives: those files repeat identical boilerplate (`<section><title>Another Section</title>`,
+  `<entry>entry</entry>` ×3), so a parent's correctly-excluded skeleton is textually identical to a
+  sibling's content. The byte-exact reconstruction check proves exclusion is correct.
+- Error recovery confirmed: e.g. `doc/xmllint.xml` (hasError at 0:0) still yields 445 chunks with
+  proper skeleton exclusion (`refentry` → nested `refentryinfo`/`copyright` etc.).
 
 ## Open questions
 - Multi-byte UTF-8: RESOLVED — `Node.StartIndex/EndIndex` are C# string (char) indices
   (`ByteToIndex` of byte offsets); `Tree.GetText(start,end)` substring is exact for multi-byte sources
   (verified by synthetic test + exact-substring check over files with CJK/Cyrillic text).
 - HTML: should `script`/`style` content be chunked as-is or routed to JS/CSS sub-parsing (document as limitation if as-is).
-- Where to ship `libtree-sitter-xml.so` in the repo: content under `src/CodeRag.Analyzers.TreeSitter/runtimes/linux-x64/native/`
-  copied to output via csproj (mirrors TreeSitter.DotNet package layout). Decide at XML implementation step.
 
 ## Current task
-JS (`0c2bca7`) and HTML (`32caf70`) stages committed. CSS stage implemented + validated; commit this state.
+JS (`0c2bca7`), HTML (`32caf70`), CSS (`1fcec5f`) stages committed. XML stage implemented + validated; commit this state.
 
 ## Next step
-1. Commit CSS stage: `git add` TODO.md + TreeSitterAnalyzer.cs + SupportedLanguages.cs + Symbol.cs +
-   LanguageDetector.cs + TreeSitterCssChunkTests.cs; commit `tree-sitter: validate CSS chunking`.
-2. XML stage: copy built `/tmp/opencode/tsre/binxml/libtree-sitter-xml.so` into
-   `src/CodeRag.Analyzers.TreeSitter/runtimes/linux-x64/native/` + csproj Content/CopyToOutputDirectory
-   (mirrors TreeSitter.DotNet package layout); add `.xml`/`.xsl`/`.xslt` → `"Xml"`, `SupportedLanguages.Xml`
-   (new constant) + `SymbolKind` for XML elements (TBD — likely `SymbolKind.Field`-like or new `Element`),
-   XML chunk rule per decision #7 (container elements only; `document`/leaf elements not chunks),
-   synthetic tests (incl. XSLT sample) + validate on a real XML/XSLT repo (find small one to clone into /tmp);
-   update TODO.md; commit.
+1. Commit XML stage: `git add` TODO.md + TreeSitterAnalyzer.cs + SupportedLanguages.cs + Symbol.cs +
+   LanguageDetector.cs + CodeRag.Analyzers.TreeSitter.csproj + runtimes/linux-x64/native/libtree-sitter-xml.so
+   + TreeSitterXmlChunkTests.cs; commit `tree-sitter: validate XML/XSLT chunking`.
+2. SQL stage: existing `SqlAnalyzer` (ScriptDom T-SQL) — inspect its chunk behavior + nested behavior,
+   add synthetic tests if gaps, clone `microsoft/SQL-ProcBench` to /tmp (pin commit), run the analyzer
+   over all `.sql` files, strict verification (leafExact/rebuild), update TODO.md; commit.

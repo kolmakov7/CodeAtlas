@@ -42,6 +42,8 @@ public static class SymbolKind
     public const string Section = "Section";
     // CSS
     public const string Rule = "Rule";
+    // XML
+    public const string Element = "Element";
     // SQL / VBS
     public const string Procedure = "Procedure";
     public const string View = "View";

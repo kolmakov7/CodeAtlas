@@ -48,6 +48,10 @@ public static class LanguageDetector
         [".htm"] = SupportedLanguages.Html,
         // CSS
         [".css"] = SupportedLanguages.Css,
+        // XML / XSLT
+        [".xml"] = SupportedLanguages.Xml,
+        [".xsl"] = SupportedLanguages.Xml,
+        [".xslt"] = SupportedLanguages.Xml,
     };
 
     /// <summary>Определить язык по пути; <c>null</c> если неизвестен.</summary>

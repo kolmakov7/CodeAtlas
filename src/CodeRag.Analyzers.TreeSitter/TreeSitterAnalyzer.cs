@@ -22,6 +22,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         [".cpp"] = "C++", [".cc"] = "C++", [".cxx"] = "C++", [".c"] = "C++", [".h"] = "C++", [".hpp"] = "C++", [".hh"] = "C++", [".hxx"] = "C++",
         [".html"] = "HTML", [".htm"] = "HTML",
         [".css"] = "CSS",
+        [".xml"] = "Xml", [".xsl"] = "Xml", [".xslt"] = "Xml",
     };
 
     private static readonly Dictionary<string, string> ContextToTreeSitter = new(StringComparer.OrdinalIgnoreCase)
@@ -33,6 +34,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["c++"] = "C++",
         ["html"] = "HTML",
         ["css"] = "CSS",
+        ["xml"] = "Xml",
     };
 
     private static readonly Dictionary<string, string> TreeSitterToSupported = new(StringComparer.OrdinalIgnoreCase)
@@ -46,6 +48,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["cpp"] = SupportedLanguages.Cpp,
         ["html"] = SupportedLanguages.Html,
         ["css"] = SupportedLanguages.Css,
+        ["xml"] = SupportedLanguages.Xml,
     };
 
     private static readonly Dictionary<string, string[]> LanguageLoadFallbacks = new(StringComparer.Ordinal)
@@ -74,7 +77,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["import_from_statement"] = HandleImport,
         ["import_declaration"] = HandleImport,
         ["namespace_definition"] = HandleNamespace,
-        ["element"] = HandleHtmlElement,
+        ["element"] = HandleElement,
         ["script_element"] = HandleRawTextElement,
         ["style_element"] = HandleRawTextElement,
         ["rule_set"] = HandleCssRule,
@@ -351,7 +354,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
             // Чанк на function/class/method/section: источник собирается после обхода всего дерева,
             // чтобы исключить из него диапазоны вложенных семантических чанков
-            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section or SymbolKind.Rule)
+            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section or SymbolKind.Rule or SymbolKind.Element)
                 candidates.Add(new ChunkCandidate(node, symbol, startLine, endLine));
 
             created = symbol;
@@ -602,6 +605,15 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         "form", "fieldset", "details", "dialog", "template", "figure", "table"
     };
 
+    /// <summary>
+    /// "element" встречается в грамматиках HTML и XML — диспетч по грамматике.
+    /// </summary>
+    private static void HandleElement(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang == "HTML") HandleHtmlElement(node, c);
+        else if (c.TreeLang == "Xml") HandleXmlElement(node, c);
+    }
+
     private static void HandleHtmlElement(Node node, NodeHandlerContext c)
     {
         if (c.TreeLang != "HTML") return;
@@ -634,6 +646,26 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         var id = GetIdFromStartTag(startTag);
         c.Kind = SymbolKind.Section;
         c.Name = id != null ? $"{tagName}#{id}" : tagName;
+    }
+
+    /// <summary>
+    /// XML/XSLT: chunk = "container" element — an element with at least one child element
+    /// (element or EmptyElemTag) in its content. Text-only elements, self-closing tags
+    /// (EmptyElemTag) and the document root are not chunks.
+    /// Name = tag name (with namespace prefix, e.g. "xsl:template").
+    /// </summary>
+    private static void HandleXmlElement(Node node, NodeHandlerContext c)
+    {
+        var stag = node.Children.FirstOrDefault(ch => ch.Type == "STag");
+        if (stag == null) return;
+        var name = stag.Children.FirstOrDefault(ch => ch.Type == "Name")?.Text;
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        var content = node.Children.FirstOrDefault(ch => ch.Type == "content");
+        if (content == null || content.Children.All(ch => ch.Type is not ("element" or "EmptyElemTag"))) return;
+
+        c.Kind = SymbolKind.Element;
+        c.Name = name;
     }
 
     /// <summary>
