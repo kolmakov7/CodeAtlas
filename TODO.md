@@ -358,5 +358,6 @@ Final documentation written (`docs/tree-sitter-chunking-research.md`); final cro
 ## Next step
 1. Final cross-check: full test suite green (234/1/0 — verified), 5 stage commits present,
    corpus results match the table in the doc, TODO.md consistent with the doc.
-2. Commit documentation: `git add` TODO.md + docs/tree-sitter-chunking-research.md;
-   commit `docs: tree-sitter chunking research (per-language rules, nested exclusion, validation results)`.
+2. DONE (`758214b`): committed TODO.md. NOTE: `docs/` is gitignored in this repo (all docs are
+   untracked local files), so `docs/tree-sitter-chunking-research.md` stays on disk, untracked —
+   consistent with the existing docs/*.md files.
