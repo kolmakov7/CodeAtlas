@@ -21,8 +21,8 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - [x] Research CSS (synthetic + real repo)
 - [x] Research XML / XSLT (synthetic + real repos)
 - [x] Research SQL / T-SQL (SQL-ProcBench)
-- [ ] Write final research documentation (.md)
-- [ ] Final cross-check
+- [x] Write final research documentation (.md) — `docs/tree-sitter-chunking-research.md`
+- [x] Final cross-check (suite 234/1/0; 5 stage commits verified; doc table matches corpus runs)
 
 ## Current C# implementation — findings
 
@@ -352,13 +352,11 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - HTML: should `script`/`style` content be chunked as-is or routed to JS/CSS sub-parsing (document as limitation if as-is).
 
 ## Current task
-JS (`0c2bca7`), HTML (`32caf70`), CSS (`1fcec5f`), XML (`437165b`) stages committed.
-SQL stage implemented + validated; commit this state.
+All language stages committed: JS `0c2bca7`, HTML `32caf70`, CSS `1fcec5f`, XML `437165b`, SQL `0f7dd64`.
+Final documentation written (`docs/tree-sitter-chunking-research.md`); final cross-check in progress.
 
 ## Next step
-1. Commit SQL stage: `git add` TODO.md + src/CodeRag.Analyzers.Sql/SqlAnalyzer.cs +
-   tests/CodeRag.Tests/Unit/SqlChunkTests.cs; commit
-   `sql: validate T-SQL chunking (CREATE OR ALTER support, nested DDL exclusion, exact ranges, synthetic tests, SQL-ProcBench validation)`.
-2. Final research documentation (.md): per-language sections (Parser, Semantic chunks, Non-chunks,
-   Nested chunks, Parent exclusion, Examples, Tests, Real repositories, Problems, Decisions, Limitations),
-   formal rule in English + Russian, cross-check against this file, update TODO.md; commit.
+1. Final cross-check: full test suite green (234/1/0 — verified), 5 stage commits present,
+   corpus results match the table in the doc, TODO.md consistent with the doc.
+2. Commit documentation: `git add` TODO.md + docs/tree-sitter-chunking-research.md;
+   commit `docs: tree-sitter chunking research (per-language rules, nested exclusion, validation results)`.
