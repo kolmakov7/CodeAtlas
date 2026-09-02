@@ -20,7 +20,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - [x] Research HTML (synthetic + real repo)
 - [x] Research CSS (synthetic + real repo)
 - [x] Research XML / XSLT (synthetic + real repos)
-- [ ] Research SQL / T-SQL (SQL-ProcBench)
+- [x] Research SQL / T-SQL (SQL-ProcBench)
 - [ ] Write final research documentation (.md)
 - [ ] Final cross-check
 
@@ -121,19 +121,30 @@ experiment results, links/commits of investigated repositories, tests added, cod
     e.g. `xsl:template`); kind = new `SymbolKind.Element`. Text-only elements, self-closing tags
     (`EmptyElemTag`), `document`/`prolog`/`Comment`/`PI` are NOT chunks. XSLT parses as plain XML —
     stylesheet → templates → inner blocks is the natural semantic split. No XSLT-specific grammar exists.
-8. SQL stage stays on existing `SqlAnalyzer` (ScriptDom) — validate behavior + SQL-ProcBench;
-   tree-sitter T-SQL noted as alternative only.
+8. SQL stage (FINAL): keep existing `SqlAnalyzer` (ScriptDom `TSql170Parser`, NOT tree-sitter — no
+   tree-sitter T-SQL in the bundled pack); chunks = CREATE/ALTER/CREATE OR ALTER PROCEDURE/FUNCTION/
+   VIEW/TABLE/TRIGGER statements (one symbol + one chunk each, source trimmed); nested DDL inside a
+   procedure body (e.g. `CREATE TABLE #temp`) is also a chunk and is EXCLUDED from the parent chunk
+   via the same two-pass exclusion rule as tree-sitter (Contains relation added parent→child).
+   Out of scope: CREATE TYPE/INDEX/DATABASE/SCHEMA etc.; files without supported statements →
+   sliding-window fallback. T-SQL 2017 grammar only — PL/SQL and newer T-SQL features don't parse
+   (errors logged, fallback kicks in).
 
 ## Problems found
 - Nested chunks not excluded: parent chunk currently contains full child source (duplication in RAG context).
 - `function_expression` unhandled → anonymous/assigned functions missing from index.
 - `.html`/`.css` files unanalyzed; fallback sliding window joins tokens with single spaces (markup destroyed).
 - `DefaultSourceSlicer.SlidingWindow` degrades any markup language — only acceptable as last-resort fallback.
+- SQL: `CREATE OR ALTER ...` statements were silently dropped (ScriptDom emits separate
+  `CreateOrAlter*Statement` node types the visitor didn't handle) — 76/103 corpus files produced 0 symbols.
+- SQL: nested `CREATE TABLE #temp` inside a procedure body created a child chunk that leaked into the
+  parent chunk source (no exclusion in the single-pass visitor) — rebuilt into two-pass exclusion.
 
 ## External repositories / revisions
 - `zxuqian/html-css-examples` — JS/HTML/CSS sample corpus. Cloned to `/tmp/htmlcss` at commit
   `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6` ("Add form example").
-- `microsoft/SQL-ProcBench` — main T-SQL procedure corpus (pin commit at clone; clone to /tmp).
+- `microsoft/SQL-ProcBench` — T-SQL/PLSQL procedure corpus, cloned to `/tmp/sqlproc` at commit
+  `206f4b6` (shallow). 103 T-SQL + 79 PLSQL `.sql` files (~241 KB).
 - `tree-sitter-grammars/tree-sitter-xml` — XML grammar source, built at commit
   `5000ae8f22d11fbe93939b05c1e37cf21117162d` (v0.7.0).
 - `GNOME/libxml2`, `GNOME/libxslt` — real XML/XSLT corpora (shallow clones, `/tmp/xmlsrc`, `/tmp/xsltsrc`).
@@ -167,8 +178,15 @@ experiment results, links/commits of investigated repositories, tests added, cod
    nested containers (parent excludes child range, child keeps full content),
    XSLT (xsl:stylesheet + 2x xsl:template chunks; multi-level template>html>body>for-each>div —
    template source is a skeleton, leaf content in innermost div chunk; 2nd template keeps its text),
-   self-closing children make the parent a chunk (svg with rect/circle),
-   text-only root falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact).
+    self-closing children make the parent a chunk (svg with rect/circle),
+    text-only root falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact).
+ - `tests/CodeRag.Tests/Unit/SqlChunkTests.cs` — 7 tests, all passing:
+   chunk source stays within statement boundaries (no GO / no neighbouring statement text),
+   symbol range covers fragment exactly (EndColumn 1-based exclusive, e.g. 29 for 28-char statement),
+   multiple object kinds each get own chunk, CREATE OR ALTER proc/function/trigger captured,
+   nested `CREATE TABLE #tmp` inside procedure is excluded from parent chunk + proc Contains table relation,
+   multi-byte UTF-8 (Cyrillic + CJK comments/literals intact, not leaking into next chunk),
+   no-CREATE file falls back to sliding window.
 
 ## Code changes
 - `src/CodeRag.Analyzers.TreeSitter/TreeSitterAnalyzer.cs`:
@@ -200,7 +218,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
     new `HandleCssRule` handler for `rule_set` (name = `selectors` text) and
     `media_statement`/`keyframes_statement` (name = first line up to `{`), names truncated to 200 chars.
   - Full test suite: 221 passed / 1 skipped / 0 failed.
-- XML stage (this commit):
+- XML stage (committed `437165b`):
   - Shipped `src/CodeRag.Analyzers.TreeSitter/runtimes/linux-x64/native/libtree-sitter-xml.so`
     (70 KB, built from tree-sitter-xml v0.7.0) + csproj `<Content CopyToOutputDirectory>` —
     propagates through ProjectReference to all consumers (verified in test/Api outputs).
@@ -212,6 +230,19 @@ experiment results, links/commits of investigated repositories, tests added, cod
     new `HandleXmlElement` (chunk iff `content` has an `element`/`EmptyElemTag` child;
     name = `STag > Name`, keeps namespace prefix).
   - Full test suite: 227 passed / 1 skipped / 0 failed.
+- SQL stage (this commit) — `src/CodeRag.Analyzers.Sql/SqlAnalyzer.cs`:
+  - Added visitor overrides for `CreateOrAlterProcedureStatement` / `CreateOrAlterFunctionStatement` /
+    `CreateOrAlterViewStatement` / `CreateOrAlterTriggerStatement` (ScriptDom emits these separate types
+    for `CREATE OR ALTER`; previously silently dropped — the #1 corpus gap).
+  - GO-separator warning regex now counts `CREATE OR ALTER ...` too.
+  - Two-pass chunk building (same principle as tree-sitter): visitor collects `StatementCandidate`
+    (symbol + `StartOffset`/`EndOffset` from ScriptDom), `EmitChunks()` builds each chunk source as
+    the fragment minus contained child-candidate ranges (degenerate guard: all-excluded → full fragment),
+    trimmed; adds parent→child `RelationType.Contains` for nested DDL (e.g. `CREATE TABLE #temp`).
+  - Exact symbol `EndLine`/`EndColumn` derived from `StartOffset + FragmentLength` (was a placeholder
+    `startCol + 1`); invalid offsets → line-based fallback as before. Removed obsolete `ExtractSource`/
+    `GetEndLine` helpers.
+  - Full test suite: 234 passed / 1 skipped / 0 failed.
 
 ## JavaScript — real repo validation
 - Corpus: `zxuqian/html-css-examples` commit `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6`
@@ -292,6 +323,28 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - Error recovery confirmed: e.g. `doc/xmllint.xml` (hasError at 0:0) still yields 445 chunks with
   proper skeleton exclusion (`refentry` → nested `refentryinfo`/`copyright` etc.).
 
+## SQL / T-SQL — real repo validation
+- Corpus: `microsoft/SQL-ProcBench` at commit `206f4b6` cloned to `/tmp/sqlproc`;
+  `src/T-SQL` = 103 `.sql` files (stored procedures, scalar/table UDFs, triggers, TPC-DS derived),
+  `src/PLSQL` = 79 `.sql` files.
+- Ran `SqlAnalyzer` over the 103 T-SQL files (harness mode `repojs <dir> .sql sql trim sql`;
+  `trim` flag accounts for the analyzer's trimmed chunk source):
+  104 symbols / 104 chunks, 1 file with a nested chunk (`proc47`: `CREATE TABLE #prefCust` inside a
+  procedure body), 2 files with parse errors, 0 fallback files.
+- Strict verification: **leafExact=103 leafMismatch=0, parentLeaks=0, rebuildExact=104 rebuildMismatch=0**
+  (rebuild = independent recomputation of each chunk source from file offsets, child ranges excluded,
+  trimmed — byte-exact on all chunks including the nested proc/table pair).
+- Before the fix: 76/103 files produced 0 symbols (all used `CREATE OR ALTER`, which ScriptDom parses
+  as `CreateOrAlter*Statement` — unhandled node types) and the nested `#prefCust` table leaked into
+  its parent procedure chunk (REBUILD-MISMATCH got=635/exp=598 + 1 parent leak). After the fix: clean.
+- Parse-error files (both recorded as `AnalyzerError`, sliding-window fallback in the real pipeline):
+  `proc28_insertCallCenter.sql` (1 error — T-SQL 2017 grammar gap in the statement list),
+  `proc53_shutOldCC.sql` (3 errors — starts with `CREATE OR ALTER TYPE ... AS TABLE` table type, which
+  the analyzer intentionally doesn't chunk; error recovery drops the following batch).
+- PLSQL folder: 78/79 files don't parse as T-SQL (PL/SQL is a different dialect — expected; errors
+  logged, fallback). 1 file (written in T-SQL syntax) parses cleanly. Documented limitation:
+  `TSql170Parser` = T-SQL 2017 grammar only.
+
 ## Open questions
 - Multi-byte UTF-8: RESOLVED — `Node.StartIndex/EndIndex` are C# string (char) indices
   (`ByteToIndex` of byte offsets); `Tree.GetText(start,end)` substring is exact for multi-byte sources
@@ -299,12 +352,13 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - HTML: should `script`/`style` content be chunked as-is or routed to JS/CSS sub-parsing (document as limitation if as-is).
 
 ## Current task
-JS (`0c2bca7`), HTML (`32caf70`), CSS (`1fcec5f`) stages committed. XML stage implemented + validated; commit this state.
+JS (`0c2bca7`), HTML (`32caf70`), CSS (`1fcec5f`), XML (`437165b`) stages committed.
+SQL stage implemented + validated; commit this state.
 
 ## Next step
-1. Commit XML stage: `git add` TODO.md + TreeSitterAnalyzer.cs + SupportedLanguages.cs + Symbol.cs +
-   LanguageDetector.cs + CodeRag.Analyzers.TreeSitter.csproj + runtimes/linux-x64/native/libtree-sitter-xml.so
-   + TreeSitterXmlChunkTests.cs; commit `tree-sitter: validate XML/XSLT chunking`.
-2. SQL stage: existing `SqlAnalyzer` (ScriptDom T-SQL) — inspect its chunk behavior + nested behavior,
-   add synthetic tests if gaps, clone `microsoft/SQL-ProcBench` to /tmp (pin commit), run the analyzer
-   over all `.sql` files, strict verification (leafExact/rebuild), update TODO.md; commit.
+1. Commit SQL stage: `git add` TODO.md + src/CodeRag.Analyzers.Sql/SqlAnalyzer.cs +
+   tests/CodeRag.Tests/Unit/SqlChunkTests.cs; commit
+   `sql: validate T-SQL chunking (CREATE OR ALTER support, nested DDL exclusion, exact ranges, synthetic tests, SQL-ProcBench validation)`.
+2. Final research documentation (.md): per-language sections (Parser, Semantic chunks, Non-chunks,
+   Nested chunks, Parent exclusion, Examples, Tests, Real repositories, Problems, Decisions, Limitations),
+   formal rule in English + Russian, cross-check against this file, update TODO.md; commit.

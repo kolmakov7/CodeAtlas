@@ -48,7 +48,7 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
 
         // Проверка GO разделителя — по ТЗ требует GO; логируем если отсутствует при множественных CREATE
         var hasGo = Regex.IsMatch(ctx.Content, @"(?im)^\s*GO\s*$");
-        var createCount = Regex.Matches(ctx.Content, @"(?im)^\s*CREATE\s+(PROCEDURE|FUNCTION|VIEW|TABLE|TRIGGER|PROC)").Count;
+        var createCount = Regex.Matches(ctx.Content, @"(?im)^\s*CREATE\s+(OR\s+ALTER\s+)?(PROCEDURE|FUNCTION|VIEW|TABLE|TRIGGER|PROC)").Count;
         if (createCount > 1 && !hasGo)
         {
             errors.Add(new AnalyzerError(ctx.FilePath, "SQL: множественные CREATE без GO разделителя — парсинг может быть неточным (требуется GO между батчами)", 1, 1));
@@ -87,8 +87,9 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
         {
             var visitor = new SqlVisitor(ctx, symbols, chunks, relations, errors, _factory, _slicer);
             fragment.Accept(visitor);
+            visitor.EmitChunks();
 
-            // Relations Contains уже добавлены внутри visitor для batch? Дополним Contains на основе ParentSymbolId
+            // Relations Contains уже добавлены visitor'ом для вложенных определений; дополним по ParentSymbolId
             foreach (var s in symbols)
             {
                 if (s.ParentSymbolId != null && !relations.Any(r => r.FromSymbolId == s.ParentSymbolId && r.ToSymbolId == s.Id && r.RelationType == RelationType.Contains))
@@ -133,6 +134,7 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
         private readonly List<AnalyzerError> _errors;
         private readonly IChunkFactory _factory;
         private readonly ISourceSlicer _slicer;
+        private readonly List<StatementCandidate> _candidates = new();
 
         public SqlVisitor(FileContext ctx, List<Symbol> symbols, List<Chunk> chunks, List<Relation> relations, List<AnalyzerError> errors, IChunkFactory factory, ISourceSlicer slicer)
         {
@@ -143,6 +145,74 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
             _errors = errors;
             _factory = factory;
             _slicer = slicer;
+        }
+
+        /// <summary>Кандидат на чанк: объект DDL/создания с диапазоном в байтах-символах.</summary>
+        private sealed class StatementCandidate
+        {
+            public Symbol? Symbol;
+            public int StartOffset = -1;
+            public int EndOffset = -1;
+        }
+
+        /// <summary>
+        /// Второй проход: источник чанка = фрагмент объекта минус диапазоны вложенных кандидатов
+        /// (тот же центральный принцип исключения вложенных чанков, что и в TreeSitter-анализаторе).
+        /// </summary>
+        public void EmitChunks()
+        {
+            foreach (var cand in _candidates)
+            {
+                if (cand.Symbol == null) continue;
+                var source = BuildCandidateSource(cand);
+                if (!string.IsNullOrWhiteSpace(source))
+                {
+                    try
+                    {
+                        var chunk = _factory.Create(cand.Symbol.Id, SupportedLanguages.Sql, cand.Symbol.StartLine, cand.Symbol.EndLine, source);
+                        _chunks.Add(chunk);
+                    }
+                    catch (Exception ex)
+                    {
+                        _errors.Add(new AnalyzerError(_ctx.FilePath, $"Chunk failed: {ex.Message}"));
+                    }
+                }
+
+                // Вложенные определения (напр. CREATE TABLE #temp внутри процедуры) — relation Contains
+                foreach (var child in GetChildren(cand))
+                    _relations.Add(new Relation(cand.Symbol.Id, child.Symbol!.Id, RelationType.Contains));
+            }
+        }
+
+        private List<StatementCandidate> GetChildren(StatementCandidate cand)
+        {
+            if (cand.StartOffset < 0) return new List<StatementCandidate>();
+            return _candidates
+                .Where(c => !ReferenceEquals(c, cand) && c.StartOffset >= cand.StartOffset && c.EndOffset <= cand.EndOffset)
+                .OrderBy(c => c.StartOffset).ThenBy(c => c.EndOffset)
+                .ToList();
+        }
+
+        private string BuildCandidateSource(StatementCandidate cand)
+        {
+            var content = _ctx.Content;
+            if (cand.StartOffset < 0 || cand.EndOffset < 0 || cand.EndOffset > content.Length)
+                return _slicer.ExtractLines(content, cand.Symbol!.StartLine, cand.Symbol.EndLine);
+
+            var sb = new System.Text.StringBuilder(cand.EndOffset - cand.StartOffset);
+            var cursor = cand.StartOffset;
+            foreach (var child in GetChildren(cand))
+            {
+                if (child.StartOffset > cursor)
+                    sb.Append(content.Substring(cursor, child.StartOffset - cursor));
+                if (child.EndOffset > cursor)
+                    cursor = child.EndOffset;
+            }
+            if (cand.EndOffset > cursor)
+                sb.Append(content.Substring(cursor, cand.EndOffset - cursor));
+
+            // Degenerate: всё исключено — оставляем полный фрагмент
+            return sb.Length > 0 ? sb.ToString().Trim() : content.Substring(cand.StartOffset, cand.EndOffset - cand.StartOffset).Trim();
         }
 
         public override void ExplicitVisit(CreateProcedureStatement node)
@@ -172,6 +242,31 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
         public override void ExplicitVisit(CreateTriggerStatement node)
         {
             // Trigger: имя в node.Name
+            HandleProcedure(node, new SchemaObjectNameWrapper(node.Name), SupportedLanguages.Sql, SymbolKind.Trigger);
+            base.ExplicitVisit(node);
+        }
+
+        // CREATE OR ALTER (SQL Server 2016+) — ScriptDom выдаёт отдельные типы узлов
+        public override void ExplicitVisit(CreateOrAlterProcedureStatement node)
+        {
+            HandleProcedure(node, node.ProcedureReference, SupportedLanguages.Sql, SymbolKind.Procedure);
+            base.ExplicitVisit(node);
+        }
+
+        public override void ExplicitVisit(CreateOrAlterFunctionStatement node)
+        {
+            HandleProcedure(node, new SchemaObjectNameWrapper(node.Name), SupportedLanguages.Sql, SymbolKind.Function);
+            base.ExplicitVisit(node);
+        }
+
+        public override void ExplicitVisit(CreateOrAlterViewStatement node)
+        {
+            HandleProcedure(node, new SchemaObjectNameWrapper(node.SchemaObjectName), SupportedLanguages.Sql, SymbolKind.View);
+            base.ExplicitVisit(node);
+        }
+
+        public override void ExplicitVisit(CreateOrAlterTriggerStatement node)
+        {
             HandleProcedure(node, new SchemaObjectNameWrapper(node.Name), SupportedLanguages.Sql, SymbolKind.Trigger);
             base.ExplicitVisit(node);
         }
@@ -247,30 +342,37 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
                 // Позиции — ScriptDom хранит StartLine/StartColumn/StartOffset
                 int startLine = GetStartLine(node);
                 int startCol = GetStartColumn(node);
+                int endLine = startLine;
                 int endCol = startCol + 1;
 
-                // Source slice via offsets
-                string source = ExtractSource(node);
-                int endLine = startLine + source.Split('\n').Length - 1;
-                if (endLine < startLine) endLine = startLine;
-
-                var symbol = new Symbol(Guid.NewGuid(), language, kind, name!, fqn, ns, null, startLine, endLine, startCol, endCol, $"{kind} {fqn}");
-                _symbols.Add(symbol);
-
-                if (!string.IsNullOrWhiteSpace(source))
+                // Точные end line/col выводим из StartOffset+FragmentLength; диапазон кандидата для 2-го прохода
+                var startOffset = node.StartOffset;
+                var fragLen = node.FragmentLength;
+                var validOffset = startOffset >= 0 && fragLen > 0 && startOffset + fragLen <= _ctx.Content.Length;
+                if (validOffset)
                 {
-                    try
+                    endLine = 1;
+                    endCol = 1;
+                    for (var i = 0; i < startOffset + fragLen; i++)
                     {
-                        var chunk = _factory.Create(symbol.Id, language, startLine, endLine, source);
-                        _chunks.Add(chunk);
-                    }
-                    catch (Exception ex)
-                    {
-                        _errors.Add(new AnalyzerError(_ctx.FilePath, $"Chunk failed for {fqn}: {ex.Message}"));
+                        if (_ctx.Content[i] == '\n')
+                        {
+                            endLine++;
+                            endCol = 1;
+                        }
+                        else
+                            endCol++;
                     }
                 }
 
-                // Для SQL Contains не нужен parent, но если есть схема — можно добавить? Пропускаем
+                var symbol = new Symbol(Guid.NewGuid(), language, kind, name!, fqn, ns, null, startLine, endLine, startCol, endCol, $"{kind} {fqn}");
+                _symbols.Add(symbol);
+                _candidates.Add(new StatementCandidate
+                {
+                    Symbol = symbol,
+                    StartOffset = validOffset ? startOffset : -1,
+                    EndOffset = validOffset ? startOffset + fragLen : -1,
+                });
             }
             catch (Exception ex)
             {
@@ -278,44 +380,9 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
             }
         }
 
-        private string ExtractSource(TSqlFragment node)
-        {
-            try
-            {
-                var start = node.StartOffset;
-                var len = node.FragmentLength;
-                if (start < 0 || len <= 0 || start + len > _ctx.Content.Length)
-                {
-                    int sl = GetStartLine(node);
-                    int el = GetEndLine(node, sl);
-                    return _slicer.ExtractLines(_ctx.Content, sl, el);
-                }
-                return _ctx.Content.Substring(start, len).Trim();
-            }
-            catch
-            {
-                int sl = GetStartLine(node);
-                int el = GetEndLine(node, sl);
-                return _slicer.ExtractLines(_ctx.Content, sl, el);
-            }
-        }
-
         private static int GetStartLine(TSqlFragment node)
         {
             try { return node.StartLine; } catch { return 1; }
-        }
-        private static int GetEndLine(TSqlFragment node, int fallbackStart)
-        {
-            // ScriptDom не всегда даёт EndLine — аппроксимируем
-            try
-            {
-                // Пытаемся через reflection найти EndLine или используем StartOffset+FragmentLength
-                var prop = node.GetType().GetProperty("StartLine");
-                // Если есть FragmentLength, считаем строки внутри фрагмента
-                // Но проще: если есть свойство через ToString count
-                return fallbackStart; // пока fallback
-            }
-            catch { return fallbackStart; }
         }
         private static int GetStartColumn(TSqlFragment node)
         {
