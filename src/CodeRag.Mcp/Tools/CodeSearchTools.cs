@@ -16,19 +16,44 @@ public sealed class CodeSearchTools : IMcpToolHandler
     private readonly ISearchService _search;
     private readonly IEmbeddingProviderFactory _embeddings;
     private readonly IStatisticsQueryService _stats;
+    private readonly IMcpUsageRecorder? _usage;
     private readonly ILogger<CodeSearchTools> _logger;
     private const int MaxOutputLines = 200;
 
-    public CodeSearchTools(ISearchService search, IEmbeddingProviderFactory embeddings, IStatisticsQueryService stats, ILogger<CodeSearchTools> logger)
+    public CodeSearchTools(ISearchService search, IEmbeddingProviderFactory embeddings, IStatisticsQueryService stats, ILogger<CodeSearchTools> logger, IMcpUsageRecorder? usage = null)
     {
         _search = search;
         _embeddings = embeddings;
         _stats = stats;
         _logger = logger;
+        _usage = usage;
+    }
+
+    /// <summary>
+    /// Runs a tool and records one usage row (tool, ok/error, duration, optional repo scope).
+    /// Never affects the tool result: exceptions are converted to the standard "Error: ..." text.
+    /// </summary>
+    private async Task<string> TrackAsync(string tool, Guid? repositoryId, Func<Task<string>> execute)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        string result;
+        try
+        {
+            result = await execute().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            result = $"Error: {ex.Message}";
+        }
+        sw.Stop();
+        _usage?.Record(tool, !result.StartsWith("Error:", StringComparison.Ordinal), (int)sw.ElapsedMilliseconds, repositoryId);
+        return result;
     }
 
     [McpServerTool, Description("List indexed repositories with status and counts (files, chunks, symbols, relations, vectors per embedding domain). Use to discover repositoryIds for scoping searches.")]
-    public async Task<string> RepositoriesAsync(CancellationToken ct = default)
+    public Task<string> RepositoriesAsync(CancellationToken ct = default) => TrackAsync("repositories", null, () => RepositoriesCoreAsync(ct));
+
+    private async Task<string> RepositoriesCoreAsync(CancellationToken ct)
     {
         _logger.LogInformation("MCP repositories");
         try
@@ -50,7 +75,9 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> Repositories() => RepositoriesAsync();
 
     [McpServerTool, Description("Report the two independent embedding domains (code + text): status, configured model, vector dimensions and indexed/pending vector counts per domain. Use to verify which embedding endpoints the index was built against.")]
-    public async Task<string> EmbeddingStatus(CancellationToken ct = default)
+    public Task<string> EmbeddingStatus(CancellationToken ct = default) => TrackAsync("embedding_status", null, () => EmbeddingStatusCoreAsync(ct));
+
+    private async Task<string> EmbeddingStatusCoreAsync(CancellationToken ct)
     {
         _logger.LogInformation("MCP embedding_status");
         IReadOnlyList<CodeRag.Domain.Ports.EmbeddingDomainStats>? global = null;
@@ -87,7 +114,7 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> EmbeddingStatusAlias(CancellationToken ct = default) => EmbeddingStatus(ct);
 
     [McpServerTool, Description("Code search (Hybrid by default: semantic + FullText + exact; Semantic = vectors only code+text merged, SemanticCode = code domain only (http://192.168.137.25:8082), SemanticText = text/docs corpus only (http://192.168.137.25:8083), no FTS; FullText = lexical only; Symbol = name lookup). Results include repositoryId, chunkId and symbolId so you can follow up with get_code / get_symbol / get_relations. Use to find code by query.")]
-    public async Task<string> SearchCodeAsync(
+    public Task<string> SearchCodeAsync(
         [Description("Search query text")] string query,
         [Description("Mode: Hybrid|FullText|Semantic|SemanticCode|SemanticText|Symbol (default Hybrid)")] string? mode = null,
         [Description("Max results (1..100, default 20)")] int? limit = null,
@@ -97,6 +124,12 @@ public sealed class CodeSearchTools : IMcpToolHandler
         [Description("Optional symbol kind filter (e.g. method, class)")] string? symbolKind = null,
         [Description("Optional minimum semantic score 0..1 (default from server config, typically 0.25)")] double? minScore = null,
         CancellationToken ct = default)
+        => TrackAsync("search_code", repositoryIds?.Length == 1 ? repositoryIds[0] : null,
+            () => SearchCodeCoreAsync(query, mode, limit, offset, repositoryIds, languages, symbolKind, minScore, ct));
+
+    private async Task<string> SearchCodeCoreAsync(
+        string query, string? mode, int? limit, int? offset, Guid[]? repositoryIds,
+        string? languages, string? symbolKind, double? minScore, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query)) return "Error: query must not be empty";
         var m = ParseMode(mode);
@@ -123,13 +156,18 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> SearchCode(string query, string? mode = null, int? limit = null, int? offset = null, Guid[]? repositoryIds = null, double? minScore = null) => SearchCodeAsync(query, mode, limit, offset, repositoryIds, minScore: minScore);
 
     [McpServerTool, Description("Get source code of an indexed file (exact lines). Path traversal protected. Default 200 lines; when truncated the output says which line to continue from.")]
-    public async Task<string> GetCodeAsync(
+    public Task<string> GetCodeAsync(
         [Description("Repository Id (Guid)")] Guid repositoryId,
         [Description("File path relative to repo root (indexed only)")] string path,
         [Description("Start line 1-based (optional)")] int? startLine = null,
         [Description("End line inclusive (optional)")] int? endLine = null,
         [Description("Max lines to return (default 200, max 1000)")] int? maxLines = null,
         CancellationToken ct = default)
+        => TrackAsync("get_code", repositoryId,
+            () => GetCodeCoreAsync(repositoryId, path, startLine, endLine, maxLines, ct));
+
+    private async Task<string> GetCodeCoreAsync(
+        Guid repositoryId, string path, int? startLine, int? endLine, int? maxLines, CancellationToken ct)
     {
         if (repositoryId == Guid.Empty) return "Error: repositoryId required";
         if (string.IsNullOrWhiteSpace(path)) return "Error: path required";
@@ -160,12 +198,17 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> GetCode(Guid repositoryId, string path, int? startLine = null, int? endLine = null, int? maxLines = null) => GetCodeAsync(repositoryId, path, startLine, endLine, maxLines);
 
     [McpServerTool, Description("Find symbols by name/FQN/namespace substring (LIKE). Returns kind, FQN, location, symbol id, namespace and signature.")]
-    public async Task<string> FindSymbolAsync(
+    public Task<string> FindSymbolAsync(
         [Description("Query substring for name/FQN")] string query,
         [Description("Optional repository filter")] Guid? repositoryId = null,
         [Description("Optional language filter")] string? language = null,
         [Description("Limit results (default 20)")] int? limit = null,
         CancellationToken ct = default)
+        => TrackAsync("find_symbol", repositoryId,
+            () => FindSymbolCoreAsync(query, repositoryId, language, limit, ct));
+
+    private async Task<string> FindSymbolCoreAsync(
+        string query, Guid? repositoryId, string? language, int? limit, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query)) return "Error: query required";
         var req = new FindSymbolRequest(query, repositoryId, language, null, limit ?? 20, 0);
@@ -186,7 +229,10 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> FindSymbol(string query, Guid? repositoryId = null, string? language = null, int? limit = null) => FindSymbolAsync(query, repositoryId, language, limit);
 
     [McpServerTool, Description("Get full details for one symbol by id: kind, name, FQN, namespace, signature, location, repository, and the containing type/member (Contains relation).")]
-    public async Task<string> GetSymbolAsync(Guid symbolId, CancellationToken ct = default)
+    public Task<string> GetSymbolAsync(Guid symbolId, CancellationToken ct = default)
+        => TrackAsync("get_symbol", null, () => GetSymbolCoreAsync(symbolId, ct));
+
+    private async Task<string> GetSymbolCoreAsync(Guid symbolId, CancellationToken ct)
     {
         if (symbolId == Guid.Empty) return "Error: symbolId required";
         _logger.LogInformation("MCP get_symbol symbol={Id}", symbolId);
@@ -218,12 +264,17 @@ public sealed class CodeSearchTools : IMcpToolHandler
     }
 
     [McpServerTool, Description("Traverse relations of a symbol. direction: outgoing|incoming|both (default both). relationTypes: optional comma list; case-insensitive with aliases — 'calls', 'contains', 'depends_on', 'inherits', 'implements', 'overrides', 'refs' (references), 'uses', 'imports'. Returns relation type plus both endpoints with FQN, location and id — use the endpoint ids to keep traversing.")]
-    public async Task<string> GetRelationsAsync(
+    public Task<string> GetRelationsAsync(
         Guid symbolId,
         [Description("Direction: outgoing|incoming|both (default both)")] string? direction = null,
         [Description("Optional comma-separated relation types, e.g. 'calls,depends_on'. Case-insensitive; aliases like 'refs' accepted.")] string? relationTypes = null,
         [Description("Max relations (default 20, max 200)")] int? limit = null,
         CancellationToken ct = default)
+        => TrackAsync("get_relations", null,
+            () => GetRelationsCoreAsync(symbolId, direction, relationTypes, limit, ct));
+
+    private async Task<string> GetRelationsCoreAsync(
+        Guid symbolId, string? direction, string? relationTypes, int? limit, CancellationToken ct)
     {
         if (symbolId == Guid.Empty) return "Error: symbolId required";
         var dir = ParseDirection(direction);
@@ -251,7 +302,10 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> GetRelations(Guid symbolId, string? direction = null, string? relationTypes = null, int? limit = null) => GetRelationsAsync(symbolId, direction, relationTypes, limit);
 
     [McpServerTool, Description("Find references/usages of a symbol (incoming Calls/DependsOn/References-style relations). Returns hydrated endpoints, not raw ids.")]
-    public async Task<string> FindReferencesAsync(Guid symbolId, CancellationToken ct = default)
+    public Task<string> FindReferencesAsync(Guid symbolId, CancellationToken ct = default)
+        => TrackAsync("find_references", null, () => FindReferencesCoreAsync(symbolId, ct));
+
+    private async Task<string> FindReferencesCoreAsync(Guid symbolId, CancellationToken ct)
     {
         if (symbolId == Guid.Empty) return "Error: symbolId required";
         _logger.LogInformation("MCP find_references symbol={Id}", symbolId);
@@ -275,7 +329,10 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> FindReferences(Guid symbolId) => FindReferencesAsync(symbolId);
 
     [McpServerTool, Description("Find implementations of an interface symbol (incoming Implements)")]
-    public async Task<string> FindImplementationsAsync(Guid symbolId, CancellationToken ct = default)
+    public Task<string> FindImplementationsAsync(Guid symbolId, CancellationToken ct = default)
+        => TrackAsync("find_implementations", null, () => FindImplementationsCoreAsync(symbolId, ct));
+
+    private async Task<string> FindImplementationsCoreAsync(Guid symbolId, CancellationToken ct)
     {
         if (symbolId == Guid.Empty) return "Error: symbolId required";
         _logger.LogInformation("MCP find_implementations symbol={Id}", symbolId);
@@ -296,7 +353,10 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> FindImplementations(Guid symbolId) => FindImplementationsAsync(symbolId);
 
     [McpServerTool, Description("Find callers (incoming Calls) for a method symbol")]
-    public async Task<string> FindCallersAsync(Guid symbolId, CancellationToken ct = default)
+    public Task<string> FindCallersAsync(Guid symbolId, CancellationToken ct = default)
+        => TrackAsync("find_callers", null, () => FindCallersCoreAsync(symbolId, ct));
+
+    private async Task<string> FindCallersCoreAsync(Guid symbolId, CancellationToken ct)
     {
         if (symbolId == Guid.Empty) return "Error: symbolId required";
         _logger.LogInformation("MCP find_callers symbol={Id}", symbolId);
@@ -317,7 +377,10 @@ public sealed class CodeSearchTools : IMcpToolHandler
     public Task<string> FindCallers(Guid symbolId) => FindCallersAsync(symbolId);
 
     [McpServerTool, Description("Find callees (outgoing Calls) for a method symbol")]
-    public async Task<string> FindCalleesAsync(Guid symbolId, CancellationToken ct = default)
+    public Task<string> FindCalleesAsync(Guid symbolId, CancellationToken ct = default)
+        => TrackAsync("find_callees", null, () => FindCalleesCoreAsync(symbolId, ct));
+
+    private async Task<string> FindCalleesCoreAsync(Guid symbolId, CancellationToken ct)
     {
         if (symbolId == Guid.Empty) return "Error: symbolId required";
         _logger.LogInformation("MCP find_callees symbol={Id}", symbolId);

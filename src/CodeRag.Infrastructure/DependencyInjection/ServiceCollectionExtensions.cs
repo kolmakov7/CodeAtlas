@@ -56,6 +56,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IActivityRepository, DapperActivityRepository>();
         services.AddSingleton<ISettingsRepository, DapperSettingsRepository>();
         services.AddSingleton<IStatisticsQueryService, DapperStatisticsQueryService>();
+        services.AddSingleton<IStatisticsRefresher, DapperStatisticsRefresher>();
+        services.AddSingleton<IMcpUsageRecorder, DapperMcpUsageRecorder>();
+        services.AddSingleton<IMcpUsageQueryService, DapperMcpUsageQueryService>();
         services.AddSingleton<IDbHealthProbe, DbHealthProbe>();
         services.AddSingleton<IStorageProbe, StorageProbe>();
 
@@ -117,6 +120,17 @@ public static class ServiceCollectionExtensions
             {
                 // Non-fatal: startup table creation is best-effort.
             }
+        }
+
+        // Ensure statistics snapshots exist (first start after migration / legacy DB). Non-fatal.
+        try
+        {
+            await provider.GetRequiredService<IStatisticsRefresher>().EnsureAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("StatisticsRefresher");
+            logger.LogWarning(ex, "Startup statistics refresh failed — statistics will fall back to live aggregation until the next refresh");
         }
     }
 }

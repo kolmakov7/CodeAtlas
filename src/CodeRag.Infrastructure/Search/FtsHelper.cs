@@ -62,6 +62,46 @@ public sealed class FtsHelper
             }).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Батч upsert: один connection + одна транзакция на все строки (вместо
+    /// отдельного соединения на чанк). DELETE всех chunk_id, затем INSERT всех.
+    /// </summary>
+    public async Task UpsertBatchAsync(IEnumerable<FtsUpsertRow> rows, CancellationToken ct = default)
+    {
+        var list = rows.ToList();
+        if (list.Count == 0) return;
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            foreach (var r in list)
+                await conn.ExecuteAsync("DELETE FROM chunks_fts WHERE chunk_id = @cid;", new { cid = r.ChunkId.ToString() }, tx).ConfigureAwait(false);
+            foreach (var r in list)
+            {
+                await conn.ExecuteAsync(
+                    @"INSERT INTO chunks_fts(chunk_id, repository_id, content, symbol_name, fqn, file_path, namespace, signature)
+                      VALUES (@cid, @rid, @content, @sym, @fqn, @fp, @ns, @sig);",
+                    new
+                    {
+                        cid = r.ChunkId.ToString(),
+                        rid = r.RepositoryId.ToString(),
+                        content = r.Content ?? "",
+                        sym = r.SymbolName ?? "",
+                        fqn = r.Fqn ?? "",
+                        fp = r.FilePath ?? "",
+                        ns = r.Namespace ?? "",
+                        sig = r.Signature ?? ""
+                    }, tx).ConfigureAwait(false);
+            }
+            tx.Commit();
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+    }
+
     public async Task DeleteAsync(Guid chunkId, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
@@ -191,3 +231,14 @@ public sealed class FtsHelper
 }
 
 public sealed record FtsResult(Guid ChunkId, Guid RepositoryId, double Rank);
+
+/// <summary>Строка для батч upsert в chunks_fts.</summary>
+public sealed record FtsUpsertRow(
+    Guid ChunkId,
+    Guid RepositoryId,
+    string Content,
+    string? SymbolName,
+    string? Fqn,
+    string? FilePath,
+    string? Namespace,
+    string? Signature);

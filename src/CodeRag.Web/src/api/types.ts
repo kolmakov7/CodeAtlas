@@ -88,6 +88,25 @@ export interface GlobalStatistics {
   languageBreakdown?: Record<string, number>;
 }
 
+export interface McpToolUsage {
+  tool: string;
+  total: number;
+  errors: number;
+}
+
+export interface McpDailyUsage {
+  day: string;
+  total: number;
+}
+
+export interface McpUsageStats {
+  totalCalls: number;
+  totalErrors: number;
+  days: number;
+  byTool: McpToolUsage[];
+  byDay: McpDailyUsage[];
+}
+
 export interface ActivityEntry {
   id: string;
   at: string;

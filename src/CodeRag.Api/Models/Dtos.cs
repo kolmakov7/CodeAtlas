@@ -97,7 +97,8 @@ public sealed record RepositoryStatisticsDto(
     int EmbeddingsFailed,
     string? IndexedCommit,
     string? CurrentCommit,
-    string Status);
+    string Status,
+    IReadOnlyDictionary<string, int>? LanguageBreakdown = null);
 
 public sealed record StorageDto(
     long SqliteSizeBytes,
@@ -115,7 +116,19 @@ public sealed record GlobalStatisticsDto(
     IReadOnlyList<EmbeddingDomainStatsDto> EmbeddingStats,
     int EmbeddingsFailed,
     IReadOnlyList<RepositoryStatisticsDto> Repositories,
-    StorageDto? Storage = null);
+    StorageDto? Storage = null,
+    IReadOnlyDictionary<string, int>? LanguageBreakdown = null);
+
+public sealed record McpToolUsageDto(string Tool, long Total, long Errors);
+
+public sealed record McpDailyUsageDto(string Day, long Total);
+
+public sealed record McpUsageStatsDto(
+    long TotalCalls,
+    long TotalErrors,
+    int Days,
+    IReadOnlyList<McpToolUsageDto> ByTool,
+    IReadOnlyList<McpDailyUsageDto> ByDay);
 
 public sealed record JobDto(
     Guid Id,

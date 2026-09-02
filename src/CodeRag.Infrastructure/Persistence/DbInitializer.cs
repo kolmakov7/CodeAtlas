@@ -67,6 +67,84 @@ public sealed class DbInitializer
                 throw;
             }
         }
+
+        // One-shot: legacy DBs keep vec0 tables inside the main file — move them to the separate vector DB.
+        await MigrateLegacyVecTablesAsync(conn, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Moves legacy vec0 tables (vec_chunks_code / vec_chunks_text) from the main DB file
+    /// to the separate vector database (coderag-vec.db), then drops the old tables.
+    /// Best-effort: a failure is logged, not fatal.
+    /// </summary>
+    private async Task MigrateLegacyVecTablesAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        if (!_factory.IsVecAvailable)
+        {
+            _logger.LogWarning("sqlite-vec extension unavailable — legacy vec tables cannot be moved to the separate vector DB");
+            return;
+        }
+
+        string[] legacyTables;
+        try
+        {
+            legacyTables = (await conn.QueryAsync<string>(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('vec_chunks_code','vec_chunks_text');").ConfigureAwait(false)).ToArray();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Legacy vec table scan failed");
+            return;
+        }
+        if (legacyTables.Length == 0) return;
+
+        try
+        {
+            await conn.ExecuteAsync("ATTACH DATABASE @path AS vecdb;", new { path = _factory.VecDbPath }).ConfigureAwait(false);
+            try
+            {
+                foreach (var table in legacyTables)
+                {
+                    var ddl = await conn.QuerySingleOrDefaultAsync<string>(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=@t;", new { t = table }).ConfigureAwait(false);
+                    if (string.IsNullOrEmpty(ddl)) continue;
+
+                    var mainCount = Convert.ToInt64(await conn.ExecuteScalarAsync("SELECT COUNT(*) FROM main." + table + ";").ConfigureAwait(false));
+                    long vecCount = 0;
+                    try { vecCount = Convert.ToInt64(await conn.ExecuteScalarAsync("SELECT COUNT(*) FROM vecdb." + table + ";").ConfigureAwait(false)); }
+                    catch { vecCount = 0; } // table not present in the vec DB
+
+                    if (vecCount == 0 && mainCount > 0)
+                    {
+                        // Recreate with identical DDL in the vec database, then copy rows (embedding comes back as BLOB).
+                        var newDdl = ddl.Replace($"CREATE VIRTUAL TABLE {table}", $"CREATE VIRTUAL TABLE vecdb.{table}", StringComparison.OrdinalIgnoreCase);
+                        await conn.ExecuteAsync(newDdl).ConfigureAwait(false);
+                        await conn.ExecuteAsync(
+                            $"INSERT INTO vecdb.{table} (chunk_id, embedding, repository_id) " +
+                            $"SELECT chunk_id, embedding, repository_id FROM main.{table};").ConfigureAwait(false);
+                        vecCount = Convert.ToInt64(await conn.ExecuteScalarAsync("SELECT COUNT(*) FROM vecdb." + table + ";").ConfigureAwait(false));
+                        _logger.LogInformation("Migrated {Count} rows from {Table} to the separate vector DB", mainCount, table);
+                    }
+
+                    if (vecCount >= mainCount)
+                    {
+                        await conn.ExecuteAsync("DROP TABLE main." + table + ";").ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Kept legacy {Table}: vec DB has {Vec} rows, main DB has {Main} rows", table, vecCount, mainCount);
+                    }
+                }
+            }
+            finally
+            {
+                await conn.ExecuteAsync("DETACH DATABASE vecdb;").ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to migrate legacy vec tables to the separate vector DB");
+        }
     }
 
     private static async Task EnsureMigrationsTableAsync(SqliteConnection conn, CancellationToken ct)

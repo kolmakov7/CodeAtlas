@@ -15,6 +15,7 @@ import type {
   ProxyConfig,
   CredentialInfo,
   ActivityEntry,
+  McpUsageStats,
 } from "./types";
 
 // --- helpers ---
@@ -25,6 +26,15 @@ export function useGlobalStatistics() {
   return useQuery({
     queryKey: ["statistics", "global"],
     queryFn: () => unwrap<GlobalStatistics>(apiClient.get("/statistics")),
+  });
+}
+
+// MCP tool-usage statistics
+export function useMcpUsage(days = 30) {
+  return useQuery({
+    queryKey: ["statistics", "mcp", days],
+    queryFn: () => unwrap<McpUsageStats>(apiClient.get("/statistics/mcp", { params: { days } })),
+    refetchInterval: 30_000,
   });
 }
 

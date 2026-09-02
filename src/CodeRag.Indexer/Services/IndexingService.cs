@@ -13,17 +13,20 @@ public sealed class IndexingService
     private readonly IndexingJobStore _jobStore;
     private readonly Dictionary<Domain.Enums.JobType, IIndexingJobHandler> _handlers;
     private readonly ILogger<IndexingService> _logger;
+    private readonly IStatisticsRefresher? _statsRefresher;
 
     public IndexingService(
         IRepositoryStore repoStore,
         IndexingJobStore jobStore,
         IEnumerable<IIndexingJobHandler> handlers,
-        ILogger<IndexingService> logger)
+        ILogger<IndexingService> logger,
+        IStatisticsRefresher? statsRefresher = null)
     {
         _repoStore = repoStore;
         _jobStore = jobStore;
         _handlers = handlers.ToDictionary(h => h.JobType);
         _logger = logger;
+        _statsRefresher = statsRefresher;
     }
 
     public async Task ExecuteAsync(IndexingJob job, CancellationToken ct)
@@ -39,12 +42,14 @@ public sealed class IndexingService
             job.MarkCompleted();
             await _jobStore.UpsertAsync(job, ct).ConfigureAwait(false);
             _logger.LogInformation("Job {JobId} completed", job.Id);
+            await RefreshStatisticsAsync(job.RepositoryId, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             job.MarkCancelled();
             await _jobStore.UpsertAsync(job, ct).ConfigureAwait(false);
             _logger.LogWarning("Job {JobId} cancelled", job.Id);
+            await RefreshStatisticsAsync(job.RepositoryId, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -61,7 +66,27 @@ public sealed class IndexingService
                 }
             }
             catch { }
+            await RefreshStatisticsAsync(job.RepositoryId, ct).ConfigureAwait(false);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Jobs change the index — refresh the per-repo + global statistics snapshots.
+    /// Best-effort: a refresh failure never fails the job itself.
+    /// </summary>
+    private async Task RefreshStatisticsAsync(Guid repositoryId, CancellationToken ct)
+    {
+        if (_statsRefresher is null) return;
+        try
+        {
+            await _statsRefresher.RefreshRepositoryAsync(repositoryId, ct).ConfigureAwait(false);
+            await _statsRefresher.RefreshGlobalAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Statistics refresh failed for repository {Repo}", repositoryId);
         }
     }
 }

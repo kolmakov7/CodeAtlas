@@ -1,7 +1,8 @@
 import { Link } from "react-router-dom";
-import { useGlobalStatistics, useRepositories, useJobs, useActivity, useDiagnostics, useRepositoryActions } from "@/api/hooks";
+import { useGlobalStatistics, useRepositories, useJobs, useActivity, useDiagnostics, useRepositoryActions, useMcpUsage } from "@/api/hooks";
 import { StatCard, SkeletonCard } from "@/components/StatCard";
 import { formatBytes, formatDate } from "@/utils/format";
+import { languageColor, languageText } from "@/utils/language";
 
 export default function Dashboard() {
   const statsQ = useGlobalStatistics();
@@ -9,6 +10,7 @@ export default function Dashboard() {
   const jobsQ = useJobs();
   const activityQ = useActivity(10);
   const diagQ = useDiagnostics();
+  const mcpQ = useMcpUsage(30);
   const { rebuildAll } = useRepositoryActions();
   const staleIndex = diagQ.data?.vectorIndex?.stale === true;
 
@@ -112,6 +114,77 @@ export default function Dashboard() {
             Vector: <strong>{formatBytes(s.storage?.vectorSizeBytes ?? 0)}</strong><br />
             Repos: <strong>{formatBytes(s.storage?.repositoriesSizeBytes ?? 0)}</strong>
           </div>
+        </div>
+      </div>
+
+      <div className="grid grid-2" style={{ marginTop: 16 }}>
+        {/* Languages (global breakdown by file count) */}
+        <div className="card">
+          <h3 style={{ marginBottom: 8 }}>Languages</h3>
+          {(() => {
+            const lb: Record<string, number> = (sRaw.languageBreakdown ?? sRaw.LanguageBreakdown) ?? {};
+            const entries = Object.entries(lb).filter(([, v]) => Number(v) > 0).sort((a, b) => b[1] - a[1]);
+            const total = entries.reduce((a, [, v]) => a + v, 0);
+            if (total === 0) return <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No language data yet.</div>;
+            return (
+              <div>
+                <div style={{ display: "flex", gap: 8, alignItems: "stretch", height: 26, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }}>
+                  {entries.map(([lang, cnt]) => (
+                    <div key={lang} title={`${lang}: ${cnt} files (${((cnt / total) * 100).toFixed(1)}%)`}
+                      style={{ width: `${(cnt / total) * 100}%`, background: languageColor(lang), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: languageText(lang) }}>
+                      {cnt / total > 0.08 ? lang : ""}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 10, fontSize: 12 }}>
+                  {entries.map(([lang, cnt]) => (
+                    <span key={lang} style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--text-muted)" }}>
+                      <span style={{ width: 10, height: 10, borderRadius: 2, background: languageColor(lang), display: "inline-block" }} />
+                      <strong style={{ color: "var(--text)" }}>{lang}</strong> {((cnt / total) * 100).toFixed(1)}%
+                    </span>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* MCP tool usage */}
+        <div className="card">
+          <h3 style={{ marginBottom: 8 }}>MCP tool usage <span style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 400 }}>(last {mcpQ.data?.days ?? 30} days)</span></h3>
+          {mcpQ.isLoading ? <div className="skeleton" style={{ height: 120 }} /> : mcpQ.isError ? (
+            <div style={{ color: "var(--text-muted)", fontSize: 14 }}>Failed to load MCP usage.</div>
+          ) : (mcpQ.data?.totalCalls ?? 0) === 0 ? (
+            <div style={{ color: "var(--text-muted)", fontSize: 14 }}>No MCP tool calls recorded yet.</div>
+          ) : (
+            <div>
+              <div style={{ display: "flex", gap: 16, fontSize: 13, marginBottom: 10 }}>
+                <span>Total: <strong>{mcpQ.data!.totalCalls.toLocaleString()}</strong></span>
+                <span style={{ color: "var(--danger)" }}>Errors: <strong>{mcpQ.data!.totalErrors.toLocaleString()}</strong></span>
+              </div>
+              {/* daily bar chart */}
+              {mcpQ.data!.byDay.length > 0 && (() => {
+                const max = Math.max(...mcpQ.data!.byDay.map((d) => d.total), 1);
+                return (
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 64, marginBottom: 8 }}>
+                    {mcpQ.data!.byDay.map((d) => (
+                      <div key={d.day} title={`${d.day}: ${d.total} calls`}
+                        style={{ flex: 1, height: `${Math.max((d.total / max) * 100, d.total > 0 ? 6 : 2)}%`, background: d.total > 0 ? "var(--accent)" : "var(--border)", borderRadius: 2, minWidth: 3 }} />
+                    ))}
+                  </div>
+                );
+              })()}
+              {/* per-tool */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 120, overflowY: "auto" }}>
+                {mcpQ.data!.byTool.map((t) => (
+                  <div key={t.tool} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                    <span style={{ color: "var(--text-muted)" }}>{t.tool}</span>
+                    <span style={{ fontVariantNumeric: "tabular-nums" }}>{t.total.toLocaleString()}{t.errors > 0 ? <span style={{ color: "var(--danger)" }}> · {t.errors} err</span> : null}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

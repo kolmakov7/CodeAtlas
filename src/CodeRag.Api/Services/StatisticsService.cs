@@ -6,7 +6,13 @@ namespace CodeRag.Api.Services;
 public sealed class StatisticsService
 {
     private readonly IStatisticsQueryService _query;
-    public StatisticsService(IStatisticsQueryService query) => _query = query;
+    private readonly IMcpUsageQueryService? _mcp;
+
+    public StatisticsService(IStatisticsQueryService query, IMcpUsageQueryService? mcp = null)
+    {
+        _query = query;
+        _mcp = mcp;
+    }
 
     public async Task<RepositoryStatisticsDto> GetRepositoryStatisticsAsync(Guid repositoryId, CancellationToken ct = default)
     {
@@ -22,7 +28,20 @@ public sealed class StatisticsService
         var storage = new StorageDto(storageSizes.SqliteBytes, storageSizes.VectorBytes, storageSizes.ReposBytes);
         return new GlobalStatisticsDto(g.RepositoryCount, g.FileCount, g.SymbolCount, g.ChunkCount,
             g.RelationCount, MapRelations(g.RelationsByType), g.JobCount,
-            g.EmbeddingStats.Select(MapDomain).ToList(), g.EmbeddingsFailed, repoStats, storage);
+            g.EmbeddingStats.Select(MapDomain).ToList(), g.EmbeddingsFailed, repoStats, storage, g.LanguageBreakdown);
+    }
+
+    /// <summary>MCP tool-usage stats (aggregated from mcp_tool_usage).</summary>
+    public async Task<McpUsageStatsDto> GetMcpUsageStatsAsync(int days = 30, CancellationToken ct = default)
+    {
+        days = Math.Clamp(days, 1, 365);
+        if (_mcp is null)
+            return new McpUsageStatsDto(0, 0, days, Array.Empty<McpToolUsageDto>(), Array.Empty<McpDailyUsageDto>());
+        var s = await _mcp.GetStatsAsync(days, ct).ConfigureAwait(false);
+        return new McpUsageStatsDto(
+            s.TotalCalls, s.TotalErrors, s.Days,
+            s.ByTool.Select(t => new McpToolUsageDto(t.Tool, t.Total, t.Errors)).ToList(),
+            s.ByDay.Select(d => new McpDailyUsageDto(d.Day, d.Total)).ToList());
     }
 
     private static EmbeddingDomainStatsDto MapDomain(CodeRag.Domain.Ports.EmbeddingDomainStats d) => new(d.Domain, d.Indexed, d.Pending);
@@ -34,5 +53,5 @@ public sealed class StatisticsService
         s.RepositoryId, s.Name, s.FileCount, s.SymbolCount, s.ChunkCount, s.VectorCount,
         s.RelationCount, MapRelations(s.RelationsByType),
         s.EmbeddingStats.Select(d => new EmbeddingDomainStatsDto(d.Domain, d.Indexed, d.Pending)).ToList(),
-        s.EmbeddingsFailed, s.IndexedCommit, s.CurrentCommit, s.Status);
+        s.EmbeddingsFailed, s.IndexedCommit, s.CurrentCommit, s.Status, s.LanguageBreakdown);
 }

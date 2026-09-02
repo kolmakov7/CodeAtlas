@@ -13,7 +13,9 @@ namespace CodeRag.Infrastructure.Persistence;
 public sealed class SqliteConnectionFactory : IDbConnectionFactory
 {
     private readonly string _connectionString;
+    private readonly string _vecConnectionString;
     private readonly string _dbPath;
+    private readonly string _vecDbPath;
     private readonly ILogger<SqliteConnectionFactory> _logger;
     private readonly string? _explicitVecPath;
     private int _vecAttempted; // 0 = not attempted, 1 = attempted - Interlocked
@@ -26,6 +28,8 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
         if (string.IsNullOrWhiteSpace(dbPath)) throw new ArgumentException("dbPath must not be empty.", nameof(dbPath));
         _dbPath = Path.GetFullPath(dbPath);
         _connectionString = $"Data Source={_dbPath}";
+        _vecDbPath = ResolveVecDbPath(_dbPath);
+        _vecConnectionString = $"Data Source={_vecDbPath}";
         _logger = logger;
         _explicitVecPath = string.IsNullOrWhiteSpace(vecExtensionPath) ? null : vecExtensionPath;
     }
@@ -34,12 +38,37 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
     public string ConnectionString => _connectionString;
     public bool IsVecAvailable => _vecAvailable;
 
+    /// <summary>Separate vector database: vec0 tables live in &lt;db&gt;-vec.db next to the main DB.</summary>
+    public string VecDbPath => _vecDbPath;
+
+    private static string ResolveVecDbPath(string dbPath)
+    {
+        var dir = Path.GetDirectoryName(dbPath) ?? "";
+        var name = Path.GetFileNameWithoutExtension(dbPath);
+        if (string.IsNullOrEmpty(name)) name = Path.GetFileName(dbPath);
+        return Path.Combine(dir, name + "-vec.db");
+    }
+
     /// <summary>
     /// Создает открытое соединение с настроенными PRAGMA и попыткой загрузки vec0.
     /// </summary>
     public async Task<SqliteConnection> CreateAsync(CancellationToken ct = default)
     {
         var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct).ConfigureAwait(false);
+
+        await ConfigureConnectionAsync(conn, ct).ConfigureAwait(false);
+
+        return conn;
+    }
+
+    /// <summary>
+    /// Opens a connection to the separate vector database (vec0 tables) with the same PRAGMAs.
+    /// </summary>
+    public async Task<SqliteConnection> CreateVecAsync(CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(_vecDbPath)!);
+        var conn = new SqliteConnection(_vecConnectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
         await ConfigureConnectionAsync(conn, ct).ConfigureAwait(false);

@@ -35,4 +35,12 @@ public sealed class StatisticsController : ControllerBase
         var s = await _stats.GetGlobalStatisticsAsync(ct).ConfigureAwait(false);
         return Ok(s);
     }
+
+    [HttpGet("statistics/mcp")]
+    public async Task<IActionResult> McpUsage([FromQuery] int days = 30, CancellationToken ct = default)
+    {
+        _logger.LogInformation("GET /api/statistics/mcp days={Days}", days);
+        var s = await _stats.GetMcpUsageStatsAsync(days, ct).ConfigureAwait(false);
+        return Ok(s);
+    }
 }

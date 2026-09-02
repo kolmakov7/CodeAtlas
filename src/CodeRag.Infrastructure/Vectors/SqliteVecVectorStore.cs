@@ -90,7 +90,8 @@ public sealed class SqliteVecVectorStore : IVectorStore
                 return;
             }
 
-            using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+            // vec0 tables live in the separate vector database.
+            using var conn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
 
             // Check if the table exists with matching dim.
             // A mismatch makes the index STALE: we do NOT drop it silently — the warning is surfaced
@@ -203,7 +204,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
             return;
         }
 
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        // vec0 rows go to the separate vector DB; vector_entries metadata stays in the main DB.
+        // Cross-file atomicity is not guaranteed (acceptable: integrity checks reconcile orphans).
+        using var conn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
         using var tx = conn.BeginTransaction();
 
         try
@@ -266,15 +269,6 @@ public sealed class SqliteVecVectorStore : IVectorStore
                         new { chunkId = e.ChunkId.ToString(), emb = blob, repoId = e.RepositoryId.ToString() },
                         transaction: tx);
                 }
-
-                // Upsert metadata (scoped to this domain)
-                var now = DateTimeOffset.UtcNow.ToString("o");
-                await conn.ExecuteAsync(
-                    @"INSERT INTO vector_entries(chunk_id, vector_id, model, dim, context_length, domain, updated_at)
-                      VALUES (@chunkId, @vectorId, @model, @dim, @ctx, @domain, @now)
-                      ON CONFLICT(chunk_id) DO UPDATE SET vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, updated_at=excluded.updated_at;",
-                    new { chunkId = e.ChunkId.ToString(), vectorId = e.ChunkId.ToString(), model = e.Model, dim = e.Dim, ctx = (object?)e.ContextLength ?? DBNull.Value, domain = DomainToken, now },
-                    transaction: tx);
             }
 
             tx.Commit();
@@ -285,6 +279,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
             _logger.LogError(ex, "Failed to upsert vectors ({Domain}), rolling back", _domain.ToText());
             throw;
         }
+
+        // Metadata (main DB), best-effort: a failure leaves orphan vec rows that integrity checks reconcile.
+        await UpsertVectorEntriesAsync(list, ct).ConfigureAwait(false);
     }
 
     public async Task DeleteByChunkIdsAsync(IEnumerable<Guid> chunkIds, CancellationToken ct = default)
@@ -306,21 +303,26 @@ public sealed class SqliteVecVectorStore : IVectorStore
             return;
         }
 
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        using var tx = conn.BeginTransaction();
+        // vec0 rows (separate vec DB) + metadata (main DB) — two transactions.
+        using var vecConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
+        using var metaConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        using var tx = vecConn.BeginTransaction();
+        using var metaTx = metaConn.BeginTransaction();
         try
         {
             foreach (var id in list)
             {
                 var sid = id.ToString();
-                await conn.ExecuteAsync($"DELETE FROM {Table} WHERE chunk_id = @id;", new { id = sid }, transaction: tx);
-                await conn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND chunk_id = @id;", new { domain = DomainToken, id = sid }, transaction: tx);
+                await vecConn.ExecuteAsync($"DELETE FROM {Table} WHERE chunk_id = @id;", new { id = sid }, transaction: tx);
+                await metaConn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND chunk_id = @id;", new { domain = DomainToken, id = sid }, transaction: metaTx);
             }
             tx.Commit();
+            metaTx.Commit();
         }
         catch (Exception ex)
         {
-            tx.Rollback();
+            try { tx.Rollback(); } catch { }
+            try { metaTx.Rollback(); } catch { }
             _logger.LogError(ex, "Failed to delete vectors ({Domain})", _domain.ToText());
             throw;
         }
@@ -332,27 +334,31 @@ public sealed class SqliteVecVectorStore : IVectorStore
             await _fallback.DeleteByRepositoryAsync(repositoryId, ct).ConfigureAwait(false);
 
         var rid = repositoryId.ToString();
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        using var tx = conn.BeginTransaction();
+        using var vecConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
+        using var metaConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        using var tx = vecConn.BeginTransaction();
+        using var metaTx = metaConn.BeginTransaction();
         try
         {
             // vec0 virtual table has no FK cascade — delete explicitly (no-op if table missing)
             try
             {
-                await conn.ExecuteAsync($"DELETE FROM {Table} WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
+                await vecConn.ExecuteAsync($"DELETE FROM {Table} WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "{Table} delete-by-repository skipped (table not present)", Table);
             }
-            await conn.ExecuteAsync(
+            await metaConn.ExecuteAsync(
                 @"DELETE FROM vector_entries WHERE domain=@domain AND chunk_id IN (SELECT id FROM chunks WHERE repository_id = @rid);",
-                new { domain = DomainToken, rid }, transaction: tx).ConfigureAwait(false);
+                new { domain = DomainToken, rid }, transaction: metaTx).ConfigureAwait(false);
             tx.Commit();
+            metaTx.Commit();
         }
         catch (Exception ex)
         {
-            tx.Rollback();
+            try { tx.Rollback(); } catch { }
+            try { metaTx.Rollback(); } catch { }
             _logger.LogError(ex, "Failed to delete vectors for repository {Repo} ({Domain})", repositoryId, _domain.ToText());
             throw;
         }
@@ -371,15 +377,18 @@ public sealed class SqliteVecVectorStore : IVectorStore
             return hadStale;
         }
 
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        var tableDim = await GetVecTableDimAsync(conn, Table, ct).ConfigureAwait(false);
+        using var vecConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
+        var tableDim = await GetVecTableDimAsync(vecConn, Table, ct).ConfigureAwait(false);
         if (tableDim is null || tableDim.Value == expectedDim)
             return false;
 
-        using var tx = conn.BeginTransaction();
-        await conn.ExecuteAsync($"DROP TABLE {Table};", transaction: tx).ConfigureAwait(false);
-        await conn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain;", new { domain = DomainToken }, transaction: tx).ConfigureAwait(false);
+        using var metaConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        using var tx = vecConn.BeginTransaction();
+        using var metaTx = metaConn.BeginTransaction();
+        await vecConn.ExecuteAsync($"DROP TABLE {Table};", transaction: tx).ConfigureAwait(false);
+        await metaConn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain;", new { domain = DomainToken }, transaction: metaTx).ConfigureAwait(false);
         tx.Commit();
+        metaTx.Commit();
         _tableStale = false;
         _staleWarned = false;
         _initialized = false;
@@ -430,7 +439,8 @@ public sealed class SqliteVecVectorStore : IVectorStore
             return await _fallback.SearchAsync(queryVector, k, filter, ct).ConfigureAwait(false);
         }
 
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        // KNN runs against the separate vector database.
+        using var conn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
 
         var json = JsonSerializer.Serialize(queryVector);
 
@@ -470,7 +480,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
                 }
                 catch
                 {
-                    var chunkRepoMap = await LoadChunkRepoMapAsync(conn, rows.Select(r => r.ChunkId).ToList(), ct);
+                    // chunks live in the main DB — query there.
+                    using var mainConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+                    var chunkRepoMap = await LoadChunkRepoMapAsync(mainConn, rows.Select(r => r.ChunkId).ToList(), ct);
                     var filtered2 = rows.Where(r => chunkRepoMap.TryGetValue(r.ChunkId, out var repo) && repoSet.Contains(repo.ToString()))
                         .Take(k)
                         .Select(r => new ScoredChunk(r.ChunkId, CosineSimilarity(r.Distance), r.Distance))

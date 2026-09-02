@@ -192,27 +192,37 @@ ON CONFLICT(id) DO UPDATE SET
 
     public async Task DeleteCascadeAsync(Guid repositoryId, CancellationToken ct = default)
     {
+        var rid = repositoryId.ToString();
+        // vec0 tables live in the separate vector DB — clean them there.
+        using var vecConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
+        using var vecTx = vecConn.BeginTransaction();
+        try
+        {
+            foreach (var table in new[] { "vec_chunks_code", "vec_chunks_text", "vec_chunks" })
+            {
+                try
+                {
+                    await vecConn.ExecuteAsync($"DELETE FROM {table} WHERE repository_id = @rid;", new { rid }, transaction: vecTx).ConfigureAwait(false);
+                }
+                catch { /* ignore if table not exists or aux column missing */ }
+            }
+            vecTx.Commit();
+        }
+        catch
+        {
+            try { vecTx.Rollback(); } catch { }
+        }
+
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         using var tx = conn.BeginTransaction();
         try
         {
-            var rid = repositoryId.ToString();
             // Explicit cleanup per storage.md §5 in transaction.
-            // sqlite-vec vec0 tables have no FK cascade — each domain table must be cleaned explicitly.
             await conn.ExecuteAsync("DELETE FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id = @rid);", new { rid }, transaction: tx).ConfigureAwait(false);
             await conn.ExecuteAsync("DELETE FROM chunks_fts WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             // Repo-scoped job errors / activity would otherwise survive with repository_id=NULL (SET NULL)
             await conn.ExecuteAsync("DELETE FROM indexing_errors WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             await conn.ExecuteAsync("DELETE FROM activity_log WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-            // Dual-domain vector tables (code / text) plus legacy single-domain table
-            foreach (var table in new[] { "vec_chunks_code", "vec_chunks_text", "vec_chunks" })
-            {
-                try
-                {
-                    await conn.ExecuteAsync($"DELETE FROM {table} WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-                }
-                catch { /* ignore if table not exists or aux column missing */ }
-            }
 
             await conn.ExecuteAsync("DELETE FROM repositories WHERE id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             tx.Commit();
@@ -227,12 +237,18 @@ ON CONFLICT(id) DO UPDATE SET
         // VACUUM (outside transaction) rewrites the DB file to minimal size.
         try
         {
-            // Ensure WAL is checkpointed before VACUUM
             using var vacConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
             await vacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
             await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
         }
         catch { /* best-effort, dashboard will still show correct logical counts */ }
+        try
+        {
+            using var vecVacConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
+            await vecVacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
+            await vecVacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
+        }
+        catch { /* best-effort */ }
     }
 
     public async Task<string?> GetLocalPathAsync(Guid id, CancellationToken ct = default)

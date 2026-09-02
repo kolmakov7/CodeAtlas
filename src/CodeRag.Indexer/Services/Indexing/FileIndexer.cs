@@ -178,12 +178,7 @@ internal sealed class FileIndexer
         if (analyzer is null)
         {
             var fallbackChunks = CreateFallbackChunks(repo.Id, fileId, filePath, language, domain, content, budgetMaxChars, budgetOverlapChars);
-            foreach (var ch in fallbackChunks)
-            {
-                await _chunkStore.UpsertAsync(ch, ct).ConfigureAwait(false);
-                await _fts.UpsertAsync(ch.Id, repo.Id, ch.Source, null, null, filePath, null, null, ct).ConfigureAwait(false);
-                if (ShouldEmbed(ch)) pendingChunks.Enqueue(ch);
-            }
+            await PersistChunksAsync(fallbackChunks.Select(ch => (Chunk: ch, (string?)null)), repo.Id, filePath, pendingChunks, ct).ConfigureAwait(false);
             return;
         }
 
@@ -192,12 +187,11 @@ internal sealed class FileIndexer
             var ctx = new FileContext(repo.Id, null, filePath, content, language ?? analyzer.Language, budgetMaxChars > 0 ? budgetMaxChars : _options.CurrentValue.MaxChunkChars);
             var result = await analyzer.AnalyzeAsync(ctx, ct).ConfigureAwait(false);
 
-            foreach (var s in result.Symbols)
-            {
-                var sym = MapSymbol(s, repo.Id, fileId);
-                await _symbolStore.UpsertAsync(sym, ct).ConfigureAwait(false);
-            }
+            var symbols = result.Symbols.Select(s => MapSymbol(s, repo.Id, fileId)).ToList();
+            if (symbols.Count > 0)
+                await _symbolStore.UpsertBatchAsync(symbols, ct).ConfigureAwait(false);
 
+            var allChunks = new List<(Domain.Entities.Chunk Chunk, string? SymbolName)>();
             foreach (var ac in result.Chunks)
             {
                 var symName = ac.SymbolId.HasValue ? result.Symbols.FirstOrDefault(s => s.Id == ac.SymbolId.Value)?.Name : null;
@@ -217,12 +211,9 @@ internal sealed class FileIndexer
                     chunksToStore.Add(domainChunk);
                 }
                 foreach (var domainChunk in chunksToStore)
-                {
-                    await _chunkStore.UpsertAsync(domainChunk, ct).ConfigureAwait(false);
-                    await _fts.UpsertAsync(domainChunk.Id, repo.Id, domainChunk.Source, symName, null, filePath, null, null, ct).ConfigureAwait(false);
-                    if (ShouldEmbed(domainChunk)) pendingChunks.Enqueue(domainChunk);
-                }
+                    allChunks.Add((domainChunk, symName));
             }
+            await PersistChunksAsync(allChunks, repo.Id, filePath, pendingChunks, ct).ConfigureAwait(false);
 
             if (language != SupportedLanguages.CSharp && result.Relations.Count > 0)
             {
@@ -240,12 +231,7 @@ internal sealed class FileIndexer
             _logger.LogWarning(ex, "Analyzer failed for {Path} lang={Lang}", filePath, language);
             await LogErrorAsync(repo.Id, filePath, ex.Message, ct).ConfigureAwait(false);
             var fallbackChunks = CreateFallbackChunks(repo.Id, fileId, filePath, language, domain, content, budgetMaxChars, budgetOverlapChars);
-            foreach (var ch in fallbackChunks)
-            {
-                await _chunkStore.UpsertAsync(ch, ct).ConfigureAwait(false);
-                await _fts.UpsertAsync(ch.Id, repo.Id, ch.Source, null, null, filePath, null, null, ct).ConfigureAwait(false);
-                if (ShouldEmbed(ch)) pendingChunks.Enqueue(ch);
-            }
+            await PersistChunksAsync(fallbackChunks.Select(ch => (Chunk: ch, (string?)null)), repo.Id, filePath, pendingChunks, ct).ConfigureAwait(false);
         }
     }
 
@@ -284,6 +270,26 @@ internal sealed class FileIndexer
         if (!ch.NeedsEmbedding(provider.Model, provider.ConfigHash)) return false;
         var minChars = _options.CurrentValue.MinEmbeddingChars;
         return ch.Source.Length >= minChars;
+    }
+
+    /// <summary>
+    /// Батч-запись чанков файла: chunks + FTS в одной транзакции на каждый
+    /// (вместо отдельного соединения на запись). Затем очередь на эмбеддинг.
+    /// </summary>
+    private async Task PersistChunksAsync(
+        IEnumerable<(Domain.Entities.Chunk Chunk, string? SymbolName)> items,
+        Guid repoId, string filePath,
+        ConcurrentQueue<Domain.Entities.Chunk> pendingChunks,
+        CancellationToken ct)
+    {
+        var list = items.ToList();
+        if (list.Count == 0) return;
+        var chunks = list.Select(i => i.Chunk).ToList();
+        await _chunkStore.UpsertBatchAsync(chunks, ct).ConfigureAwait(false);
+        var ftsRows = list.Select(i => new FtsUpsertRow(i.Chunk.Id, repoId, i.Chunk.Source, i.SymbolName, null, filePath, null, null));
+        await _fts.UpsertBatchAsync(ftsRows, ct).ConfigureAwait(false);
+        foreach (var ch in chunks)
+            if (ShouldEmbed(ch)) pendingChunks.Enqueue(ch);
     }
 
     private static string MakeCommentHeader(string filePath, string? language, string? symbolName)

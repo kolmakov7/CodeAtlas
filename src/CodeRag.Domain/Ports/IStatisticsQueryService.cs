@@ -22,7 +22,8 @@ public sealed record RepositoryStatistics(
     int EmbeddingsFailed,
     string? IndexedCommit,
     string? CurrentCommit,
-    string Status);
+    string Status,
+    IReadOnlyDictionary<string, int>? LanguageBreakdown = null);
 
 public sealed record GlobalStatistics(
     int RepositoryCount,
@@ -34,7 +35,8 @@ public sealed record GlobalStatistics(
     int JobCount,
     IReadOnlyList<EmbeddingDomainStats> EmbeddingStats,
     int EmbeddingsFailed,
-    IReadOnlyList<RepositoryStatistics> Repositories);
+    IReadOnlyList<RepositoryStatistics> Repositories,
+    IReadOnlyDictionary<string, int>? LanguageBreakdown = null);
 
 public sealed record StorageSizes(long SqliteBytes, long VectorBytes, long ReposBytes);
 
