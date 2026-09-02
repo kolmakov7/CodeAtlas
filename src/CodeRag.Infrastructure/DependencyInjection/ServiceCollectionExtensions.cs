@@ -43,15 +43,10 @@ public static class ServiceCollectionExtensions
             return new DbInitializer(concrete, logger);
         });
 
-        // Stores — register both Domain ports and legacy Infrastructure proxies
-        services.AddSingleton<CodeRag.Domain.Ports.IRepositoryStore, RepositoryStore>();
-        services.AddSingleton<CodeRag.Infrastructure.Stores.IRepositoryStore, RepositoryStore>(sp => (RepositoryStore)sp.GetRequiredService<CodeRag.Domain.Ports.IRepositoryStore>());
-        services.AddSingleton<CodeRag.Domain.Ports.IFileStore, FileStore>();
-        services.AddSingleton<CodeRag.Infrastructure.Stores.IFileStore, FileStore>(sp => (FileStore)sp.GetRequiredService<CodeRag.Domain.Ports.IFileStore>());
-        services.AddSingleton<CodeRag.Domain.Ports.ISymbolStore, SymbolStore>();
-        services.AddSingleton<CodeRag.Infrastructure.Stores.ISymbolStore, SymbolStore>(sp => (SymbolStore)sp.GetRequiredService<CodeRag.Domain.Ports.ISymbolStore>());
-        services.AddSingleton<CodeRag.Domain.Ports.IChunkStore, ChunkStore>();
-        services.AddSingleton<CodeRag.Infrastructure.Stores.IChunkStore, ChunkStore>(sp => (ChunkStore)sp.GetRequiredService<CodeRag.Domain.Ports.IChunkStore>());
+        services.AddSingleton<IRepositoryStore, RepositoryStore>();
+        services.AddSingleton<IFileStore, FileStore>();
+        services.AddSingleton<ISymbolStore, SymbolStore>();
+        services.AddSingleton<IChunkStore, ChunkStore>();
         services.AddSingleton<CodeRag.Domain.Ports.IRelationStore, RelationStore>();
         services.AddSingleton<CodeRag.Domain.Ports.IRepositoryGroupStore, RepositoryGroupStore>();
         services.AddSingleton<CodeRag.Analyzers.Abstractions.ISymbolCatalog, DapperSymbolCatalog>();

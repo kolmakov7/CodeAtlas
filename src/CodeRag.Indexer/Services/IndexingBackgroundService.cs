@@ -1,6 +1,7 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Stores;
+using CodeRag.Domain.Ports;
+using CodeRag.Git;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -18,7 +19,6 @@ public sealed class IndexingBackgroundService : BackgroundService
     private readonly IndexingService _indexingService;
     private readonly IRepositoryStore _repoStore;
     private readonly IndexingJobStore _jobStore;
-    private readonly IGitService _git;
     private readonly ILogger<IndexingBackgroundService> _logger;
     private readonly IOptionsMonitor<IndexerOptions> _optionsMonitor;
     private IndexerOptions Opts => _optionsMonitor.CurrentValue;
@@ -28,7 +28,6 @@ public sealed class IndexingBackgroundService : BackgroundService
         IndexingService indexingService,
         IRepositoryStore repoStore,
         IndexingJobStore jobStore,
-        IGitService git,
         IOptionsMonitor<IndexerOptions> options,
         ILogger<IndexingBackgroundService> logger)
     {
@@ -36,7 +35,6 @@ public sealed class IndexingBackgroundService : BackgroundService
         _indexingService = indexingService;
         _repoStore = repoStore;
         _jobStore = jobStore;
-        _git = git;
         _optionsMonitor = options;
         _logger = logger;
     }

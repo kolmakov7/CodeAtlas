@@ -3,11 +3,13 @@ using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Exceptions;
 using CodeRag.Domain.Ports;
+using CodeRag.Git;
 using CodeRag.Git.Helpers;
 using CodeRag.Git.Services;
 using CodeRag.Git.Stores;
 using CodeRag.Indexer;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace CodeRag.Api.Controllers;
 
@@ -22,15 +24,14 @@ public sealed class RepositoriesController : ControllerBase
     private readonly ILogger<RepositoriesController> _logger;
     private readonly string _reposRoot;
 
-    public RepositoriesController(IRepositoryService repoService, IRepositoryStore repoStore, IRepositoryGroupStore groupStore, IJobRunner jobRunner, ILogger<RepositoriesController> logger, CodeRag.Infrastructure.Persistence.SqliteConnectionFactory factory)
+    public RepositoriesController(IRepositoryService repoService, IRepositoryStore repoStore, IRepositoryGroupStore groupStore, IJobRunner jobRunner, ILogger<RepositoriesController> logger, IOptions<GitOptions> gitOptions)
     {
         _repoService = repoService;
         _repoStore = repoStore;
         _groupStore = groupStore;
         _jobRunner = jobRunner;
         _logger = logger;
-        var dataDir = Path.GetDirectoryName(factory.DbPath) ?? "/data";
-        _reposRoot = Path.Combine(dataDir, "repos");
+        _reposRoot = gitOptions.Value.ReposRoot;
     }
 
     [HttpPost("validate")]
@@ -38,18 +39,7 @@ public sealed class RepositoriesController : ControllerBase
     {
         if (req is null) return Problem(title: "Body required", statusCode: 400);
         if (string.IsNullOrWhiteSpace(req.GitUrl)) return Problem(title: "GitUrl required", statusCode: 400);
-        var gid = req.GroupId ?? req.ProxyId ?? req.CredentialId;
-        if (!gid.HasValue && (req.ProxyId.HasValue || req.CredentialId.HasValue))
-        {
-            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
-            gid = def?.Id;
-        }
-        else if (!gid.HasValue)
-        {
-            gid = req.GroupId;
-        }
-        // If still null, use passed GroupId directly
-        if (!gid.HasValue) gid = req.GroupId;
+        var gid = await ResolveGroupIdAsync(req.GroupId, req.ProxyId, req.CredentialId, ct).ConfigureAwait(false);
         var (available, error) = await _repoService.ValidateAsync(req.GitUrl, gid, ct).ConfigureAwait(false);
         if (!available)
             return Ok(new ValidateRepositoryResponse(false, error));
@@ -60,13 +50,7 @@ public sealed class RepositoriesController : ControllerBase
     public async Task<IActionResult> GetBranches([FromQuery] string gitUrl, [FromQuery] Guid? groupId, [FromQuery] Guid? proxyId, [FromQuery] Guid? credentialId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(gitUrl)) return Problem(title: "gitUrl query required", statusCode: 400);
-        var gid = groupId ?? proxyId ?? credentialId;
-        if (!gid.HasValue && (proxyId.HasValue || credentialId.HasValue))
-        {
-            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
-            gid = def?.Id;
-        }
-        if (!gid.HasValue) gid = groupId;
+        var gid = await ResolveGroupIdAsync(groupId, proxyId, credentialId, ct).ConfigureAwait(false);
         try
         {
             var branches = await _repoService.GetBranchesAsync(gitUrl, gid, ct).ConfigureAwait(false);
@@ -83,13 +67,7 @@ public sealed class RepositoriesController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(gitUrl)) return Problem(title: "gitUrl required", statusCode: 400);
         if (string.IsNullOrWhiteSpace(branch)) return Problem(title: "branch required", statusCode: 400);
-        var gid = groupId ?? proxyId ?? credentialId;
-        if (!gid.HasValue && (proxyId.HasValue || credentialId.HasValue))
-        {
-            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
-            gid = def?.Id;
-        }
-        if (!gid.HasValue) gid = groupId;
+        var gid = await ResolveGroupIdAsync(groupId, proxyId, credentialId, ct).ConfigureAwait(false);
         try
         {
             var dirs = await _repoService.GetRootDirectoriesAsync(gitUrl, branch, gid, ct).ConfigureAwait(false);
@@ -152,19 +130,11 @@ public sealed class RepositoriesController : ControllerBase
             localPath = Path.Combine(_reposRoot, slug);
         }
 
- try
-            {
-                _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}' branch='{Branch}' filter={Filter}", req.Name, MaskUrl(req.GitUrl), req.Branch, req.DirectoryFilterEnabled);
-                var gid = req.GroupId ?? req.ProxyId ?? req.CredentialId; // fallback for legacy clients
-                // If legacy proxy/cred supplied without group, try to resolve group that matches; otherwise use groupId directly
-                Guid? effectiveGroup = req.GroupId;
-                if (!effectiveGroup.HasValue && (req.ProxyId.HasValue || req.CredentialId.HasValue))
-                {
-                    // Try to find or create implicit group? For now use Default
-                    var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
-                    effectiveGroup = def?.Id;
-                }
-                var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, effectiveGroup, req.SyncIntervalSeconds, req.DirectoryFilterEnabled, req.AllowedDirectories, ct).ConfigureAwait(false);
+        try
+        {
+            _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}' branch='{Branch}' filter={Filter}", req.Name, MaskUrl(req.GitUrl), req.Branch, req.DirectoryFilterEnabled);
+            var effectiveGroup = await ResolveGroupIdAsync(req.GroupId, req.ProxyId, req.CredentialId, ct).ConfigureAwait(false);
+            var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, effectiveGroup, req.SyncIntervalSeconds, req.DirectoryFilterEnabled, req.AllowedDirectories, ct).ConfigureAwait(false);
                 
                 // If repo creation resulted in Error status (e.g., ls-remote failed), don't enqueue jobs and return error
                 if (repo.Status == RepositoryStatus.Error)
@@ -383,12 +353,16 @@ public sealed class RepositoriesController : ControllerBase
             r.DirectoryFilterEnabled, r.AllowedDirectories.ToArray());
     }
 
-    private static RepositoryDto Map(Repository r) => new(
-        r.Id, r.Name, r.GitUrl.Value, r.Branch, r.LocalPath.Value,
-        r.CurrentCommit, r.IndexedCommit, r.Status.ToString(), r.Enabled,
-        r.GroupId, r.ProxyId, r.CredentialId, r.SyncIntervalSeconds,
-        r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError,
-        r.DirectoryFilterEnabled, r.AllowedDirectories.ToArray());
+    private async Task<Guid?> ResolveGroupIdAsync(Guid? groupId, Guid? proxyId, Guid? credentialId, CancellationToken ct)
+    {
+        var gid = groupId ?? proxyId ?? credentialId;
+        if (!gid.HasValue && (proxyId.HasValue || credentialId.HasValue))
+        {
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            gid = def?.Id;
+        }
+        return gid ?? groupId;
+    }
 
     private static string ToSlug(string name)
     {

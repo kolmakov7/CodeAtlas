@@ -14,7 +14,7 @@ namespace CodeRag.Analyzers.CSharp;
 /// из декларации символа-источника. Error-символы (неразрешённые внешние типы) игнорируются.
 /// Возвращает только связи, чьи оба конца реально существуют в каталоге.
 /// </summary>
-public sealed class RoslynRelationExtractor : IRelationExtractor
+public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
 {
     private readonly ISymbolCatalog _catalog;
 

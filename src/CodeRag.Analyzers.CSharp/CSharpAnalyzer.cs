@@ -1,5 +1,6 @@
-using System.Collections.Concurrent;
 using CodeRag.Analyzers.Abstractions;
+using CodeRag.Analyzers.Abstractions.Chunking;
+using CodeRag.Analyzers.CSharp.Internal;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -28,55 +29,20 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         return Extensions.Contains(ext, StringComparer.OrdinalIgnoreCase);
     }
 
-    // Кеш BCL references (thread-safe lazy)
-    private static readonly Lazy<IReadOnlyList<MetadataReference>> BclRefsLazy = new(GetBclReferencesInternal, true);
+    private readonly IChunkFactory _chunkFactory;
+    private readonly ISourceSlicer _slicer;
+    private readonly CSharpChunkBuilder _chunkBuilder;
 
-    private static IReadOnlyList<MetadataReference> GetBclReferences() => BclRefsLazy.Value;
+    public CSharpAnalyzer() : this(new DefaultChunkFactory(), null!) { }
 
-    private static IReadOnlyList<MetadataReference> GetBclReferencesInternal()
+    public CSharpAnalyzer(IChunkFactory chunkFactory, ISourceSlicer slicer)
     {
-        var refs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var result = new List<MetadataReference>();
-        void Add(string? path)
-        {
-            if (string.IsNullOrEmpty(path)) return;
-            if (!File.Exists(path)) return;
-            if (!refs.Add(path)) return;
-            try { result.Add(MetadataReference.CreateFromFile(path)); } catch { /* ignore */ }
-        }
-
-        Add(typeof(object).Assembly.Location); // System.Private.CoreLib
-        Add(typeof(Console).Assembly.Location); // System.Console
-        Add(typeof(Enumerable).Assembly.Location); // System.Linq / System.Core
-        Add(typeof(List<>).Assembly.Location);
-        Add(typeof(System.Runtime.GCSettings).Assembly.Location); // System.Runtime
-
-        var runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
-        if (runtimeDir != null)
-        {
-            foreach (var dll in new[] { "System.Runtime.dll", "System.Collections.dll", "netstandard.dll", "System.Private.CoreLib.dll", "System.Linq.dll", "System.Threading.dll", "System.Collections.Immutable.dll", "System.Memory.dll" })
-                Add(Path.Combine(runtimeDir, dll));
-        }
-
-        var tpa = (string?)AppDomain.CurrentDomain.GetData("TRUSTED_PLATFORM_ASSEMBLIES");
-        if (!string.IsNullOrEmpty(tpa))
-        {
-            foreach (var p in tpa.Split(Path.PathSeparator))
-            {
-                if (p.EndsWith("System.Runtime.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Collections.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("netstandard.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Linq.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Private.CoreLib.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Console.dll", StringComparison.OrdinalIgnoreCase))
-                    Add(p);
-            }
-        }
-
-        // Fallback: ensure at least one ref
-        if (result.Count == 0) Add(typeof(object).Assembly.Location);
-        return result;
+        _chunkFactory = chunkFactory ?? new DefaultChunkFactory();
+        _slicer = slicer ?? new DefaultSourceSlicer(_chunkFactory);
+        _chunkBuilder = new CSharpChunkBuilder(_chunkFactory, _slicer);
     }
+
+    private static IReadOnlyList<MetadataReference> GetBclReferences() => BclReferenceProvider.GetReferences();
 
     public async Task<AnalyzeResult> AnalyzeAsync(FileContext ctx, CancellationToken ct)
     {
@@ -96,8 +62,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         catch (Exception ex)
         {
             errors.Add(new AnalyzerError(ctx.FilePath, $"Parse failed: {ex.Message}"));
-            // fallback sliding window
-            var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.CSharp);
+            var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.CSharp);
             chunks.AddRange(fb);
             return new AnalyzeResult(symbols, relations, chunks, errors);
         }
@@ -155,7 +120,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         catch (Exception ex)
         {
             errors.Add(new AnalyzerError(ctx.FilePath, $"GetRoot failed: {ex.Message}"));
-            var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.CSharp);
+            var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.CSharp);
             chunks.AddRange(fb);
             return new AnalyzeResult(symbols, relations, chunks, errors);
         }
@@ -201,7 +166,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
                             1,
                             "(top-level statements)");
                         symbols.Add(sym);
-                        chunks.Add(ChunkingHelper.CreateChunk(sym.Id, SupportedLanguages.CSharp, sl, el, source));
+                        chunks.Add(_chunkFactory.Create(sym.Id, SupportedLanguages.CSharp, sl, el, source));
                     }
                 }
             }
@@ -247,7 +212,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
             var hasCode = root.DescendantNodes().Any(n => n is TypeDeclarationSyntax or GlobalStatementSyntax);
             if (hasCode)
             {
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.CSharp);
+                var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.CSharp);
                 chunks.AddRange(fb);
             }
         }
@@ -255,12 +220,9 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         return new AnalyzeResult(symbols, relations, chunks, errors);
     }
 
-    /// <summary>Enclosing type declaration context (name + declaration line without body) for chunk building.</summary>
-    private sealed record TypeContext(string Name, string DeclarationLine);
+    private static readonly IReadOnlyList<CSharpTypeContext> EmptyTypeChain = Array.Empty<CSharpTypeContext>();
 
-    private static readonly IReadOnlyList<TypeContext> EmptyTypeChain = Array.Empty<TypeContext>();
-
-    private static void VisitNode(
+    private void VisitNode(
         SyntaxNode node,
         Stack<Symbol> parentStack,
         List<Symbol> symbols,
@@ -273,7 +235,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         List<AnalyzerError> errors,
         CancellationToken ct,
         string? namespaceName = null,
-        IReadOnlyList<TypeContext> typeChain = null!)
+        IReadOnlyList<CSharpTypeContext> typeChain = null!)
     {
         typeChain ??= EmptyTypeChain;
         // Определяем kind для узлов, которые соответствуют символам
@@ -402,39 +364,17 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
                 if (!relations.Any(r => r.FromSymbolId == parentId && r.ToSymbolId == currentSymbol.Id && r.RelationType == RelationType.Contains))
                     relations.Add(new Relation(parentId, currentSymbol.Id, RelationType.Contains));
             }
-            // Чанки для семантических единиц:
-            //  - метод/конструктор → один чанк: контекст (namespace + цепочка типов) + полный исходник метода;
-            //  - class/interface/record/struct → скелет (declaration + поля + сигнатуры) без тел методов;
-            //  - enum → весь enum как одна единица.
             if (kind is AbstractionsSK.Class or AbstractionsSK.Interface or AbstractionsSK.Record or AbstractionsSK.Struct or AbstractionsSK.Enum or AbstractionsSK.Method or AbstractionsSK.Constructor)
             {
-                try
-                {
-                    var budget = Math.Max(256, ctx.MaxChunkChars);
-                    if (node is EnumDeclarationSyntax)
-                    {
-                        AddWholeNodeChunk(chunks, ctx, currentSymbol, node);
-                    }
-                    else if (node is TypeDeclarationSyntax typeDecl)
-                    {
-                        AddTypeSkeletonChunk(chunks, ctx, currentSymbol, typeDecl, namespaceName, typeChain, budget);
-                    }
-                    else
-                    {
-                        AddMethodChunk(chunks, ctx, currentSymbol, node, namespaceName, typeChain, budget);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    errors.Add(new AnalyzerError(ctx.FilePath, $"Chunk failed for {name}: {ex.Message}"));
-                }
+                var budget = Math.Max(256, ctx.MaxChunkChars);
+                _chunkBuilder.AddChunkForSymbol(chunks, ctx, currentSymbol, node, namespaceName, typeChain, budget, errors);
             }
         }
 
         // Рекурсия по детям с учётом стека + передачи контекста (namespace, цепочка типов)
         if (currentSymbol != null) parentStack.Push(currentSymbol);
         string? childNs = namespaceName;
-        IReadOnlyList<TypeContext> childChain = typeChain;
+        IReadOnlyList<CSharpTypeContext> childChain = typeChain;
         if (node is FileScopedNamespaceDeclarationSyntax fnsDecl)
         {
             var nsName = fnsDecl.Name.ToString();
@@ -450,7 +390,7 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
             childChain =
             [
                 .. typeChain,
-                new TypeContext(td.Identifier.Text, TypeDeclarationLine(td))
+                new CSharpTypeContext(td.Identifier.Text, TypeDeclarationLine(td))
             ];
         }
         foreach (var child in node.ChildNodes())
@@ -467,17 +407,6 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
     {
         if (span.Start < 0 || span.Start >= content.Length) return string.Empty;
         return content.Substring(span.Start, Math.Min(span.Length, content.Length - span.Start));
-    }
-
-    /// <summary>Чанк из полного исходника узла (для enum и других небольших единиц).</summary>
-    private static void AddWholeNodeChunk(List<Chunk> chunks, FileContext ctx, Symbol symbol, SyntaxNode node)
-    {
-        var source = node.ToFullString().TrimStart();
-        if (string.IsNullOrWhiteSpace(source)) return;
-        var ls = node.SyntaxTree.GetLineSpan(node.Span);
-        var startLine = Math.Max(1, ls.StartLinePosition.Line + 1);
-        var endLine = Math.Max(startLine, ls.EndLinePosition.Line + 1);
-        chunks.Add(ChunkingHelper.CreateChunk(symbol.Id, SupportedLanguages.CSharp, startLine, endLine, source));
     }
 
     /// <summary>Declaration-«шапка» типа: modifiers + type + name + generic args + primary ctor + base list + constraints (без тела).</summary>
@@ -497,182 +426,6 @@ public sealed class CSharpAnalyzer : ICodeAnalyzer
         if (t.ConstraintClauses.Count > 0)
             parts.Add(t.ConstraintClauses.ToString().ReplaceLineEndings(" "));
         return string.Join(" ", parts).Trim();
-    }
-
-    /// <summary>Сигнатура члена: исходник до первой «{» (для expression-bodied — весь текст).</summary>
-    private static string MemberSignature(SyntaxNode member)
-    {
-        var text = member.ToFullString().TrimStart();
-        var idx = text.IndexOf('{');
-        if (idx >= 0)
-            text = text[..idx];
-        return text.ReplaceLineEndings(" ").Trim();
-    }
-
-    /// <summary>
-    /// Скелет типа: namespace + цепочка вложенных деклараций + declaration типа + поля/проперти/события + сигнатуры членов.
-    /// Тела методов не включаются (у каждого метода свой чанк). Линии — реальный диапазон типа для get_code.
-    /// </summary>
-    private static void AddTypeSkeletonChunk(
-        List<Chunk> chunks,
-        FileContext ctx,
-        Symbol symbol,
-        TypeDeclarationSyntax td,
-        string? ns,
-        IReadOnlyList<TypeContext> outerChain,
-        int budget)
-    {
-        var ls = td.SyntaxTree.GetLineSpan(td.Span);
-        var startLine = Math.Max(1, ls.StartLinePosition.Line + 1);
-        var endLine = Math.Max(startLine, ls.EndLinePosition.Line + 1);
-
-        var head = new List<string>();
-        if (!string.IsNullOrWhiteSpace(ns))
-            head.Add($"namespace {ns};");
-        foreach (var t in outerChain)
-            head.Add(t.DeclarationLine);
-        head.Add(TypeDeclarationLine(td));
-        head.Add("{");
-
-        var fields = new List<string>();
-        var signatures = new List<string>();
-        foreach (var m in td.Members)
-        {
-            switch (m)
-            {
-                case FieldDeclarationSyntax f:
-                    fields.Add(f.ToString().ReplaceLineEndings(" ").Trim());
-                    break;
-                case PropertyDeclarationSyntax p:
-                    fields.Add(p.ToString().ReplaceLineEndings(" ").Trim());
-                    break;
-                case EventDeclarationSyntax e:
-                    fields.Add(e.ToString().ReplaceLineEndings(" ").Trim());
-                    break;
-                case EventFieldDeclarationSyntax ef:
-                    fields.Add(ef.ToString().ReplaceLineEndings(" ").Trim());
-                    break;
-                case BaseMethodDeclarationSyntax bm:
-                    signatures.Add(MemberSignature(bm));
-                    break;
-                case DelegateDeclarationSyntax d:
-                    signatures.Add(d.ToString().ReplaceLineEndings(" ").Trim());
-                    break;
-                case TypeDeclarationSyntax nested:
-                    signatures.Add(TypeDeclarationLine(nested) + ";");
-                    break;
-            }
-        }
-
-        var headText = string.Join("\n", head);
-        var cap = budget - headText.Length - 3; // "}" + newlines
-        var bodyParts = new List<string>();
-        int used = 0, skipped = 0;
-        foreach (var t in fields.Concat(signatures))
-        {
-            if (used + t.Length + 1 <= cap)
-            {
-                bodyParts.Add(t);
-                used += t.Length + 1;
-            }
-            else
-            {
-                skipped++;
-            }
-        }
-        if (skipped > 0)
-            bodyParts.Add($"// ... ({skipped} more members)");
-
-        var source = headText + "\n" + string.Join("\n", bodyParts) + "\n}";
-        if (string.IsNullOrWhiteSpace(source)) return;
-        chunks.Add(ChunkingHelper.CreateChunk(symbol.Id, SupportedLanguages.CSharp, startLine, endLine, source));
-    }
-
-    /// <summary>
-    /// Чанк метода/конструктора: контекст (namespace + declaration-цепочка типов) + полный исходник метода
-    /// (включая doc-комментарии и атрибуты). Если не влезает в бюджет — первый кусок с реальным контекстом,
-    /// остальные — с [continued] заголовком. Линии — реальный диапазон метода для get_code.
-    /// </summary>
-    private static void AddMethodChunk(
-        List<Chunk> chunks,
-        FileContext ctx,
-        Symbol symbol,
-        SyntaxNode node,
-        string? ns,
-        IReadOnlyList<TypeContext> chain,
-        int budget)
-    {
-        // Полный текст с doc-комментариями/атрибутами — для одиночного чанка
-        var fullSource = node.ToFullString().TrimStart();
-        // Текст от node.Span (начинается точно со startLine) — для окон при сплите: точное соответствие строк
-        var spanSource = SpanToText(ctx.Content, node.Span);
-        var source = string.IsNullOrWhiteSpace(spanSource) ? fullSource : spanSource;
-        if (string.IsNullOrWhiteSpace(source)) return;
-        var ls = node.SyntaxTree.GetLineSpan(node.Span);
-        var startLine = Math.Max(1, ls.StartLinePosition.Line + 1);
-        var endLine = Math.Max(startLine, ls.EndLinePosition.Line + 1);
-
-        var contextParts = new List<string>();
-        if (!string.IsNullOrWhiteSpace(ns))
-            contextParts.Add($"namespace {ns};");
-        foreach (var t in chain)
-            contextParts.Add(t.DeclarationLine);
-
-        var contextText = string.Join("\n", contextParts);
-        if (contextText.Length > budget - 512 && contextParts.Count > 2)
-        {
-            // Контекст сам по себе слишком большой: оставляем namespace + ближайший тип
-            contextParts = [contextParts[0], contextParts[^1]];
-            contextText = string.Join("\n", contextParts);
-        }
-
-        int window = budget - contextText.Length - 4; // "{", "}", newlines
-        if (window < 256)
-            window = 256;
-
-        if (fullSource.Length <= window)
-        {
-            var text = contextText.Length > 0 ? $"{contextText}\n{{\n{fullSource}\n}}" : fullSource;
-            chunks.Add(ChunkingHelper.CreateChunk(symbol.Id, SupportedLanguages.CSharp, startLine, endLine, text));
-            return;
-        }
-
-        // Крупный метод: тело по окнам бюджета. Первое окно — с реальным контекстом, остальные — [continued].
-        var header = BuildContextHeader(ctx, ns, chain, symbol);
-        var subWindow = Math.Max(256, budget - header.Length - 2);
-        var overlap = Math.Max(64, (int)(subWindow * 0.15));
-        var slices = ChunkingHelper.SplitByCharBudget(source, startLine, endLine, subWindow, overlap, header).ToList();
-        if (slices.Count == 0) return;
-
-        var first = slices[0];
-        var firstText = contextText.Length > 0
-            ? $"{contextText}\n{{\n{TruncateToBudget(first.Text, budget - contextText.Length - 4)}\n}}"
-            : TruncateToBudget(first.Text, budget - 1);
-        chunks.Add(ChunkingHelper.CreateChunk(symbol.Id, SupportedLanguages.CSharp, first.StartLine, first.EndLine, firstText));
-
-        for (var i = 1; i < slices.Count; i++)
-        {
-            var s = slices[i];
-            chunks.Add(ChunkingHelper.CreateChunk(symbol.Id, SupportedLanguages.CSharp, s.StartLine, s.EndLine, s.Text));
-        }
-    }
-
-    private static string TruncateToBudget(string text, int max)
-    {
-        if (text.Length <= max) return text;
-        var cut = text.LastIndexOf('\n', Math.Max(0, max - 1));
-        if (cut <= 0) cut = max;
-        return text[..cut];
-    }
-
-    /// <summary>Заголовок продолжения для окон крупного метода: путь + namespace.Типы.Метод.</summary>
-    private static string BuildContextHeader(FileContext ctx, string? ns, IReadOnlyList<TypeContext> chain, Symbol symbol)
-    {
-        var typeName = chain.Count > 0 ? string.Join(".", chain.Select(t => t.Name)) : null;
-        var qual = ns != null
-            ? (typeName != null ? $"{ns}.{typeName}" : ns)
-            : (typeName ?? symbol.Fqn);
-        return $"// [continued] {ctx.FilePath} :: {qual}.{symbol.Name}";
     }
 
     /// <summary>FQN for member symbols: `ContainingTypeFQN.MemberName` (member symbols render as bare names under FullyQualifiedFormat).</summary>

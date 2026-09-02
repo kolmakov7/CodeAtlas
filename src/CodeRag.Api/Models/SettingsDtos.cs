@@ -154,9 +154,6 @@ public sealed class AppSettingsDto
         bool GetBool(string key, bool fallback) =>
             bool.TryParse(Get(key), out var v) ? v : fallback;
 
-        string Cfg(string key, string fallback) =>
-            !string.IsNullOrWhiteSpace(config[key]) ? config[key]! : fallback;
-
         int CfgInt(string key, int fallback) =>
             int.TryParse(config[key], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
 

@@ -1,5 +1,6 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
+using CodeRag.Domain.Models;
 using CodeRag.Domain.Ports;
 using Dapper;
 using Microsoft.Data.Sqlite;
@@ -135,6 +136,47 @@ ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
         return rows.Select(Map).ToList();
     }
 
+    public async Task<IReadOnlyList<RelationEndpoints>> QueryEndpointsAsync(
+        Guid symbolId,
+        RelationDirection direction = RelationDirection.Both,
+        IReadOnlyCollection<string>? relationTypeNames = null,
+        CancellationToken ct = default)
+    {
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        string dirSql = direction switch
+        {
+            RelationDirection.Outgoing => "from_symbol_id=@sid",
+            RelationDirection.Incoming => "to_symbol_id=@sid",
+            _ => "(from_symbol_id=@sid OR to_symbol_id=@sid)"
+        };
+        var sql = $"SELECT from_symbol_id, to_symbol_id, relation_type FROM relations WHERE {dirSql}";
+        var p = new DynamicParameters(); p.Add("sid", symbolId.ToString());
+        if (relationTypeNames is { Count: > 0 })
+        {
+            var arr = relationTypeNames.ToArray();
+            sql += " AND relation_type IN (" + string.Join(",", arr.Select((_, i) => $"@t{i}")) + ")";
+            for (int i = 0; i < arr.Length; i++) p.Add($"t{i}", arr[i]);
+        }
+        var rows = (await conn.QueryAsync<EndpointsRow>(sql, p).ConfigureAwait(false)).ToList();
+        return rows.Select(r => new RelationEndpoints(Guid.Parse(r.from_symbol_id), Guid.Parse(r.to_symbol_id), r.relation_type)).ToList();
+    }
+
+    public async Task<IReadOnlyList<RelationEndpoints>> QueryEndpointsBySymbolIdsAsync(
+        IReadOnlyCollection<Guid> symbolIds,
+        CancellationToken ct = default)
+    {
+        if (symbolIds.Count == 0) return Array.Empty<RelationEndpoints>();
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        var ids = symbolIds.Select(g => g.ToString()).ToArray();
+        var ph = string.Join(",", ids.Select((_, i) => $"@e{i}"));
+        var ph2 = string.Join(",", ids.Select((_, i) => $"@e2{i}"));
+        var p = new DynamicParameters();
+        for (int i = 0; i < ids.Length; i++) { p.Add($"e{i}", ids[i]); p.Add($"e2{i}", ids[i]); }
+        var sql = $"SELECT from_symbol_id, to_symbol_id, relation_type FROM relations WHERE from_symbol_id IN ({ph}) OR to_symbol_id IN ({ph2})";
+        var rows = (await conn.QueryAsync<EndpointsRow>(sql, p).ConfigureAwait(false)).ToList();
+        return rows.Select(r => new RelationEndpoints(Guid.Parse(r.from_symbol_id), Guid.Parse(r.to_symbol_id), r.relation_type)).ToList();
+    }
+
     private static Relation Map(RelRow r)
     {
         var type = Enum.TryParse<RelationType>(r.relation_type, out var t) ? t : RelationType.References;
@@ -147,5 +189,12 @@ ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
         public string to_symbol_id { get; set; } = "";
         public string relation_type { get; set; } = "";
         public string? repository_id { get; set; }
+    }
+
+    private sealed class EndpointsRow
+    {
+        public string from_symbol_id { get; set; } = "";
+        public string to_symbol_id { get; set; } = "";
+        public string relation_type { get; set; } = "";
     }
 }

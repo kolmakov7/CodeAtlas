@@ -104,15 +104,16 @@ jobs:
           sudo chown -R 1000:1000 ./data 2>/dev/null || chmod -R 777 ./data
           # локальный образ уже загружен как ghcr.io/...:latest, не тянуть с registry
           docker compose -f docker-compose.yml up -d --pull never coderag
+          # compose maps host 8085 -> container 8080 (see docker-compose.yml)
           ready=0
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/health/ready; then echo "ready"; ready=1; break; fi
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:8085/health/ready; then echo "ready"; ready=1; break; fi
             echo "waiting $i..."
             sleep 2
           done
           if [ "$ready" != "1" ]; then echo "coderag not ready"; docker compose logs coderag; docker compose down -v; exit 1; fi
-          curl -fsS http://localhost:8080/health/live
-          curl -fsS http://localhost:8080/api/health | head -c 5000; echo
+          curl -fsS http://localhost:8085/health/live
+          curl -fsS http://localhost:8085/api/health | head -c 5000; echo
           docker compose logs coderag
 
       - name: Compose down

@@ -1,6 +1,6 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Stores;
+using CodeRag.Domain.Ports;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -23,6 +23,7 @@ public sealed class FileWatcherService : BackgroundService
     private readonly Dictionary<Guid, DateTime> _lastTrigger = new();
     private readonly Dictionary<Guid, Timer?> _debounceTimers = new();
     private readonly object _lock = new();
+    private static readonly string[] IgnoredDirNames = { ".git", "bin", "obj", "node_modules" };
 
     public FileWatcherService(
         IRepositoryStore repoStore,
@@ -153,10 +154,8 @@ public sealed class FileWatcherService : BackgroundService
         if (string.IsNullOrEmpty(name)) return false;
         if (name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) return true;
         if (name.StartsWith("~")) return true;
-        if (fullPath.Contains("/.git/", StringComparison.Ordinal) || fullPath.Contains("\\.git\\", StringComparison.Ordinal)) return true;
-        if (fullPath.Contains("/bin/", StringComparison.Ordinal) || fullPath.Contains("\\bin\\", StringComparison.Ordinal)) return true;
-        if (fullPath.Contains("/obj/", StringComparison.Ordinal) || fullPath.Contains("\\obj\\", StringComparison.Ordinal)) return true;
-        if (fullPath.Contains("/node_modules/", StringComparison.Ordinal) || fullPath.Contains("\\node_modules\\", StringComparison.Ordinal)) return true;
+        foreach (var dir in IgnoredDirNames)
+            if (ContainsDirSegment(fullPath, dir)) return true;
         foreach (var pat in Opts.WatcherIgnorePatterns)
         {
             if (pat.StartsWith("*") && name.EndsWith(pat[1..], StringComparison.OrdinalIgnoreCase)) return true;
@@ -164,6 +163,9 @@ public sealed class FileWatcherService : BackgroundService
         }
         return false;
     }
+
+    private static bool ContainsDirSegment(string path, string dir)
+        => path.Contains($"/{dir}/", StringComparison.Ordinal) || path.Contains($"\\{dir}\\", StringComparison.Ordinal);
 
     private void DisposeWatchers()
     {

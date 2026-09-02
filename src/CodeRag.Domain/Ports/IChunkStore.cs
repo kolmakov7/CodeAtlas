@@ -1,4 +1,5 @@
 using CodeRag.Domain.Entities;
+using CodeRag.Domain.Models;
 
 namespace CodeRag.Domain.Ports;
 
@@ -13,4 +14,10 @@ public interface IChunkStore
     Task DeleteAsync(Guid id, CancellationToken ct = default);
     Task DeleteByFileAsync(Guid fileId, CancellationToken ct = default);
     Task DeleteByRepositoryAsync(Guid repositoryId, CancellationToken ct = default);
+
+    /// <summary>Search projection for the given chunk ids (chunk + file + repository + symbol).</summary>
+    Task<IReadOnlyList<ChunkInfo>> GetSearchInfoByIdsAsync(IReadOnlyCollection<Guid> chunkIds, CancellationToken ct = default);
+
+    /// <summary>Ids of chunks whose symbol_id is in the given set.</summary>
+    Task<IReadOnlyCollection<Guid>> GetChunkIdsBySymbolIdsAsync(IReadOnlyCollection<Guid> symbolIds, CancellationToken ct = default);
 }

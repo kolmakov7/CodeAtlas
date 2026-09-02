@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using CodeRag.Analyzers.Abstractions;
+using CodeRag.Analyzers.Abstractions.Chunking;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
 
 namespace CodeRag.Analyzers.Sql;
@@ -10,13 +11,29 @@ namespace CodeRag.Analyzers.Sql;
 /// </summary>
 public sealed class SqlAnalyzer : ICodeAnalyzer
 {
+    private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".sql",
+        ".tsql"
+    };
+
+    private readonly IChunkFactory _factory;
+    private readonly ISourceSlicer _slicer;
+
+    public SqlAnalyzer() : this(new DefaultChunkFactory(), null!) { }
+
+    public SqlAnalyzer(IChunkFactory factory, ISourceSlicer slicer)
+    {
+        _factory = factory ?? new DefaultChunkFactory();
+        _slicer = slicer ?? new DefaultSourceSlicer(_factory);
+    }
+
     public string Language => SupportedLanguages.Sql;
 
     public bool CanAnalyze(string filePath)
     {
         if (string.IsNullOrWhiteSpace(filePath)) return false;
-        var ext = Path.GetExtension(filePath).ToLowerInvariant();
-        return ext is ".sql" or ".tsql";
+        return SupportedExtensions.Contains(Path.GetExtension(filePath));
     }
 
     public Task<AnalyzeResult> AnalyzeAsync(FileContext ctx, CancellationToken ct)
@@ -53,7 +70,7 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
             if (fragment == null)
             {
                 errors.Add(new AnalyzerError(ctx.FilePath, "ScriptDom Parse вернул null"));
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
+                var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
                 chunks.AddRange(fb);
                 return Task.FromResult(new AnalyzeResult(symbols, relations, chunks, errors));
             }
@@ -61,14 +78,14 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
         catch (Exception ex)
         {
             errors.Add(new AnalyzerError(ctx.FilePath, $"SQL parse failed: {ex.Message}"));
-            var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
+            var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
             chunks.AddRange(fb);
             return Task.FromResult(new AnalyzeResult(symbols, relations, chunks, errors));
         }
 
         try
         {
-            var visitor = new SqlVisitor(ctx, symbols, chunks, relations, errors);
+            var visitor = new SqlVisitor(ctx, symbols, chunks, relations, errors, _factory, _slicer);
             fragment.Accept(visitor);
 
             // Relations Contains уже добавлены внутри visitor для batch? Дополним Contains на основе ParentSymbolId
@@ -80,18 +97,17 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
 
             if (chunks.Count == 0 && symbols.Count > 0)
             {
-                // Если по какой-то причине чанки не создались — создадим по символам
                 foreach (var s in symbols)
                 {
-                    var src = ChunkingHelper.ExtractLines(ctx.Content, s.StartLine, s.EndLine);
+                    var src = _slicer.ExtractLines(ctx.Content, s.StartLine, s.EndLine);
                     if (!string.IsNullOrWhiteSpace(src))
-                        chunks.Add(ChunkingHelper.CreateChunk(s.Id, SupportedLanguages.Sql, s.StartLine, s.EndLine, src));
+                        chunks.Add(_factory.Create(s.Id, SupportedLanguages.Sql, s.StartLine, s.EndLine, src));
                 }
             }
 
             if (chunks.Count == 0)
             {
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
+                var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
                 chunks.AddRange(fb);
             }
         }
@@ -100,7 +116,7 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
             errors.Add(new AnalyzerError(ctx.FilePath, $"SQL visitor failed: {ex.Message}"));
             if (chunks.Count == 0)
             {
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
+                var fb = _slicer.SlidingWindow(ctx.Content, SupportedLanguages.Sql);
                 chunks.AddRange(fb);
             }
         }
@@ -115,14 +131,18 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
         private readonly List<Chunk> _chunks;
         private readonly List<Relation> _relations;
         private readonly List<AnalyzerError> _errors;
+        private readonly IChunkFactory _factory;
+        private readonly ISourceSlicer _slicer;
 
-        public SqlVisitor(FileContext ctx, List<Symbol> symbols, List<Chunk> chunks, List<Relation> relations, List<AnalyzerError> errors)
+        public SqlVisitor(FileContext ctx, List<Symbol> symbols, List<Chunk> chunks, List<Relation> relations, List<AnalyzerError> errors, IChunkFactory factory, ISourceSlicer slicer)
         {
             _ctx = ctx;
             _symbols = symbols;
             _chunks = chunks;
             _relations = relations;
             _errors = errors;
+            _factory = factory;
+            _slicer = slicer;
         }
 
         public override void ExplicitVisit(CreateProcedureStatement node)
@@ -241,7 +261,7 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
                 {
                     try
                     {
-                        var chunk = ChunkingHelper.CreateChunk(symbol.Id, language, startLine, endLine, source);
+                        var chunk = _factory.Create(symbol.Id, language, startLine, endLine, source);
                         _chunks.Add(chunk);
                     }
                     catch (Exception ex)
@@ -266,10 +286,9 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
                 var len = node.FragmentLength;
                 if (start < 0 || len <= 0 || start + len > _ctx.Content.Length)
                 {
-                    // Fallback via lines
                     int sl = GetStartLine(node);
                     int el = GetEndLine(node, sl);
-                    return ChunkingHelper.ExtractLines(_ctx.Content, sl, el);
+                    return _slicer.ExtractLines(_ctx.Content, sl, el);
                 }
                 return _ctx.Content.Substring(start, len).Trim();
             }
@@ -277,7 +296,7 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
             {
                 int sl = GetStartLine(node);
                 int el = GetEndLine(node, sl);
-                return ChunkingHelper.ExtractLines(_ctx.Content, sl, el);
+                return _slicer.ExtractLines(_ctx.Content, sl, el);
             }
         }
 

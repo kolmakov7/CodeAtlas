@@ -61,7 +61,7 @@ public sealed class GetCodeMaxLinesTests : IDisposable
         var embedFactory = Substitute.For<IEmbeddingProviderFactory>();
         var monitor = Substitute.For<IOptionsMonitor<SearchOptions>>();
         monitor.CurrentValue.Returns(new SearchOptions());
-        return new SearchService(
+        return SearchService.CreateForTests(
             _factory,
             new FtsHelper(_factory),
             vectorFactory,

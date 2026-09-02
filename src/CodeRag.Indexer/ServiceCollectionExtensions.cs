@@ -1,7 +1,8 @@
-using CodeRag.Embeddings;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Indexer.Services.Handlers;
+using CodeRag.Indexer.Services.Indexing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 namespace CodeRag.Indexer;
@@ -19,14 +20,25 @@ public static class ServiceCollectionExtensions
         else
             services.Configure<IndexerOptions>(_ => { });
 
-        // Persistence — register both concrete and port
         services.AddSingleton<IndexingJobStore>();
         services.AddSingleton<CodeRag.Domain.Ports.IIndexingJobStore>(sp => sp.GetRequiredService<IndexingJobStore>());
 
-        // Git
-        services.AddSingleton<IGitService, CliGitService>();
+        // Indexing helpers (Strategy participants)
+        services.AddSingleton<JobProgressReporter>();
+        services.AddSingleton<GitCredentialResolver>();
+        services.AddSingleton<FileIndexer>();
+        services.AddSingleton<CSharpRelationService>();
+        services.AddSingleton<EmbeddingService>();
 
-        // Core indexing
+        // Handlers — Strategy per JobType (OCP: новый тип = новый класс)
+        services.AddSingleton<IndexJobHandler>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, CloneJobHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, SyncJobHandler>());
+        services.AddSingleton<IIndexingJobHandler>(sp => sp.GetRequiredService<IndexJobHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, EmbeddingJobHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, RebuildJobHandler>());
+
+        // Dispatcher (тонкий, делегирует в handlers)
         services.AddSingleton<IndexingService>();
 
         // Job runner (Channel + SemaphoreSlim + persistence)

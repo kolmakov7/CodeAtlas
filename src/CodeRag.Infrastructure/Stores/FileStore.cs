@@ -4,7 +4,7 @@ using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
 
-public sealed class FileStore : CodeRag.Domain.Ports.IFileStore, IFileStore
+public sealed class FileStore : CodeRag.Domain.Ports.IFileStore
 {
     private readonly IDbConnectionFactory _factory;
     public FileStore(IDbConnectionFactory factory) => _factory = factory;

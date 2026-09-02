@@ -14,8 +14,8 @@ Self-hosted search and navigation for code. Connect Git repositories and get fas
 
 ```bash
 docker compose up -d
-# http://localhost:8080
-curl http://localhost:8080/health/ready  # 200 → ready
+# http://localhost:8085
+curl http://localhost:8085/health/ready  # 200 → ready
 ```
 
 Stop: `docker compose down`. Data lives in `./data` — don't delete it.

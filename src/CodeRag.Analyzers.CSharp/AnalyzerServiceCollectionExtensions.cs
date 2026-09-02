@@ -1,4 +1,5 @@
 using CodeRag.Analyzers.Abstractions;
+using CodeRag.Analyzers.Abstractions.Chunking;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CodeRag.Analyzers.CSharp;
@@ -13,6 +14,10 @@ public static class AnalyzerServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddAnalyzers(this IServiceCollection services)
     {
+        // Shared chunking (leaf, language-agnostic)
+        services.AddSingleton<IChunkFactory, DefaultChunkFactory>();
+        services.AddSingleton<ISourceSlicer>(sp => new DefaultSourceSlicer(sp.GetRequiredService<IChunkFactory>()));
+
         // C# первым — более дорогой, требует Roslyn/SemanticModel
         services.AddSingleton<ICodeAnalyzer, CSharpAnalyzer>();
         // Остальные — medium/syntax depth
@@ -21,7 +26,7 @@ public static class AnalyzerServiceCollectionExtensions
         services.AddSingleton<ICodeAnalyzer, Vbs.VbsAnalyzer>();
 
         // Relation extractors (whole-repo, per language). C# uses Roslyn.
-        services.AddSingleton<IRelationExtractor, RoslynRelationExtractor>();
+        services.AddSingleton<IRepositoryRelationExtractor, RoslynRelationExtractor>();
         return services;
     }
 

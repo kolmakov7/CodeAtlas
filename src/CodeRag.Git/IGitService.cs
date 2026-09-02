@@ -26,10 +26,10 @@ public interface IGitService
         Credential? credential = null,
         CancellationToken ct = default);
 
-    /// <summary>Diff: git diff --name-status -M from..to (R100 parsing).</summary>
+    /// <summary>Diff: git diff --name-status -M from..to (R100 parsing). Поддерживает fromSha=null (полный ls-tree).</summary>
     Task<GitDiff> DiffAsync(
         string localPath,
-        string fromSha,
+        string? fromSha,
         string toSha,
         CancellationToken ct = default);
 
@@ -46,11 +46,24 @@ public interface IGitService
         string descendantSha,
         CancellationToken ct = default);
 
-    /// <summary>Список файлов: git ls-tree -r --name-only &lt;commit&gt;</summary>
+    /// <summary>Список файлов: git ls-tree -r --name-only &lt;commit&gt; (NUL-safe).</summary>
     Task<IReadOnlyList<string>> LsTreeAsync(
         string localPath,
         string commitSha,
         CancellationToken ct = default);
+
+    /// <summary>Содержимое файла из git blob (не зависит от working tree, обходит NAME_MAX 255).</summary>
+    Task<string> ShowFileAsync(
+        string localPath,
+        string filePath,
+        string commitSha,
+        CancellationToken ct = default);
+
+    /// <summary>Alias для LsTreeAsync (совместимость с Indexer).</summary>
+    Task<IReadOnlyList<string>> ListFilesAsync(
+        string localPath,
+        string commitSha,
+        CancellationToken ct = default) => LsTreeAsync(localPath, commitSha, ct);
 
     /// <summary>Remote refs: git ls-remote &lt;url&gt; [&lt;branch&gt;]</summary>
     Task<string?> LsRemoteAsync(

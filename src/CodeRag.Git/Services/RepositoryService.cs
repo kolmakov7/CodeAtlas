@@ -3,8 +3,6 @@ using CodeRag.Domain.Enums;
 using CodeRag.Domain.Ports;
 using CodeRag.Git.Helpers;
 using CodeRag.Git.Stores;
-using CodeRag.Infrastructure.Persistence;
-using Dapper;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -17,7 +15,7 @@ public sealed class RepositoryService : IRepositoryService
     private readonly ICredentialStore _credStore;
     private readonly IRepositoryGroupStore _groupStore;
     private readonly IGitService _git;
-    private readonly SqliteConnectionFactory _factory;
+    private readonly IDbConnectionFactory _factory;
     private readonly GitOptions _opts;
     private readonly ILogger<RepositoryService> _logger;
 
@@ -27,7 +25,7 @@ public sealed class RepositoryService : IRepositoryService
         ICredentialStore credStore,
         IRepositoryGroupStore groupStore,
         IGitService git,
-        SqliteConnectionFactory factory,
+        IDbConnectionFactory factory,
         IOptions<GitOptions> opts,
         ILogger<RepositoryService> logger)
     {
@@ -482,42 +480,6 @@ public sealed class RepositoryService : IRepositoryService
 
     private async Task PerformCascadeDeleteAsync(Guid repositoryId, CancellationToken ct)
     {
-        // Try via IRepositoryStore.DeleteCascadeAsync if available
-        if (_repoStore is CodeRag.Infrastructure.Stores.RepositoryStore concrete)
-        {
-            await concrete.DeleteCascadeAsync(repositoryId, ct).ConfigureAwait(false);
-            return;
-        }
-
-        // Fallback generic SQL via factory
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        using var tx = conn.BeginTransaction();
-        try
-        {
-            var rid = repositoryId.ToString();
-            await conn.ExecuteAsync("DELETE FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id = @rid);", new { rid }, transaction: tx).ConfigureAwait(false);
-            await conn.ExecuteAsync("DELETE FROM chunks_fts WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-            await conn.ExecuteAsync("DELETE FROM indexing_errors WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-            await conn.ExecuteAsync("DELETE FROM activity_log WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-            foreach (var table in new[] { "vec_chunks_code", "vec_chunks_text", "vec_chunks" })
-            {
-                try { await conn.ExecuteAsync($"DELETE FROM {table} WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false); } catch { }
-            }
-            await conn.ExecuteAsync("DELETE FROM repositories WHERE id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-            tx.Commit();
-        }
-        catch
-        {
-            tx.Rollback();
-            throw;
-        }
-
-        try
-        {
-            using var vacConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-            await vacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
-            await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
-        }
-        catch { }
+        await _repoStore.DeleteCascadeAsync(repositoryId, ct).ConfigureAwait(false);
     }
 }

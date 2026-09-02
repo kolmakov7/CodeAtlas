@@ -5,7 +5,7 @@ using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
 
-public sealed class RepositoryStore : CodeRag.Domain.Ports.IRepositoryStore, IRepositoryStore
+public sealed class RepositoryStore : CodeRag.Domain.Ports.IRepositoryStore
 {
     private readonly IDbConnectionFactory _factory;
 
@@ -233,6 +233,13 @@ ON CONFLICT(id) DO UPDATE SET
             await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
         }
         catch { /* best-effort, dashboard will still show correct logical counts */ }
+    }
+
+    public async Task<string?> GetLocalPathAsync(Guid id, CancellationToken ct = default)
+    {
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        return await conn.QuerySingleOrDefaultAsync<string>(
+            "SELECT local_path FROM repositories WHERE id = @id;", new { id = id.ToString() }).ConfigureAwait(false);
     }
 
     private static Repository Map(RepoRow r)

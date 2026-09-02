@@ -1,14 +1,14 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Git.Stores;
 
 public sealed class CredentialStore : ICredentialStore
 {
-    private readonly SqliteConnectionFactory _factory;
-    public CredentialStore(SqliteConnectionFactory factory) => _factory = factory;
+    private readonly IDbConnectionFactory _factory;
+    public CredentialStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(Credential credential, CancellationToken ct = default)
     {

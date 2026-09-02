@@ -2,7 +2,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeRag.Domain\CodeRag.Domain.csproj" />
-    <ProjectReference Include="..\CodeRag.Infrastructure\CodeRag.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,7 +1,7 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Exceptions;
-using CodeRag.Indexer;
+using CodeRag.Git.Models;
 using FluentAssertions;
 using NSubstitute;
 
@@ -130,20 +130,20 @@ public sealed class RepositoryDirectoryFilterTests
         var repo = CreateRepo(true, new[] { "src", "scripts" });
         var files = new[]
         {
-            new GitChangedFile("src/app.cs", null, GitChangeKind.Added),
-            new GitChangedFile("src/nested/util.cs", null, GitChangeKind.Modified),
-            new GitChangedFile("database/schema.sql", null, GitChangeKind.Added),
-            new GitChangedFile("docs/readme.md", null, GitChangeKind.Added),
-            new GitChangedFile("tests/test.cs", null, GitChangeKind.Added),
-            new GitChangedFile("scripts/deploy.sh", null, GitChangeKind.Added),
+            new GitDiffEntry(GitDiffKind.Added, "src/app.cs", null, null),
+            new GitDiffEntry(GitDiffKind.Modified, "src/nested/util.cs", null, null),
+            new GitDiffEntry(GitDiffKind.Added, "database/schema.sql", null, null),
+            new GitDiffEntry(GitDiffKind.Added, "docs/readme.md", null, null),
+            new GitDiffEntry(GitDiffKind.Added, "tests/test.cs", null, null),
+            new GitDiffEntry(GitDiffKind.Added, "scripts/deploy.sh", null, null),
         };
         var diff = new GitDiff(null, "abc123", files, false);
         var filtered = FilterForTest(repo, diff);
-        filtered.ChangedFiles.Should().HaveCount(3);
-        filtered.ChangedFiles.Select(f => f.Path).Should().BeEquivalentTo(new[] { "src/app.cs", "src/nested/util.cs", "scripts/deploy.sh" });
-        filtered.ChangedFiles.Any(f => f.Path == "docs/readme.md").Should().BeFalse();
-        filtered.ChangedFiles.Any(f => f.Path == "database/schema.sql").Should().BeFalse();
-        filtered.ChangedFiles.Any(f => f.Path == "tests/test.cs").Should().BeFalse();
+        filtered.Entries.Should().HaveCount(3);
+        filtered.Entries.Select(f => f.Path).Should().BeEquivalentTo(new[] { "src/app.cs", "src/nested/util.cs", "scripts/deploy.sh" });
+        filtered.Entries.Any(f => f.Path == "docs/readme.md").Should().BeFalse();
+        filtered.Entries.Any(f => f.Path == "database/schema.sql").Should().BeFalse();
+        filtered.Entries.Any(f => f.Path == "tests/test.cs").Should().BeFalse();
     }
 
     [Fact]
@@ -154,27 +154,24 @@ public sealed class RepositoryDirectoryFilterTests
         var repo = CreateRepo(true, new[] { "src" });
         var diff = new GitDiff("from", "to", new[]
         {
-            new GitChangedFile("src/keep.cs", null, GitChangeKind.Added),
-            new GitChangedFile("docs/exclude.md", null, GitChangeKind.Added),
-            new GitChangedFile("tests/exclude2.cs", null, GitChangeKind.Added),
+            new GitDiffEntry(GitDiffKind.Added, "src/keep.cs", null, null),
+            new GitDiffEntry(GitDiffKind.Added, "docs/exclude.md", null, null),
+            new GitDiffEntry(GitDiffKind.Added, "tests/exclude2.cs", null, null),
         }, false);
         var filtered = FilterForTest(repo, diff);
-        // Only keep.cs should remain; if filter was post-save, all 3 would be scanned then docs filtered at DB.
-        // Here we assert docs never passed to scanner.
-        filtered.ChangedFiles.Should().ContainSingle(f => f.Path == "src/keep.cs");
-        filtered.ChangedFiles.Count.Should().Be(1);
+        filtered.Entries.Should().ContainSingle(f => f.Path == "src/keep.cs");
+        filtered.Entries.Count.Should().Be(1);
     }
 
-    // Helper replicating IndexingService.ApplyDirectoryFilter logic
     private static GitDiff FilterForTest(Repository repo, GitDiff diff)
     {
         if (!repo.DirectoryFilterEnabled) return diff;
-        var filtered = diff.ChangedFiles.Where(f => {
-            if (f.Kind == GitChangeKind.Deleted) return repo.IsPathAllowed(f.Path);
-            if (f.Kind == GitChangeKind.Renamed) return repo.IsPathAllowed(f.Path);
+        var filtered = diff.Entries.Where(f => {
+            if (f.Kind == GitDiffKind.Deleted) return repo.IsPathAllowed(f.Path);
+            if (f.Kind == GitDiffKind.Renamed) return repo.IsPathAllowed(f.Path);
             return repo.IsPathAllowed(f.Path);
         }).ToList();
-        return new GitDiff(diff.FromCommit, diff.ToCommit, filtered, diff.IsFullDiff);
+        return new GitDiff(diff.FromSha, diff.ToSha, filtered, diff.IsFullDiff);
     }
 }
 

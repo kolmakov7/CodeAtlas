@@ -2,7 +2,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeRag.Domain\CodeRag.Domain.csproj" />
-    <ProjectReference Include="..\CodeRag.Infrastructure\CodeRag.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -11,6 +10,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="9.0.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="9.0.0" />
   </ItemGroup>
 
   <PropertyGroup>

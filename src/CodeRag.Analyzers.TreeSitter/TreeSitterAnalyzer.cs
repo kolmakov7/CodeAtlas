@@ -1,4 +1,5 @@
 using CodeRag.Analyzers.Abstractions;
+using CodeRag.Analyzers.Abstractions.Chunking;
 using TreeSitter;
 
 namespace CodeRag.Analyzers.TreeSitter;
@@ -10,17 +11,80 @@ namespace CodeRag.Analyzers.TreeSitter;
 /// </summary>
 public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 {
+    private static readonly Dictionary<string, string> ExtensionToTreeSitter = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".py"] = "Python", [".pyw"] = "Python", [".pyi"] = "Python",
+        [".js"] = "JavaScript", [".mjs"] = "JavaScript", [".cjs"] = "JavaScript", [".jsx"] = "JavaScript",
+        [".ts"] = "TypeScript",
+        [".tsx"] = "TSX",
+        [".go"] = "Go",
+        [".cpp"] = "C++", [".cc"] = "C++", [".cxx"] = "C++", [".c"] = "C++", [".h"] = "C++", [".hpp"] = "C++", [".hh"] = "C++", [".hxx"] = "C++",
+    };
+
+    private static readonly Dictionary<string, string> ContextToTreeSitter = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["python"] = "Python",
+        ["javascript"] = "JavaScript",
+        ["go"] = "Go",
+        ["cpp"] = "C++",
+        ["c++"] = "C++",
+    };
+
+    private static readonly Dictionary<string, string> TreeSitterToSupported = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["python"] = SupportedLanguages.Python,
+        ["javascript"] = SupportedLanguages.JavaScript,
+        ["typescript"] = SupportedLanguages.JavaScript,
+        ["tsx"] = SupportedLanguages.JavaScript,
+        ["go"] = SupportedLanguages.Go,
+        ["c++"] = SupportedLanguages.Cpp,
+        ["cpp"] = SupportedLanguages.Cpp,
+    };
+
+    private static readonly Dictionary<string, string[]> LanguageLoadFallbacks = new(StringComparer.Ordinal)
+    {
+        ["C++"] = new[] { "Cpp", "cpp", "c++" },
+        ["TypeScript"] = new[] { "Typescript", "typescript", "TSX", "tsx" },
+        ["TSX"] = new[] { "TypeScript", "typescript" },
+        ["JavaScript"] = new[] { "Javascript", "javascript", "JS" },
+    };
+
+    private static readonly Dictionary<string, Action<Node, NodeHandlerContext>> NodeHandlers = new(StringComparer.Ordinal)
+    {
+        ["class_definition"] = HandleClassLike,
+        ["class_declaration"] = HandleClassLike,
+        ["class_specifier"] = HandleClassLike,
+        ["type_declaration"] = HandleClassLike,
+        ["function_definition"] = HandleFunctionDefinition,
+        ["function_declaration"] = HandleFunctionDeclaration,
+        ["method_declaration"] = HandleMethod,
+        ["method_definition"] = HandleMethod,
+        ["arrow_function"] = HandleArrowFunction,
+        ["call"] = HandleCall,
+        ["call_expression"] = HandleCall,
+        ["import_statement"] = HandleImport,
+        ["import_from_statement"] = HandleImport,
+        ["import_declaration"] = HandleImport,
+        ["namespace_definition"] = HandleNamespace,
+    };
+
+    private readonly IChunkFactory _factory;
+    private readonly ISourceSlicer _slicer;
+
+    public TreeSitterAnalyzer() : this(new DefaultChunkFactory(), null!) { }
+
+    public TreeSitterAnalyzer(IChunkFactory factory, ISourceSlicer slicer)
+    {
+        _factory = factory ?? new DefaultChunkFactory();
+        _slicer = slicer ?? new DefaultSourceSlicer(_factory);
+    }
+
     public string Language => SupportedLanguages.Python; // polyglot, но возвращает python как primary; CanAnalyze покрывает все
 
     public bool CanAnalyze(string filePath)
     {
         if (string.IsNullOrWhiteSpace(filePath)) return false;
-        var ext = Path.GetExtension(filePath).ToLowerInvariant();
-        return ext is ".py" or ".pyw" or ".pyi"
-            or ".js" or ".mjs" or ".cjs" or ".jsx"
-            or ".ts" or ".tsx"
-            or ".go"
-            or ".cpp" or ".cc" or ".cxx" or ".c" or ".h" or ".hpp" or ".hh" or ".hxx";
+        return ExtensionToTreeSitter.ContainsKey(Path.GetExtension(filePath));
     }
 
     public Task<AnalyzeResult> AnalyzeAsync(FileContext ctx, CancellationToken ct)
@@ -37,7 +101,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         if (treeSitterLang == null)
         {
             // Fallback sliding window для неизвестных
-            var fb = ChunkingHelper.SlidingWindow(ctx.Content, ctx.Language ?? SupportedLanguages.Python);
+            var fb = _slicer.SlidingWindow(ctx.Content, ctx.Language ?? SupportedLanguages.Python);
             chunks.AddRange(fb);
             return Task.FromResult(new AnalyzeResult(symbols, relations, chunks, errors));
         }
@@ -51,7 +115,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             language = TryLoadLanguage(treeSitterLang, errors, ctx.FilePath);
             if (language == null)
             {
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang));
+                var fb = _slicer.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang));
                 chunks.AddRange(fb);
                 return Task.FromResult(new AnalyzeResult(symbols, relations, chunks, errors));
             }
@@ -61,7 +125,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             if (tree == null)
             {
                 errors.Add(new AnalyzerError(ctx.FilePath, $"TreeSitter Parse returned null for {treeSitterLang}"));
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang));
+                var fb = _slicer.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang));
                 chunks.AddRange(fb);
                 return Task.FromResult(new AnalyzeResult(symbols, relations, chunks, errors));
             }
@@ -113,7 +177,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             if (chunks.Count == 0)
             {
                 // Если не нашли семантических единиц — fallback sliding window
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang));
+                var fb = _slicer.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang));
                 chunks.AddRange(fb);
             }
         }
@@ -122,7 +186,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             errors.Add(new AnalyzerError(ctx.FilePath, $"TreeSitter failed: {ex.GetType().Name} {ex.Message}", null, null));
             if (chunks.Count == 0)
             {
-                var fb = ChunkingHelper.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang ?? "Python"));
+                var fb = _slicer.SlidingWindow(ctx.Content, MapToSupported(treeSitterLang ?? "Python"));
                 chunks.AddRange(fb);
             }
         }
@@ -138,47 +202,23 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
     private static string? DetectTreeSitterLanguage(string filePath, string? ctxLang)
     {
-        var ext = Path.GetExtension(filePath).ToLowerInvariant();
-        return ext switch
-        {
-            ".py" or ".pyw" or ".pyi" => "Python",
-            ".js" or ".mjs" or ".cjs" or ".jsx" => "JavaScript",
-            ".ts" => "TypeScript",
-            ".tsx" => "TSX",
-            ".go" => "Go",
-            ".cpp" or ".cc" or ".cxx" or ".c" or ".h" or ".hpp" or ".hh" or ".hxx" => "C++",
-            _ when ctxLang != null => MapCtxLanguageToTreeSitter(ctxLang),
-            _ => null
-        };
+        if (ExtensionToTreeSitter.TryGetValue(Path.GetExtension(filePath), out var ts)) return ts;
+        if (ctxLang != null) return MapCtxLanguageToTreeSitter(ctxLang);
+        return null;
     }
 
-    private static string? MapCtxLanguageToTreeSitter(string lang) => lang.ToLowerInvariant() switch
-    {
-        "python" => "Python",
-        "javascript" => "JavaScript",
-        "go" => "Go",
-        "cpp" or "c++" => "C++",
-        "csharp" => null,
-        _ => null
-    };
+    private static string? MapCtxLanguageToTreeSitter(string lang)
+        => ContextToTreeSitter.TryGetValue(lang, out var ts) ? ts : null;
 
-    private static string MapToSupported(string treeLang) => treeLang.ToLowerInvariant() switch
-    {
-        "python" => SupportedLanguages.Python,
-        "javascript" or "typescript" or "tsx" => SupportedLanguages.JavaScript,
-        "go" => SupportedLanguages.Go,
-        "c++" or "cpp" => SupportedLanguages.Cpp,
-        _ => SupportedLanguages.Python
-    };
+    private static string MapToSupported(string treeLang)
+        => TreeSitterToSupported.TryGetValue(treeLang, out var s) ? s : SupportedLanguages.Python;
 
     private static Language? TryLoadLanguage(string name, List<AnalyzerError> errors, string filePath)
     {
         var candidates = new List<string> { name };
         // Добавляем fallback варианты
-        if (name == "C++") candidates.AddRange(new[] { "Cpp", "cpp", "c++" });
-        if (name == "TypeScript") candidates.AddRange(new[] { "Typescript", "typescript", "TSX", "tsx" });
-        if (name == "TSX") candidates.AddRange(new[] { "TypeScript", "typescript" });
-        if (name == "JavaScript") candidates.AddRange(new[] { "Javascript", "javascript", "JS" });
+        if (LanguageLoadFallbacks.TryGetValue(name, out var extra))
+            candidates.AddRange(extra);
         foreach (var cand in candidates)
         {
             try { return new Language(cand); }
@@ -221,7 +261,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         }
     }
 
-    private static void Walk(
+    private void Walk(
         Node node,
         Stack<Symbol> stack,
         List<Symbol> symbols,
@@ -238,70 +278,14 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
         var supportedLang = MapToSupported(treeLang);
         Symbol? created = null;
-        string? kind = null;
-        string? name = null;
 
-        // Определяем kind по типу узла
-        // Python
-        // Go, JS, C++ типы разные, поэтому проверяем множество
-        switch (node.Type)
-        {
-            // Classes
-            case "class_definition":
-            case "class_declaration":
-            case "class_specifier":
-            case "type_declaration": // Go: type MyStruct struct { ... } — это не класс но считаем как Class
-                if (node.Type == "type_declaration" && treeLang != "Go") break;
-                kind = SymbolKind.Class;
-                name = ExtractName(node, treeLang);
-                break;
-            case "function_definition":
-                if (treeLang == "C++" || treeLang == "Python")
-                {
-                    kind = SymbolKind.Function;
-                    if (stack.Count > 0 && stack.Peek().Kind == SymbolKind.Class)
-                        kind = SymbolKind.Method;
-                    name = ExtractName(node, treeLang);
-                }
-                break;
-            case "function_declaration":
-                kind = SymbolKind.Function;
-                name = ExtractName(node, treeLang);
-                break;
-            case "method_declaration":
-            case "method_definition":
-                kind = SymbolKind.Method;
-                name = ExtractName(node, treeLang);
-                break;
-            case "arrow_function":
-                kind = SymbolKind.Function;
-                name = "arrow";
-                var parentVar = node.Parent?.Type == "variable_declarator" ? ExtractName(node.Parent!, treeLang) : null;
-                if (!string.IsNullOrWhiteSpace(parentVar)) name = parentVar;
-                break;
-            case "call":
-            case "call_expression":
-                callNodes.Add(node);
-                break;
-            case "import_statement":
-            case "import_from_statement":
-            case "import_declaration":
-                importNodes.Add(node);
-                break;
-            case "namespace_definition":
-                kind = SymbolKind.Namespace;
-                name = ExtractName(node, treeLang);
-                break;
-        }
+        // Определяем kind по типу узла через карту handlers (Python/Go/JS/C++ разные node types)
+        var handlerCtx = new NodeHandlerContext { TreeLang = treeLang, Stack = stack, CallNodes = callNodes, ImportNodes = importNodes };
+        if (NodeHandlers.TryGetValue(node.Type, out var handler))
+            handler(node, handlerCtx);
 
-        // Для Go type_declaration — проверяем что это struct/interface
-        if (kind == SymbolKind.Class && node.Type == "type_declaration")
-        {
-            // Для Go: type_declaration содержит type_spec с identifier
-            name = ExtractName(node) ?? name;
-            // Если имя пустое — пропустим
-            if (string.IsNullOrWhiteSpace(name)) kind = null;
-        }
+        var kind = handlerCtx.Kind;
+        var name = handlerCtx.Name;
 
         if (kind != null && !string.IsNullOrWhiteSpace(name))
         {
@@ -353,7 +337,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
                 {
                     try
                     {
-                        var chunk = ChunkingHelper.CreateChunk(symbol.Id, supportedLang, startLine, endLine, source);
+                        var chunk = _factory.Create(symbol.Id, supportedLang, startLine, endLine, source);
                         chunks.Add(chunk);
                     }
                     catch (Exception ex)
@@ -481,5 +465,70 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             return txt.Split('(')[0].Trim();
         }
         return null;
+    }
+
+    private sealed class NodeHandlerContext
+    {
+        public string TreeLang { get; set; } = "";
+        public Stack<Symbol> Stack { get; set; } = null!;
+        public List<Node> CallNodes { get; set; } = null!;
+        public List<Node> ImportNodes { get; set; } = null!;
+        public string? Kind { get; set; }
+        public string? Name { get; set; }
+    }
+
+    private static void HandleClassLike(Node node, NodeHandlerContext c)
+    {
+        // Go: type MyStruct struct { ... } — считаем как Class
+        if (node.Type == "type_declaration" && c.TreeLang != "Go") return;
+        c.Kind = SymbolKind.Class;
+        c.Name = ExtractName(node, c.TreeLang);
+        // Go type_declaration содержит type_spec с identifier; если имя пустое — пропустим
+        if (c.Kind == SymbolKind.Class && node.Type == "type_declaration")
+        {
+            c.Name = ExtractName(node) ?? c.Name;
+            if (string.IsNullOrWhiteSpace(c.Name)) c.Kind = null;
+        }
+    }
+
+    private static void HandleFunctionDefinition(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang == "C++" || c.TreeLang == "Python")
+        {
+            c.Kind = SymbolKind.Function;
+            if (c.Stack.Count > 0 && c.Stack.Peek().Kind == SymbolKind.Class)
+                c.Kind = SymbolKind.Method;
+            c.Name = ExtractName(node, c.TreeLang);
+        }
+    }
+
+    private static void HandleFunctionDeclaration(Node node, NodeHandlerContext c)
+    {
+        c.Kind = SymbolKind.Function;
+        c.Name = ExtractName(node, c.TreeLang);
+    }
+
+    private static void HandleMethod(Node node, NodeHandlerContext c)
+    {
+        c.Kind = SymbolKind.Method;
+        c.Name = ExtractName(node, c.TreeLang);
+    }
+
+    private static void HandleArrowFunction(Node node, NodeHandlerContext c)
+    {
+        c.Kind = SymbolKind.Function;
+        c.Name = "arrow";
+        var parentVar = node.Parent?.Type == "variable_declarator" ? ExtractName(node.Parent!, c.TreeLang) : null;
+        if (!string.IsNullOrWhiteSpace(parentVar)) c.Name = parentVar;
+    }
+
+    private static void HandleCall(Node node, NodeHandlerContext c) => c.CallNodes.Add(node);
+
+    private static void HandleImport(Node node, NodeHandlerContext c) => c.ImportNodes.Add(node);
+
+    private static void HandleNamespace(Node node, NodeHandlerContext c)
+    {
+        c.Kind = SymbolKind.Namespace;
+        c.Name = ExtractName(node, c.TreeLang);
     }
 }

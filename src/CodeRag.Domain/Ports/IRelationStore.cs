@@ -1,5 +1,6 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
+using CodeRag.Domain.Models;
 
 namespace CodeRag.Domain.Ports;
 
@@ -27,5 +28,17 @@ public interface IRelationStore
         RelationDirection direction = RelationDirection.Both,
         Guid? repositoryId = null,
         IReadOnlyList<RelationType>? types = null,
+        CancellationToken ct = default);
+
+    /// <summary>Relation rows (endpoints + raw type) touching a symbol, optionally filtered by stored type names.</summary>
+    Task<IReadOnlyList<RelationEndpoints>> QueryEndpointsAsync(
+        Guid symbolId,
+        RelationDirection direction = RelationDirection.Both,
+        IReadOnlyCollection<string>? relationTypeNames = null,
+        CancellationToken ct = default);
+
+    /// <summary>Relation rows whose either endpoint is in the given symbol id set.</summary>
+    Task<IReadOnlyList<RelationEndpoints>> QueryEndpointsBySymbolIdsAsync(
+        IReadOnlyCollection<Guid> symbolIds,
         CancellationToken ct = default);
 }

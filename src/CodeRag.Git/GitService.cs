@@ -14,6 +14,10 @@ public sealed class GitService : IGitService
     private readonly ICredentialProtector _protector;
     private readonly ILogger<GitService> _logger;
 
+    private const char NullChar = '\0';
+    private const char RenameStatusChar = 'R';
+    private const char CopyStatusChar = 'C';
+
     public GitService(IOptions<GitOptions> options, ICredentialProtector protector, ILogger<GitService> logger)
     {
         _options = options.Value;
@@ -59,9 +63,11 @@ public sealed class GitService : IGitService
         args.AddRange(proxyArgs);
         args.AddRange(auth.ConfigArgs);
         args.Add("clone");
+        // No working tree checkout: индексация читает файлы напрямую из объектов (git show),
+        // распаковка только жмёт диск и время клона.
+        args.Add("--no-checkout");
         args.Add("--branch");
         args.Add(branch);
-        // Avoid credential leak in URL: remoteUrl already without token
         args.Add(remoteUrl);
         args.Add(normalized);
 
@@ -108,26 +114,74 @@ public sealed class GitService : IGitService
 
         var env = MergeEnv(auth.Env, proxyEnv);
         var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, env, _logger, ct, Math.Min(_options.DefaultTimeoutSeconds, 300)).ConfigureAwait(false);
-
+        if (result.ExitCode != 0 && result.StdErr.Contains("cannot lock ref", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("git fetch ref-lock race in {Repo}, retrying", normalized);
+            await Task.Delay(1000, ct).ConfigureAwait(false);
+            result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, env, _logger, ct, Math.Min(_options.DefaultTimeoutSeconds, 300)).ConfigureAwait(false);
+        }
         if (result.ExitCode != 0)
             throw CreateGitException("fetch", result, proxyUrl);
     }
 
-    public async Task<GitDiff> DiffAsync(string localPath, string fromSha, string toSha, CancellationToken ct = default)
+    public async Task<GitDiff> DiffAsync(string localPath, string? fromSha, string toSha, CancellationToken ct = default)
     {
         var normalized = PathValidator.ValidateAndNormalize(localPath, _options.ReposRoot);
-        if (string.IsNullOrWhiteSpace(fromSha) || string.IsNullOrWhiteSpace(toSha))
-            throw new ArgumentException("fromSha and toSha required");
+        if (string.IsNullOrWhiteSpace(toSha))
+            throw new ArgumentException("toSha must not be empty", nameof(toSha));
 
-        // git diff --name-status -M from..to
-        var args = new List<string> { "diff", "--name-status", "-M", $"{fromSha}..{toSha}" };
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, null, _logger, ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(fromSha))
+        {
+            var files = await LsTreeAsync(normalized, toSha!, ct).ConfigureAwait(false);
+            var changed = files.Select(AddedEntry).ToList();
+            return new GitDiff(null, toSha!.Trim(), changed, IsFullDiff: true);
+        }
 
-        if (result.ExitCode != 0)
-            throw CreateGitException("diff", result, null);
+        var isAncestor = await IsAncestorAsync(normalized, fromSha!, toSha!, ct).ConfigureAwait(false);
+        if (!isAncestor)
+        {
+            _logger.LogWarning("fromSha {From} is not ancestor of {To} in {Repo} — full diff fallback", fromSha, toSha, normalized);
+            var toFiles = await LsTreeAsync(normalized, toSha!, ct).ConfigureAwait(false);
+            var fromFiles = await LsTreeAsync(normalized, fromSha!, ct).ConfigureAwait(false);
+            var toSet = new HashSet<string>(toFiles);
+            var fromSet = new HashSet<string>(fromFiles);
+            var changed = new List<GitDiffEntry>();
+            AddSetDiffEntries(changed, toSet, fromSet);
+            foreach (var f in toSet.Intersect(fromSet))
+            {
+                var diff = await GitProcessRunner.RunAsync(_options.GitExecutable, new List<string> { "diff", "--name-only", $"{fromSha}..{toSha}", "--", f }, normalized, null, _logger, ct).ConfigureAwait(false);
+                if (diff.StdOut.Trim().Length > 0)
+                    changed.Add(new GitDiffEntry(GitDiffKind.Modified, f, null, null));
+            }
+            var nameStatus = await GitProcessRunner.RunAsync(_options.GitExecutable, new List<string> { "diff", "--name-status", "-M", "-z", $"{fromSha}..{toSha}" }, normalized, null, _logger, ct).ConfigureAwait(false);
+            if (nameStatus.ExitCode == 0)
+            {
+                var parsed = ParseNameStatusZ(nameStatus.StdOut);
+                var renameMap = parsed.Where(p => p.Kind == GitDiffKind.Renamed).ToList();
+                foreach (var r in renameMap)
+                {
+                    changed.RemoveAll(c => c.Path == r.Path || c.Path == r.OldPath);
+                    changed.Add(r);
+                }
+            }
+            return new GitDiff(fromSha!.Trim(), toSha!.Trim(), changed, IsFullDiff: true);
+        }
 
-        var entries = ParseDiff(result.StdOut);
-        return new GitDiff(fromSha.Trim(), toSha.Trim(), entries);
+        var zArgs = new List<string> { "diff", "--name-status", "-M", "-z", $"{fromSha}..{toSha}" };
+        var zResult = await GitProcessRunner.RunAsync(_options.GitExecutable, zArgs, normalized, null, _logger, ct).ConfigureAwait(false);
+        if (zResult.ExitCode != 0)
+        {
+            _logger.LogWarning("git diff failed {From}..{To} in {Repo}: {Err} — fallback to full", fromSha, toSha, normalized, zResult.StdErr);
+            var files = await LsTreeAsync(normalized, toSha!, ct).ConfigureAwait(false);
+            return new GitDiff(fromSha!.Trim(), toSha!.Trim(), files.Select(AddedEntry).ToList(), true);
+        }
+        var changedFiles = ParseNameStatusZ(zResult.StdOut);
+        if (changedFiles.Count == 0 && !string.IsNullOrEmpty(zResult.StdOut))
+        {
+            // Fallback to tab-separated parser if -z produced empty but stdout non-empty (legacy)
+            changedFiles = ParseDiff(zResult.StdOut);
+        }
+        return new GitDiff(fromSha!.Trim(), toSha!.Trim(), changedFiles, IsFullDiff: false);
     }
 
     public async Task<string> GetHeadAsync(string localPath, string branch, CancellationToken ct = default)
@@ -173,16 +227,33 @@ public sealed class GitService : IGitService
         var normalized = PathValidator.ValidateAndNormalize(localPath, _options.ReposRoot);
         if (!IsValidSha(commitSha)) throw new ArgumentException($"Invalid commit SHA: {commitSha}");
 
-        var args = new List<string> { "ls-tree", "-r", "--name-only", commitSha.Trim() };
+        var args = new List<string> { "ls-tree", "-r", "-z", "--name-only", commitSha.Trim() };
         var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, null, _logger, ct).ConfigureAwait(false);
         if (result.ExitCode != 0)
             throw CreateGitException("ls-tree", result, null);
 
-        var files = result.StdOut.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(s => s.Trim())
-            .Where(s => s.Length > 0)
-            .ToList();
-        return files;
+        // -z: NUL-separated, безопасно для кириллицы/пробелов; fallback на newline если пусто
+        var raw = result.StdOut;
+        if (raw.Contains('\0'))
+            return raw.Split('\0', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return raw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+    }
+
+    public Task<IReadOnlyList<string>> ListFilesAsync(string localPath, string commitSha, CancellationToken ct = default)
+        => LsTreeAsync(localPath, commitSha, ct);
+
+    public async Task<string> ShowFileAsync(string localPath, string filePath, string commitSha, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("filePath required", nameof(filePath));
+        if (string.IsNullOrWhiteSpace(commitSha)) throw new ArgumentException("commitSha required", nameof(commitSha));
+        var normalized = PathValidator.ValidateAndNormalize(localPath, _options.ReposRoot);
+        var spec = $"{commitSha.Trim()}:{filePath}";
+        var args = new List<string> { "show", spec };
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, null, _logger, ct, _options.DefaultTimeoutSeconds, captureRawStdOut: true).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException($"git show failed for {spec} in {normalized}: {result.StdErr}");
+        return ContentEncoding.Decode(result.RawStdOut!);
     }
 
     public async Task<string?> LsRemoteAsync(string remoteUrl, string? branch = null, ProxyConfig? proxy = null, Credential? credential = null, CancellationToken ct = default)
@@ -432,6 +503,32 @@ public sealed class GitService : IGitService
         return res;
     }
 
+    private static IReadOnlyList<GitDiffEntry> ParseNameStatusZ(string stdout)
+    {
+        var list = new List<GitDiffEntry>();
+        var tokens = stdout.Split(NullChar);
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            var status = tokens[i].Trim();
+            if (status.Length == 0) continue;
+            var kind = MapKind(status);
+            string? score = null;
+            if (status.Length > 1 && (status[0] == RenameStatusChar || status[0] == CopyStatusChar))
+                score = status.Substring(1);
+            if ((kind == GitDiffKind.Renamed || kind == GitDiffKind.Copied) && i + 2 < tokens.Length)
+            {
+                list.Add(new GitDiffEntry(kind, tokens[i + 2], tokens[i + 1], score));
+                i += 2;
+            }
+            else if (i + 1 < tokens.Length)
+            {
+                list.Add(new GitDiffEntry(kind, tokens[i + 1], null, score));
+                i += 1;
+            }
+        }
+        return list;
+    }
+
     private static IReadOnlyList<GitDiffEntry> ParseDiff(string stdout)
     {
         var list = new List<GitDiffEntry>();
@@ -447,7 +544,7 @@ public sealed class GitService : IGitService
             string? oldPath = null;
             string? score = null;
 
-            if (statusRaw.StartsWith("R", StringComparison.Ordinal) || statusRaw.StartsWith("C", StringComparison.Ordinal))
+            if (statusRaw.Length > 0 && (statusRaw[0] == RenameStatusChar || statusRaw[0] == CopyStatusChar))
             {
                 // Score attached: e.g., R100 or R095
                 score = statusRaw.Length > 1 ? statusRaw.Substring(1) : null;
@@ -483,6 +580,14 @@ public sealed class GitService : IGitService
         return list;
     }
 
+    private static GitDiffEntry AddedEntry(string path) => new(GitDiffKind.Added, path, null, null);
+
+    private static void AddSetDiffEntries(List<GitDiffEntry> changed, HashSet<string> toSet, HashSet<string> fromSet)
+    {
+        foreach (var f in toSet.Except(fromSet)) changed.Add(AddedEntry(f));
+        foreach (var f in fromSet.Except(toSet)) changed.Add(new GitDiffEntry(GitDiffKind.Deleted, f, null, null));
+    }
+
     private static GitDiffKind MapKind(string status)
     {
         if (string.IsNullOrEmpty(status)) return GitDiffKind.Unknown;
@@ -492,8 +597,8 @@ public sealed class GitService : IGitService
             'A' => GitDiffKind.Added,
             'M' => GitDiffKind.Modified,
             'D' => GitDiffKind.Deleted,
-            'R' => GitDiffKind.Renamed,
-            'C' => GitDiffKind.Copied,
+            RenameStatusChar => GitDiffKind.Renamed,
+            CopyStatusChar => GitDiffKind.Copied,
             'T' => GitDiffKind.TypeChanged,
             'U' => GitDiffKind.Unmerged,
             _ => GitDiffKind.Unknown

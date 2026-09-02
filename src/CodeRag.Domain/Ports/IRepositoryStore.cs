@@ -11,4 +11,7 @@ public interface IRepositoryStore
     Task<IReadOnlyList<Repository>> ListAsync(CancellationToken ct = default);
     Task DeleteAsync(Guid id, CancellationToken ct = default);
     Task DeleteCascadeAsync(Guid repositoryId, CancellationToken ct = default);
+
+    /// <summary>Raw stored local_path for a repository (null if the row is missing). Bypasses value-object validation.</summary>
+    Task<string?> GetLocalPathAsync(Guid id, CancellationToken ct = default);
 }

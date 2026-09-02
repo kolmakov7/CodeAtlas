@@ -109,7 +109,7 @@ public sealed class SearchDomainRankingTests : IDisposable
         var monitor = Substitute.For<IOptionsMonitor<SearchOptions>>();
         monitor.CurrentValue.Returns(options);
 
-        var service = new SearchService(
+        var service = SearchService.CreateForTests(
             _factory,
             new FtsHelper(_factory),
             vectorFactory,

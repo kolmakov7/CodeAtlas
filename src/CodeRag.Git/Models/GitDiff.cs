@@ -1,10 +1,11 @@
 namespace CodeRag.Git.Models;
 
-/// <summary>Результат git diff --name-status -M.</summary>
+/// <summary>Результат git diff --name-status -M. Поддерживает инкрементальный diff (IndexedCommit..HEAD) и fallback при force-push/rebase.</summary>
 public sealed record GitDiff(
-    string FromSha,
+    string? FromSha,
     string ToSha,
-    IReadOnlyList<GitDiffEntry> Entries);
+    IReadOnlyList<GitDiffEntry> Entries,
+    bool IsFullDiff = false);
 
 public sealed record GitDiffEntry(
     GitDiffKind Kind,

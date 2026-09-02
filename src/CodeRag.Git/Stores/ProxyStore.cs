@@ -1,14 +1,14 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
-using CodeRag.Infrastructure.Persistence;
+using CodeRag.Domain.Ports;
 using Dapper;
 
 namespace CodeRag.Git.Stores;
 
 public sealed class ProxyStore : IProxyStore
 {
-    private readonly SqliteConnectionFactory _factory;
-    public ProxyStore(SqliteConnectionFactory factory) => _factory = factory;
+    private readonly IDbConnectionFactory _factory;
+    public ProxyStore(IDbConnectionFactory factory) => _factory = factory;
 
     public async Task UpsertAsync(ProxyConfig proxy, CancellationToken ct = default)
     {
