@@ -18,7 +18,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - [x] Add synthetic tests (one child, several children, three levels, siblings, non-chunk nested node)
 - [x] Research JavaScript (synthetic + real repo)
 - [x] Research HTML (synthetic + real repo)
-- [ ] Research CSS
+- [x] Research CSS (synthetic + real repo)
 - [x] Research XML / XSLT (parser built + verified; chunk rule decided; implementation pending with XML stage)
 - [ ] Research SQL / T-SQL (SQL-ProcBench)
 - [ ] Write final research documentation (.md)
@@ -71,8 +71,11 @@ experiment results, links/commits of investigated repositories, tests added, cod
   `<script>`/`<style>` are NOT `element` — separate `script_element`/`style_element` nodes whose content
   is a `raw_text` child; void/self-closing tags (`<img/>`, `<meta/>`, `<br/>`) have `self_closing_tag`
   (not `start_tag`) as first child with the same `tag_name`/`attribute` children inside.
-- **CSS** (tree-sitter-css): `stylesheet > rule_set (selectors + block)`, `media_statement`,
-  `keyframes_statement > keyframe_block (from/to)`.
+- **CSS** (tree-sitter-css): `stylesheet > rule_set (selectors + block > declaration*)`;
+  `media_statement (feature_query + block > rule_set*)`;
+  `keyframes_statement (keyframes_name + keyframe_block_list > keyframe_block (from/to + block))`;
+  `@import`/`@charset` are separate at-rule nodes (not rule_set); comments between rules belong to the
+  enclosing block's range, not to the neighboring rule's.
 
 ## XML / XSLT parser availability
 - No standalone NuGet package for tree-sitter-xml exists (searched azuresearch).
@@ -103,8 +106,14 @@ experiment results, links/commits of investigated repositories, tests added, cod
    Symbol kind = new `SymbolKind.Section`; name = `tag` or `tag#id`.
    Rationale for the id rule: corpus files mix sectioning tags with heavy div usage (e.g. 43–55 `<div>`s,
    0–2 sectioning tags); id anchors are how real markup marks semantic blocks.
-6. CSS chunk set (tentative): `rule_set`, `media_statement`, `keyframes_statement`;
-   `media_statement`/`keyframes_statement` exclude nested chunk ranges.
+6. CSS chunk set (FINAL): `rule_set` (name = `selectors` text), `media_statement` and
+   `keyframes_statement` (name = at-rule head up to `{`, e.g. `@media (min-width: 600px)` /
+   `@keyframes spin`) — all with kind = new `SymbolKind.Rule`. Root `stylesheet` is not a chunk.
+   Nested `rule_set` inside `media_statement` is excluded from the media chunk source (common rule).
+   `keyframe_block` (from/to/50%) is NOT a chunk — stays inside the keyframes chunk.
+   Other at-rules (`@import`, `@charset`, `@supports`) are not chunks; files without any rule
+   fall back to sliding window. Comments at a level stay in that level's chunk (they are not
+   part of the nested rule's range).
 7. XML: ship self-built `libtree-sitter-xml.so`; XML chunk set to be finalized after AST inspection
    (root `document` not a chunk; candidates: named `element` nodes, depth/size heuristic TBD).
 8. SQL stage stays on existing `SqlAnalyzer` (ScriptDom) — validate behavior + SQL-ProcBench;
@@ -129,15 +138,22 @@ experiment results, links/commits of investigated repositories, tests added, cod
   one child (parent excludes child range, declarator prefix `var bar = ` stays in parent),
   several children (class excludes all methods, keeps non-chunk members), three levels
   (each level excludes only its own children), siblings, non-chunk nested node (if/for NOT cut),
-  `function_expression` named from enclosing declarator, multi-byte UTF-8 (Cyrillic intact),
+   `function_expression` named from enclosing declarator, multi-byte UTF-8 (Cyrillic intact),
    cross-language sanity (Python class excludes methods).
-- `tests/CodeRag.Tests/Unit/TreeSitterHtmlChunkTests.cs` — 7 tests, all passing:
-  sectioning elements are chunks while `html`/`head`/`body`/`div`/`title` are not (+ symbol Language == "html"),
-  nested sections (parent excludes child range, child keeps full content),
-  any element with id is a chunk (`div#hero`, `span#badge`) / without id is not,
-  inline `script`/`style` are chunks + excluded from parent `div#wrap`, external `<script src>` is not,
-  `html`/`head`/`body` with id never chunks (sliding-window fallback kicks in),
-  no-semantic-elements file falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact through exclusion).
+ - `tests/CodeRag.Tests/Unit/TreeSitterHtmlChunkTests.cs` — 7 tests, all passing:
+   sectioning elements are chunks while `html`/`head`/`body`/`div`/`title` are not (+ symbol Language == "html"),
+   nested sections (parent excludes child range, child keeps full content),
+   any element with id is a chunk (`div#hero`, `span#badge`) / without id is not,
+   inline `script`/`style` are chunks + excluded from parent `div#wrap`, external `<script src>` is not,
+   `html`/`head`/`body` with id never chunks (sliding-window fallback kicks in),
+   no-semantic-elements file falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact through exclusion).
+ - `tests/CodeRag.Tests/Unit/TreeSitterCssChunkTests.cs` — 6 tests, all passing:
+   rule_set chunks named by selectors (`.a`, `:root`, `div > p`, symbol Language == "css"),
+   media_statement excludes all nested rule_set ranges (keeps its at-rule head, ends with `}`),
+   keyframes_statement keeps full content while from/to keyframe_blocks are NOT chunks,
+   mixed file (@import + 2x .top + media + keyframes → 4 chunks, media copy excluded from media chunk),
+   no-rules file (@import/@charset only) falls back to sliding window,
+   multi-byte UTF-8 (comment inside rule stays in rule chunk; comment at media level stays in media chunk).
 
 ## Code changes
 - `src/CodeRag.Analyzers.TreeSitter/TreeSitterAnalyzer.cs`:
@@ -151,7 +167,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
     identifier, fallback "anonymous".
   - Symbols/relations/fallback behavior unchanged.
 - JavaScript stage (committed `0c2bca7`): full test suite 208 passed / 1 skipped / 0 failed.
-- HTML stage (this commit):
+- HTML stage (committed `32caf70`):
   - `SupportedLanguages.Html = "html"` added (+ `All` set); `SymbolKind.Section = "Section"` added.
   - `LanguageDetector`: `.html`/`.htm` → `html`.
   - `TreeSitterAnalyzer`: extension map `.html`/`.htm` → `"HTML"`, context map `"html"`,
@@ -161,6 +177,14 @@ experiment results, links/commits of investigated repositories, tests added, cod
     `HandleRawTextElement` for `script_element`/`style_element` (chunk iff non-blank `raw_text`),
     shared `GetIdFromStartTag` helper (handles quoted and unquoted values).
   - Full test suite: 215 passed / 1 skipped / 0 failed.
+- CSS stage (this commit):
+  - `SupportedLanguages.Css = "css"` (+ `All` set); `SymbolKind.Rule = "Rule"`.
+  - `LanguageDetector`: `.css` → `css`.
+  - `TreeSitterAnalyzer`: extension map `.css` → `"CSS"`, context map `"css"`,
+    `TreeSitterToSupported["css"] = Css`; chunk condition extended to `SymbolKind.Rule`;
+    new `HandleCssRule` handler for `rule_set` (name = `selectors` text) and
+    `media_statement`/`keyframes_statement` (name = first line up to `{`), names truncated to 200 chars.
+  - Full test suite: 221 passed / 1 skipped / 0 failed.
 
 ## JavaScript — real repo validation
 - Corpus: `zxuqian/html-css-examples` commit `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6`
@@ -192,6 +216,17 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - id-anchor rule confirmed on real markup: id-heavy div pages produce clean chunks
   (`div#home`, `section#about-us`, `img#image`, `img#mask`, ...).
 
+## CSS — real repo validation
+- Corpus: same `/tmp/htmlcss`; 35 `.css` files (demo stylesheets, grid/flex layouts, glassmorphism etc.).
+- Ran `TreeSitterAnalyzer` over all 35 files (harness mode `repojs <dir> .css css`):
+  702 symbols, 702 chunks, 10/35 files contain nested chunks (media queries with rules),
+  2 parse errors, 0 fallback files.
+- Strict verification: **leafExact=685 leafMismatch=0** (every chunk without nested children equals the
+  exact source substring), **parentLeaks=0** (all 35 files).
+- 2 parse errors: `09-japanese-pronunciation/style.css`, `15-responsive-navbar/style.css`
+  (`hasError at 0:0` — grammar strictness, e.g. modern CSS features); tree-sitter error recovery
+  still extracted all 18 rules from each file (recorded as `AnalyzerError`, result still valid).
+
 ## XML / XSLT — verified results
 - Built `libtree-sitter-xml.so` from `tree-sitter-grammars/tree-sitter-xml` commit
   `5000ae8f22d11fbe93939b05c1e37cf21117162d` (v0.7.0, ABI 14):
@@ -220,14 +255,15 @@ experiment results, links/commits of investigated repositories, tests added, cod
   copied to output via csproj (mirrors TreeSitter.DotNet package layout). Decide at XML implementation step.
 
 ## Current task
-JS stage committed (`0c2bca7`). HTML stage implemented + validated; commit this state.
+JS (`0c2bca7`) and HTML (`32caf70`) stages committed. CSS stage implemented + validated; commit this state.
 
 ## Next step
-1. Commit HTML stage: `git add` TODO.md + TreeSitterAnalyzer.cs + SupportedLanguages.cs + Symbol.cs +
-   LanguageDetector.cs + TreeSitterHtmlChunkTests.cs; commit `tree-sitter: validate HTML chunking`.
-2. CSS stage: add `.css` → `SupportedLanguages.Css = "css"` (new constant), extension/context maps
-   (`"CSS"` — bundled in TreeSitter.DotNet 1.3.0), CSS chunk handlers per decision #6
-   (`rule_set`, `media_statement`, `keyframes_statement` as chunks; nested `rule_set` inside
-   `media_statement` excluded from parent; `stylesheet` root not a chunk; at-rules like `@font-face` TBD —
-   inspect AST first with harness mode `css`), `SymbolKind` for CSS rules TBD (likely reuse a generic kind).
-   Synthetic tests + run over /tmp/htmlcss .css files; update TODO.md; commit.
+1. Commit CSS stage: `git add` TODO.md + TreeSitterAnalyzer.cs + SupportedLanguages.cs + Symbol.cs +
+   LanguageDetector.cs + TreeSitterCssChunkTests.cs; commit `tree-sitter: validate CSS chunking`.
+2. XML stage: copy built `/tmp/opencode/tsre/binxml/libtree-sitter-xml.so` into
+   `src/CodeRag.Analyzers.TreeSitter/runtimes/linux-x64/native/` + csproj Content/CopyToOutputDirectory
+   (mirrors TreeSitter.DotNet package layout); add `.xml`/`.xsl`/`.xslt` → `"Xml"`, `SupportedLanguages.Xml`
+   (new constant) + `SymbolKind` for XML elements (TBD — likely `SymbolKind.Field`-like or new `Element`),
+   XML chunk rule per decision #7 (container elements only; `document`/leaf elements not chunks),
+   synthetic tests (incl. XSLT sample) + validate on a real XML/XSLT repo (find small one to clone into /tmp);
+   update TODO.md; commit.

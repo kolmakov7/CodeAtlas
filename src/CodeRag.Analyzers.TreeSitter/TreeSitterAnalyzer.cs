@@ -21,6 +21,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         [".go"] = "Go",
         [".cpp"] = "C++", [".cc"] = "C++", [".cxx"] = "C++", [".c"] = "C++", [".h"] = "C++", [".hpp"] = "C++", [".hh"] = "C++", [".hxx"] = "C++",
         [".html"] = "HTML", [".htm"] = "HTML",
+        [".css"] = "CSS",
     };
 
     private static readonly Dictionary<string, string> ContextToTreeSitter = new(StringComparer.OrdinalIgnoreCase)
@@ -31,6 +32,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["cpp"] = "C++",
         ["c++"] = "C++",
         ["html"] = "HTML",
+        ["css"] = "CSS",
     };
 
     private static readonly Dictionary<string, string> TreeSitterToSupported = new(StringComparer.OrdinalIgnoreCase)
@@ -43,6 +45,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["c++"] = SupportedLanguages.Cpp,
         ["cpp"] = SupportedLanguages.Cpp,
         ["html"] = SupportedLanguages.Html,
+        ["css"] = SupportedLanguages.Css,
     };
 
     private static readonly Dictionary<string, string[]> LanguageLoadFallbacks = new(StringComparer.Ordinal)
@@ -74,6 +77,9 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["element"] = HandleHtmlElement,
         ["script_element"] = HandleRawTextElement,
         ["style_element"] = HandleRawTextElement,
+        ["rule_set"] = HandleCssRule,
+        ["media_statement"] = HandleCssRule,
+        ["keyframes_statement"] = HandleCssRule,
     };
 
     private readonly IChunkFactory _factory;
@@ -345,7 +351,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
             // Чанк на function/class/method/section: источник собирается после обхода всего дерева,
             // чтобы исключить из него диапазоны вложенных семантических чанков
-            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section)
+            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section or SymbolKind.Rule)
                 candidates.Add(new ChunkCandidate(node, symbol, startLine, endLine));
 
             created = symbol;
@@ -628,6 +634,33 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         var id = GetIdFromStartTag(startTag);
         c.Kind = SymbolKind.Section;
         c.Name = id != null ? $"{tagName}#{id}" : tagName;
+    }
+
+    /// <summary>
+    /// CSS rules: rule_set (name = selectors), media_statement / keyframes_statement
+    /// (name = at-rule head, e.g. "@media (min-width: 600px)" / "@keyframes spin").
+    /// The root stylesheet is not a chunk; nested rule_set inside media_statement
+    /// is excluded from the media chunk source (common exclusion rule).
+    /// </summary>
+    private static void HandleCssRule(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang != "CSS") return;
+        string? name = null;
+        if (node.Type == "rule_set")
+        {
+            name = node.Children.FirstOrDefault(ch => ch.Type == "selectors")?.Text?.Trim();
+        }
+        else
+        {
+            var firstLine = node.Text.Split('\n').FirstOrDefault()?.Trim();
+            if (!string.IsNullOrWhiteSpace(firstLine))
+                name = firstLine.Split('{')[0].Trim();
+        }
+        if (string.IsNullOrWhiteSpace(name)) return;
+        if (name.Length > 200) name = name[..200];
+
+        c.Kind = SymbolKind.Rule;
+        c.Name = name;
     }
 
     private static string? GetIdFromStartTag(Node startTag)
