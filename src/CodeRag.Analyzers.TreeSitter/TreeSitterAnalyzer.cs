@@ -1,3 +1,4 @@
+using System.Text;
 using CodeRag.Analyzers.Abstractions;
 using CodeRag.Analyzers.Abstractions.Chunking;
 using TreeSitter;
@@ -60,6 +61,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["method_declaration"] = HandleMethod,
         ["method_definition"] = HandleMethod,
         ["arrow_function"] = HandleArrowFunction,
+        ["function_expression"] = HandleFunctionExpression,
         ["call"] = HandleCall,
         ["call_expression"] = HandleCall,
         ["import_statement"] = HandleImport,
@@ -141,8 +143,14 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             var stack = new Stack<Symbol>();
             var callNodes = new List<Node>();
             var importNodes = new List<Node>();
+            var chunkCandidates = new List<ChunkCandidate>();
 
-            Walk(root, stack, symbols, chunks, relations, errors, ctx, treeSitterLang, callNodes, importNodes, ct);
+            Walk(root, stack, symbols, chunkCandidates, relations, errors, ctx, treeSitterLang, callNodes, importNodes, ct);
+
+            // Сборка чанков с исключением вложенных семантических чанков:
+            // источник чанка = диапазон узла минус диапазоны чанков-потомков (потомки сохраняют полное содержимое)
+            foreach (var cand in chunkCandidates)
+                TryBuildChunk(cand, chunkCandidates, tree, MapToSupported(treeSitterLang), chunks, errors, ctx.FilePath);
 
             // Relations для calls: по имени ищем target среди symbols
             foreach (var callNode in callNodes)
@@ -265,7 +273,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         Node node,
         Stack<Symbol> stack,
         List<Symbol> symbols,
-        List<Chunk> chunks,
+        List<ChunkCandidate> candidates,
         List<Relation> relations,
         List<AnalyzerError> errors,
         FileContext ctx,
@@ -329,23 +337,10 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
                 relations.Add(new Relation(parentId.Value, symbol.Id, RelationType.Contains));
             }
 
-            // Chunk per function/class/method
+            // Чанк на function/class/method: источник собирается после обхода всего дерева,
+            // чтобы исключить из него диапазоны вложенных семантических чанков
             if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method)
-            {
-                var source = node.Text;
-                if (!string.IsNullOrWhiteSpace(source))
-                {
-                    try
-                    {
-                        var chunk = _factory.Create(symbol.Id, supportedLang, startLine, endLine, source);
-                        chunks.Add(chunk);
-                    }
-                    catch (Exception ex)
-                    {
-                        errors.Add(new AnalyzerError(ctx.FilePath, $"Chunk failed for {name}: {ex.Message}"));
-                    }
-                }
-            }
+                candidates.Add(new ChunkCandidate(node, symbol, startLine, endLine));
 
             created = symbol;
             stack.Push(symbol);
@@ -353,10 +348,64 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
         foreach (var child in node.Children)
         {
-            Walk(child, stack, symbols, chunks, relations, errors, ctx, treeLang, callNodes, importNodes, ct);
+            Walk(child, stack, symbols, candidates, relations, errors, ctx, treeLang, callNodes, importNodes, ct);
         }
 
         if (created != null) stack.Pop();
+    }
+
+    private sealed record ChunkCandidate(Node Node, Symbol Symbol, int StartLine, int EndLine);
+
+    private void TryBuildChunk(
+        ChunkCandidate cand,
+        IReadOnlyList<ChunkCandidate> all,
+        Tree tree,
+        string supportedLang,
+        List<Chunk> chunks,
+        List<AnalyzerError> errors,
+        string filePath)
+    {
+        try
+        {
+            var source = BuildExcludedSource(cand, all, tree);
+            var chunk = _factory.Create(cand.Symbol.Id, supportedLang, cand.StartLine, cand.EndLine, source);
+            chunks.Add(chunk);
+        }
+        catch (Exception ex)
+        {
+            errors.Add(new AnalyzerError(filePath, $"Chunk failed for {cand.Symbol.Name}: {ex.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Source of the node minus the ranges of nested semantic chunks (descendant candidates).
+    /// Remaining segments are concatenated in source order, so the parent chunk keeps its own
+    /// text without duplicating child chunk content. If the node consists entirely of child
+    /// chunks (degenerate case), falls back to the full node text.
+    /// </summary>
+    private static string BuildExcludedSource(ChunkCandidate cand, IReadOnlyList<ChunkCandidate> all, Tree tree)
+    {
+        var descendants = all
+            .Where(d => !ReferenceEquals(d, cand)
+                        && d.Node.StartIndex >= cand.Node.StartIndex
+                        && d.Node.EndIndex <= cand.Node.EndIndex)
+            .OrderBy(d => d.Node.StartIndex)
+            .ThenBy(d => d.Node.EndIndex)
+            .ToList();
+
+        var sb = new StringBuilder(Math.Max(0, cand.Node.EndIndex - cand.Node.StartIndex));
+        var cursor = cand.Node.StartIndex;
+        foreach (var d in descendants)
+        {
+            if (d.Node.StartIndex > cursor)
+                sb.Append(tree.GetText(cursor, d.Node.StartIndex));
+            if (d.Node.EndIndex > cursor)
+                cursor = d.Node.EndIndex;
+        }
+        if (cand.Node.EndIndex > cursor)
+            sb.Append(tree.GetText(cursor, cand.Node.EndIndex));
+
+        return sb.Length > 0 ? sb.ToString() : cand.Node.Text;
     }
 
     private static string? ExtractName(Node node, string? treeLang = null)
@@ -520,6 +569,14 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         c.Name = "arrow";
         var parentVar = node.Parent?.Type == "variable_declarator" ? ExtractName(node.Parent!, c.TreeLang) : null;
         if (!string.IsNullOrWhiteSpace(parentVar)) c.Name = parentVar;
+    }
+
+    private static void HandleFunctionExpression(Node node, NodeHandlerContext c)
+    {
+        c.Kind = SymbolKind.Function;
+        // var foo = function() {} — имя из окружающего декларатора; иначе анонимная функция
+        var parentVar = node.Parent?.Type == "variable_declarator" ? ExtractName(node.Parent!, c.TreeLang) : null;
+        c.Name = parentVar ?? "anonymous";
     }
 
     private static void HandleCall(Node node, NodeHandlerContext c) => c.CallNodes.Add(node);
