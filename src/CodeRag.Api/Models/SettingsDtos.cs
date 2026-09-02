@@ -15,6 +15,12 @@ public sealed class IndexingSettingsDto
 {
     public int? SyncIntervalSeconds { get; set; }
     public int? MaxConcurrentIndexers { get; set; }
+    public int? ParallelFileIndexers { get; set; }
+    public bool? EnableFileWatcher { get; set; }
+    public int? FileWatcherDebounceMs { get; set; }
+    public int? MaxChunkChars { get; set; }
+    public double? ChunkOverlapFraction { get; set; }
+    public int? MinEmbeddingChars { get; set; }
     public string[]? Exclusions { get; set; }
     public string[]? LanguageExclusions { get; set; }
 }
@@ -85,6 +91,12 @@ public sealed class AppSettingsDto
         {
             Add("Indexer:DefaultSyncIntervalSeconds", i.SyncIntervalSeconds?.ToString(CultureInfo.InvariantCulture));
             Add("Indexer:MaxConcurrentIndexers", i.MaxConcurrentIndexers?.ToString(CultureInfo.InvariantCulture));
+            Add("Indexer:ParallelFileIndexers", i.ParallelFileIndexers?.ToString(CultureInfo.InvariantCulture));
+            Add("Indexer:EnableFileWatcher", i.EnableFileWatcher?.ToString(CultureInfo.InvariantCulture));
+            Add("Indexer:FileWatcherDebounceMs", i.FileWatcherDebounceMs?.ToString(CultureInfo.InvariantCulture));
+            Add("Indexer:MaxChunkChars", i.MaxChunkChars?.ToString(CultureInfo.InvariantCulture));
+            Add("Indexer:ChunkOverlapFraction", i.ChunkOverlapFraction?.ToString(CultureInfo.InvariantCulture));
+            Add("Indexer:MinEmbeddingChars", i.MinEmbeddingChars?.ToString(CultureInfo.InvariantCulture));
             Add("Indexer:Exclusions", i.Exclusions is null ? null : string.Join(", ", i.Exclusions));
             Add("Indexer:LanguageExclusions", i.LanguageExclusions is null ? null : string.Join(", ", i.LanguageExclusions));
         }
@@ -153,6 +165,7 @@ public sealed class AppSettingsDto
 
         // Stored value wins over merged config; null if absent.
         string? Resolve(string key) => Get(key) ?? config[key];
+        bool ResolveBool(string key, bool fallback) => bool.TryParse(Resolve(key), out var v) ? v : fallback;
 
         // Per-domain value, falling back to the legacy single-model key, then a default.
         string? DomStr(string domain, string key, string? legacyKey, string? fallback) =>
@@ -174,6 +187,12 @@ public sealed class AppSettingsDto
             {
                 SyncIntervalSeconds = CfgInt("Indexer:DefaultSyncIntervalSeconds", 300),
                 MaxConcurrentIndexers = CfgInt("Indexer:MaxConcurrentIndexers", 2),
+                ParallelFileIndexers = CfgInt("Indexer:ParallelFileIndexers", 8),
+                EnableFileWatcher = ResolveBool("Indexer:EnableFileWatcher", false),
+                FileWatcherDebounceMs = CfgInt("Indexer:FileWatcherDebounceMs", 1500),
+                MaxChunkChars = CfgInt("Indexer:MaxChunkChars", 1500),
+                ChunkOverlapFraction = CfgDouble("Indexer:ChunkOverlapFraction", 0.15),
+                MinEmbeddingChars = CfgInt("Indexer:MinEmbeddingChars", 32),
                 Exclusions = SplitList(Get("Indexer:Exclusions")),
                 LanguageExclusions = SplitList(Get("Indexer:LanguageExclusions"))
             },

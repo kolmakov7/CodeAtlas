@@ -10,4 +10,5 @@ public interface IIndexingJobStore
     Task<IReadOnlyList<IndexingJob>> ListAsync(Guid? repositoryId = null, CancellationToken ct = default);
     Task<IReadOnlyList<IndexingJob>> ListByStatusAsync(JobStatus status, CancellationToken ct = default);
     Task UpdateProgressAsync(Guid jobId, double progress, CancellationToken ct = default);
+    Task UpdateProgressAsync(IndexingJob job, CancellationToken ct = default);
 }

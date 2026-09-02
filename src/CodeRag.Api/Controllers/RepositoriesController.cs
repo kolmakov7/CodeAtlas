@@ -33,6 +33,106 @@ public sealed class RepositoriesController : ControllerBase
         _reposRoot = Path.Combine(dataDir, "repos");
     }
 
+    [HttpPost("validate")]
+    public async Task<IActionResult> Validate([FromBody] ValidateRepositoryRequest req, CancellationToken ct)
+    {
+        if (req is null) return Problem(title: "Body required", statusCode: 400);
+        if (string.IsNullOrWhiteSpace(req.GitUrl)) return Problem(title: "GitUrl required", statusCode: 400);
+        var gid = req.GroupId ?? req.ProxyId ?? req.CredentialId;
+        if (!gid.HasValue && (req.ProxyId.HasValue || req.CredentialId.HasValue))
+        {
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            gid = def?.Id;
+        }
+        else if (!gid.HasValue)
+        {
+            gid = req.GroupId;
+        }
+        // If still null, use passed GroupId directly
+        if (!gid.HasValue) gid = req.GroupId;
+        var (available, error) = await _repoService.ValidateAsync(req.GitUrl, gid, ct).ConfigureAwait(false);
+        if (!available)
+            return Ok(new ValidateRepositoryResponse(false, error));
+        return Ok(new ValidateRepositoryResponse(true, null));
+    }
+
+    [HttpGet("branches")]
+    public async Task<IActionResult> GetBranches([FromQuery] string gitUrl, [FromQuery] Guid? groupId, [FromQuery] Guid? proxyId, [FromQuery] Guid? credentialId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(gitUrl)) return Problem(title: "gitUrl query required", statusCode: 400);
+        var gid = groupId ?? proxyId ?? credentialId;
+        if (!gid.HasValue && (proxyId.HasValue || credentialId.HasValue))
+        {
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            gid = def?.Id;
+        }
+        if (!gid.HasValue) gid = groupId;
+        try
+        {
+            var branches = await _repoService.GetBranchesAsync(gitUrl, gid, ct).ConfigureAwait(false);
+            return Ok(new BranchesResponse(branches));
+        }
+        catch (Exception ex)
+        {
+            return Problem(title: SecretMasker.Mask(ex.Message), statusCode: 422);
+        }
+    }
+
+    [HttpGet("root-directories")]
+    public async Task<IActionResult> GetRootDirectories([FromQuery] string gitUrl, [FromQuery] string branch, [FromQuery] Guid? groupId, [FromQuery] Guid? proxyId, [FromQuery] Guid? credentialId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(gitUrl)) return Problem(title: "gitUrl required", statusCode: 400);
+        if (string.IsNullOrWhiteSpace(branch)) return Problem(title: "branch required", statusCode: 400);
+        var gid = groupId ?? proxyId ?? credentialId;
+        if (!gid.HasValue && (proxyId.HasValue || credentialId.HasValue))
+        {
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            gid = def?.Id;
+        }
+        if (!gid.HasValue) gid = groupId;
+        try
+        {
+            var dirs = await _repoService.GetRootDirectoriesAsync(gitUrl, branch, gid, ct).ConfigureAwait(false);
+            return Ok(new RootDirectoriesResponse(dirs));
+        }
+        catch (Exception ex)
+        {
+            return Problem(title: SecretMasker.Mask(ex.Message), statusCode: 422);
+        }
+    }
+
+    [HttpGet("{id:guid}/branches")]
+    public async Task<IActionResult> GetBranchesForRepo(Guid id, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
+        try
+        {
+            var branches = await _repoService.GetBranchesAsync(repo.GitUrl.Value, repo.GroupId, ct).ConfigureAwait(false);
+            return Ok(new BranchesResponse(branches));
+        }
+        catch (Exception ex)
+        {
+            return Problem(title: SecretMasker.Mask(ex.Message), statusCode: 422);
+        }
+    }
+
+    [HttpGet("{id:guid}/root-directories")]
+    public async Task<IActionResult> GetRootDirectoriesForRepo(Guid id, [FromQuery] string? branch, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
+        try
+        {
+            var dirs = await _repoService.GetRootDirectoriesForRepositoryAsync(id, branch, ct).ConfigureAwait(false);
+            return Ok(new RootDirectoriesResponse(dirs));
+        }
+        catch (Exception ex)
+        {
+            return Problem(title: SecretMasker.Mask(ex.Message), statusCode: 422);
+        }
+    }
+
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateRepositoryRequest req, CancellationToken ct)
     {
@@ -54,7 +154,7 @@ public sealed class RepositoriesController : ControllerBase
 
  try
             {
-                _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}'", req.Name, MaskUrl(req.GitUrl));
+                _logger.LogInformation("POST /api/repositories name='{Name}' url='{Url}' branch='{Branch}' filter={Filter}", req.Name, MaskUrl(req.GitUrl), req.Branch, req.DirectoryFilterEnabled);
                 var gid = req.GroupId ?? req.ProxyId ?? req.CredentialId; // fallback for legacy clients
                 // If legacy proxy/cred supplied without group, try to resolve group that matches; otherwise use groupId directly
                 Guid? effectiveGroup = req.GroupId;
@@ -64,8 +164,14 @@ public sealed class RepositoriesController : ControllerBase
                     var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
                     effectiveGroup = def?.Id;
                 }
-                var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, effectiveGroup, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
+                var repo = await _repoService.AddAsync(req.Name, req.GitUrl, req.Branch ?? "main", localPath, effectiveGroup, req.SyncIntervalSeconds, req.DirectoryFilterEnabled, req.AllowedDirectories, ct).ConfigureAwait(false);
                 
+                // If repo creation resulted in Error status (e.g., ls-remote failed), don't enqueue jobs and return error
+                if (repo.Status == RepositoryStatus.Error)
+                {
+                    return Problem(title: repo.LastError ?? "Repository validation failed", statusCode: 422);
+                }
+
                 // Clone — отдельный уникальный таск сразу после добавления, Sync/Index после
                 var job = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Clone);
                 await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
@@ -108,17 +214,32 @@ public sealed class RepositoriesController : ControllerBase
             if (byName is not null && byName.Id != id) return Problem(title: $"Repository name '{req.Name}' already exists", statusCode: 409);
         }
 
+        // Capture before state for change detection
+        var beforeBranch = repo.Branch;
+        var beforeFilterEnabled = repo.DirectoryFilterEnabled;
+        var beforeDirs = repo.AllowedDirectories.ToArray();
+
         try
         {
-            _logger.LogInformation("PUT /api/repositories/{Id} name='{Name}'", id, req.Name ?? "(unchanged)");
+            _logger.LogInformation("PUT /api/repositories/{Id} name='{Name}' branch='{Branch}' filter={Filter}", id, req.Name ?? "(unchanged)", req.Branch ?? "(unchanged)", req.DirectoryFilterEnabled);
             var gid = req.GroupId ?? req.ProxyId; // legacy fallback
-            var updated = await _repoService.UpdateAsync(id, req.Name, req.GitUrl, req.Branch, req.LocalPath, gid, req.SyncIntervalSeconds, ct).ConfigureAwait(false);
+            var updated = await _repoService.UpdateAsync(id, req.Name, req.GitUrl, req.Branch, req.LocalPath, gid, req.SyncIntervalSeconds, req.DirectoryFilterEnabled, req.AllowedDirectories, ct).ConfigureAwait(false);
 
             // Handle enabled toggle
             if (req.Enabled.HasValue && req.Enabled.Value != updated.Enabled)
             {
                 updated.SetEnabled(req.Enabled.Value);
                 await _repoStore.UpsertAsync(updated, ct).ConfigureAwait(false);
+            }
+
+            // Detect branch/filter change and trigger reindex if needed
+            var branchChanged = !string.Equals(beforeBranch, updated.Branch, StringComparison.Ordinal);
+            var filterChanged = beforeFilterEnabled != updated.DirectoryFilterEnabled || !beforeDirs.SequenceEqual(updated.AllowedDirectories);
+            if (branchChanged || filterChanged)
+            {
+                _logger.LogInformation("Repository {Id} branch/filter changed branchChanged={Bc} filterChanged={Fc}, enqueue Rebuild", id, branchChanged, filterChanged);
+                var job = IndexingJob.Create(Guid.NewGuid(), updated.Id, JobType.Rebuild);
+                await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
             }
 
             return Ok(await MapAsync(updated, ct).ConfigureAwait(false));
@@ -258,14 +379,16 @@ public sealed class RepositoriesController : ControllerBase
             r.Id, r.Name, r.GitUrl.Value, r.Branch, r.LocalPath.Value,
             r.CurrentCommit, r.IndexedCommit, r.Status.ToString(), r.Enabled,
             r.GroupId, effProxy, effCred, r.SyncIntervalSeconds,
-            r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError);
+            r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError,
+            r.DirectoryFilterEnabled, r.AllowedDirectories.ToArray());
     }
 
     private static RepositoryDto Map(Repository r) => new(
         r.Id, r.Name, r.GitUrl.Value, r.Branch, r.LocalPath.Value,
         r.CurrentCommit, r.IndexedCommit, r.Status.ToString(), r.Enabled,
         r.GroupId, r.ProxyId, r.CredentialId, r.SyncIntervalSeconds,
-        r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError);
+        r.LastSyncAt?.ToString("o"), r.LastIndexAt?.ToString("o"), r.LastError,
+        r.DirectoryFilterEnabled, r.AllowedDirectories.ToArray());
 
     private static string ToSlug(string name)
     {

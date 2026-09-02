@@ -50,6 +50,12 @@ public sealed class Repository
     public DateTimeOffset? LastIndexAt { get; private set; }
     public string? LastError { get; private set; }
 
+    /// <summary>Если true — индексируются только файлы из AllowedDirectories.</summary>
+    public bool DirectoryFilterEnabled { get; private set; }
+
+    /// <summary>Список корневых директорий для индексации (когда фильтр включён).</summary>
+    public IReadOnlyList<string> AllowedDirectories { get; private set; } = Array.Empty<string>();
+
     private Repository(
         Guid id, string name, GitUrl gitUrl, string branch, LocalPath localPath,
         RepositoryStatus status, bool enabled)
@@ -72,7 +78,9 @@ public sealed class Repository
         RepositoryStatus status = RepositoryStatus.Active,
         bool enabled = true,
         Guid? groupId = null,
-        int? syncIntervalSeconds = null)
+        int? syncIntervalSeconds = null,
+        bool directoryFilterEnabled = false,
+        IEnumerable<string>? allowedDirectories = null)
     {
         if (id == Guid.Empty) throw new DomainValidationException("Repository Id must not be empty.");
         if (string.IsNullOrWhiteSpace(name)) throw new DomainValidationException("Repository Name must not be empty.");
@@ -88,6 +96,7 @@ public sealed class Repository
             GroupId = groupId,
             SyncIntervalSeconds = syncIntervalSeconds
         };
+        repo.SetDirectoryFilter(directoryFilterEnabled, allowedDirectories);
         return repo;
     }
 
@@ -143,6 +152,51 @@ public sealed class Repository
     }
 
     public void SetEnabled(bool enabled) => Enabled = enabled;
+
+    /// <summary>Установить фильтр директорий.</summary>
+    public void SetDirectoryFilter(bool enabled, IEnumerable<string>? allowedDirectories)
+    {
+        if (!enabled)
+        {
+            DirectoryFilterEnabled = false;
+            AllowedDirectories = Array.Empty<string>();
+            return;
+        }
+
+        var list = (allowedDirectories ?? Array.Empty<string>())
+            .Select(s => s.Trim().Trim('/'))
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (list.Count == 0)
+            throw new DomainValidationException("AllowedDirectories must not be empty when filter is enabled.");
+
+        foreach (var d in list)
+        {
+            if (d.Contains("..") || d.Contains('\\') || d.Contains("//"))
+                throw new DomainValidationException($"Invalid directory name: '{d}'.");
+            if (d.StartsWith("/") || d.EndsWith("/"))
+                throw new DomainValidationException($"Invalid directory name: '{d}'.");
+        }
+
+        DirectoryFilterEnabled = true;
+        AllowedDirectories = list;
+    }
+
+    /// <summary>True если файл должен индексироваться с учётом фильтра.</summary>
+    public bool IsPathAllowed(string filePath)
+    {
+        if (!DirectoryFilterEnabled) return true;
+        if (AllowedDirectories.Count == 0) return false;
+        var normalized = filePath.Trim().TrimStart('/');
+        foreach (var dir in AllowedDirectories)
+        {
+            if (string.Equals(normalized, dir, StringComparison.Ordinal)) return true;
+            if (normalized.StartsWith(dir + "/", StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
 
     // --- Жизненный цикл статусов ---
 
@@ -207,6 +261,12 @@ public sealed class Repository
         LastSyncAt = at ?? DateTimeOffset.UtcNow;
     }
 
+    /// <summary>Время последней попытки sync (в т.ч. неудачной) — backoff polling.</summary>
+    public void MarkSyncAttempted(DateTimeOffset? at = null)
+    {
+        LastSyncAt = at ?? DateTimeOffset.UtcNow;
+    }
+
     /// <summary>
     /// Инвариант: после успешной индексации IndexedCommit == CurrentCommit.
     /// Устанавливает оба в один commit и переводит в Active.
@@ -253,7 +313,9 @@ public sealed class Repository
         string? currentCommit, string? indexedCommit, RepositoryStatus status, bool enabled,
         Guid? proxyId, Guid? credentialId, int? syncIntervalSeconds,
         DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError,
-        Guid? groupId = null)
+        Guid? groupId = null,
+        bool directoryFilterEnabled = false,
+        IReadOnlyList<string>? allowedDirectories = null)
     {
         var git = GitUrl.Create(gitUrl);
         var lp = LocalPath.Create(localPath);
@@ -267,7 +329,9 @@ public sealed class Repository
             IndexedCommit = string.IsNullOrWhiteSpace(indexedCommit) ? null : indexedCommit.Trim(),
             LastSyncAt = lastSyncAt,
             LastIndexAt = lastIndexAt,
-            LastError = string.IsNullOrWhiteSpace(lastError) ? null : lastError
+            LastError = string.IsNullOrWhiteSpace(lastError) ? null : lastError,
+            DirectoryFilterEnabled = directoryFilterEnabled,
+            AllowedDirectories = allowedDirectories ?? Array.Empty<string>()
         };
         return repo;
     }
@@ -276,8 +340,10 @@ public sealed class Repository
         Guid id, string name, string gitUrl, string branch, string localPath,
         string? currentCommit, string? indexedCommit, RepositoryStatus status, bool enabled,
         Guid? groupId, int? syncIntervalSeconds,
-        DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError)
-        => Rehydrate(id, name, gitUrl, branch, localPath, currentCommit, indexedCommit, status, enabled, null, null, syncIntervalSeconds, lastSyncAt, lastIndexAt, lastError, groupId);
+        DateTimeOffset? lastSyncAt, DateTimeOffset? lastIndexAt, string? lastError,
+        bool directoryFilterEnabled = false,
+        IReadOnlyList<string>? allowedDirectories = null)
+        => Rehydrate(id, name, gitUrl, branch, localPath, currentCommit, indexedCommit, status, enabled, null, null, syncIntervalSeconds, lastSyncAt, lastIndexAt, lastError, groupId, directoryFilterEnabled, allowedDirectories);
 
     private static bool IsValidCommitSha(string sha)
     {

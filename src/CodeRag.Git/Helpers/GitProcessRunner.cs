@@ -5,7 +5,8 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeRag.Git.Helpers;
 
-public sealed record GitRunResult(int ExitCode, string StdOut, string StdErr);
+/// <param name="RawStdOut">Сырые байты stdout (заполняются только при captureRawStdOut: true).</param>
+public sealed record GitRunResult(int ExitCode, string StdOut, string StdErr, byte[]? RawStdOut = null);
 
 /// <summary>Низкоуровневый запуск git с env и обработкой ошибок.</summary>
 public static class GitProcessRunner
@@ -17,7 +18,8 @@ public static class GitProcessRunner
         IDictionary<string, string>? envOverrides,
         ILogger? logger,
         CancellationToken ct,
-        int timeoutSeconds = 120)
+        int timeoutSeconds = 120,
+        bool captureRawStdOut = false)
     {
         var psi = new ProcessStartInfo
         {
@@ -25,7 +27,10 @@ public static class GitProcessRunner
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            // Явный UTF-8: пути и содержимое с кириллицей не должны зависеть от locale контейнера
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
 
         // Build argument list safely
@@ -63,8 +68,9 @@ public static class GitProcessRunner
 
         var stdout = new StringBuilder();
         var stderr = new StringBuilder();
+        var rawStdOut = new MemoryStream();
+        Task copyRawTask = Task.CompletedTask;
 
-        proc.OutputDataReceived += (_, e) => { if (e.Data is not null) stdout.AppendLine(e.Data); };
         proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
 
         try
@@ -72,11 +78,21 @@ public static class GitProcessRunner
             if (!proc.Start())
                 throw new InvalidOperationException("Failed to start git process.");
 
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+
+            // Raw capture: read stdout as an unbroken byte stream (no line splitting, no early decoding)
+            // so multi-byte sequences (UTF-8 / cp1251) survive intact. Line mode is used otherwise.
+            if (captureRawStdOut)
+            {
+                copyRawTask = proc.StandardOutput.BaseStream.CopyToAsync(rawStdOut, cts.Token);
+            }
+            else
+            {
+                proc.OutputDataReceived += (_, e) => { if (e.Data is not null) stdout.AppendLine(e.Data); };
+                proc.BeginOutputReadLine();
+            }
+            proc.BeginErrorReadLine();
 
             try
             {
@@ -93,7 +109,12 @@ public static class GitProcessRunner
                 throw new TimeoutException($"git timed out after {timeoutSeconds}s: {masked}");
             }
 
-            var result = new GitRunResult(proc.ExitCode, stdout.ToString(), stderr.ToString());
+            // Drain the raw stream to EOF (process already exited, so this completes promptly).
+            if (captureRawStdOut)
+                await copyRawTask.ConfigureAwait(false);
+
+            byte[]? rawBytes = captureRawStdOut ? rawStdOut.ToArray() : null;
+            var result = new GitRunResult(proc.ExitCode, captureRawStdOut ? string.Empty : stdout.ToString(), stderr.ToString(), rawBytes);
 
             if (result.ExitCode != 0)
             {

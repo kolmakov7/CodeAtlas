@@ -26,7 +26,9 @@ public sealed record CreateRepositoryRequest(
     Guid? GroupId = null,
     int? SyncIntervalSeconds = null,
     Guid? ProxyId = null,
-    Guid? CredentialId = null);
+    Guid? CredentialId = null,
+    bool DirectoryFilterEnabled = false,
+    string[]? AllowedDirectories = null);
 
 public sealed record UpdateRepositoryRequest(
     string? Name = null,
@@ -37,7 +39,9 @@ public sealed record UpdateRepositoryRequest(
     int? SyncIntervalSeconds = null,
     bool? Enabled = null,
     Guid? ProxyId = null,
-    Guid? CredentialId = null);
+    Guid? CredentialId = null,
+    bool? DirectoryFilterEnabled = null,
+    string[]? AllowedDirectories = null);
 
 public sealed record RepositoryDto(
     Guid Id,
@@ -55,7 +59,9 @@ public sealed record RepositoryDto(
     int? SyncIntervalSeconds,
     string? LastSyncAt,
     string? LastIndexAt,
-    string? LastError);
+    string? LastError,
+    bool DirectoryFilterEnabled = false,
+    string[]? AllowedDirectories = null);
 
 public sealed record RepositoryGroupDto(
     Guid Id,
@@ -114,6 +120,7 @@ public sealed record GlobalStatisticsDto(
 public sealed record JobDto(
     Guid Id,
     Guid RepositoryId,
+    string RepositoryName,
     string Type,
     string Status,
     string StartedAt,
@@ -121,7 +128,11 @@ public sealed record JobDto(
     double Progress,
     string? Error,
     string? FromCommit,
-    string? ToCommit);
+    string? ToCommit,
+    int? TotalItems = null,
+    int? ItemsDone = null,
+    string? Phase = null,
+    string? CurrentFile = null);
 
 public sealed record SettingsDto(
     Dictionary<string, string> Values,
@@ -211,3 +222,19 @@ public sealed record GetCodeResponseDto(
     int TotalLines,
     string Content,
     string Preview);
+
+public sealed record ValidateRepositoryRequest(
+    string GitUrl,
+    Guid? GroupId = null,
+    Guid? ProxyId = null,
+    Guid? CredentialId = null);
+
+public sealed record ValidateRepositoryResponse(
+    bool Available,
+    string? Error = null);
+
+public sealed record BranchesResponse(
+    IReadOnlyList<string> Branches);
+
+public sealed record RootDirectoriesResponse(
+    IReadOnlyList<string> Directories);

@@ -41,7 +41,7 @@ public sealed class RepositoryService : IRepositoryService
         _logger = logger;
     }
 
-    public async Task<Repository> AddAsync(string name, string gitUrl, string branch, string localPath, Guid? groupId = null, int? syncIntervalSeconds = null, CancellationToken ct = default)
+    public async Task<Repository> AddAsync(string name, string gitUrl, string branch, string localPath, Guid? groupId = null, int? syncIntervalSeconds = null, bool directoryFilterEnabled = false, IEnumerable<string>? allowedDirectories = null, CancellationToken ct = default)
     {
         var id = Guid.NewGuid();
         var normalized = PathValidator.ValidateAndNormalize(localPath, _opts.ReposRoot);
@@ -65,7 +65,7 @@ public sealed class RepositoryService : IRepositoryService
             if (def is not null) effectiveGroupId = def.Id;
         }
 
-        var repo = Repository.Create(id, name, gitUrl, branch, normalized, RepositoryStatus.Active, true, effectiveGroupId, syncIntervalSeconds);
+        var repo = Repository.Create(id, name, gitUrl, branch, normalized, RepositoryStatus.Active, true, effectiveGroupId, syncIntervalSeconds, directoryFilterEnabled, allowedDirectories);
         await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
 
         // Validate remote reachable via ls-remote перед клонированием (быстрая проверка)
@@ -88,7 +88,7 @@ public sealed class RepositoryService : IRepositoryService
         // ls-remote уже проверил доступность, поэтому clone можно отложить.
         repo.MarkSyncing();
         await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
-        _logger.LogInformation("Repository {Name} created at {Path}, clone deferred to Sync job", name, normalized);
+        _logger.LogInformation("Repository {Name} created at {Path} branch={Branch} filter={Filter} dirs=[{Dirs}], clone deferred to Sync job", name, normalized, branch, directoryFilterEnabled, string.Join(",", allowedDirectories ?? Array.Empty<string>()));
 
         return repo;
     }
@@ -97,12 +97,13 @@ public sealed class RepositoryService : IRepositoryService
 
     public Task<IReadOnlyList<Repository>> ListAsync(CancellationToken ct = default) => _repoStore.ListAsync(ct);
 
-    public async Task<Repository> UpdateAsync(Guid id, string? name = null, string? gitUrl = null, string? branch = null, string? localPath = null, Guid? groupId = null, int? syncIntervalSeconds = null, CancellationToken ct = default)
+    public async Task<Repository> UpdateAsync(Guid id, string? name = null, string? gitUrl = null, string? branch = null, string? localPath = null, Guid? groupId = null, int? syncIntervalSeconds = null, bool? directoryFilterEnabled = null, IEnumerable<string>? allowedDirectories = null, CancellationToken ct = default)
     {
         var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false) ?? throw new KeyNotFoundException($"Repository {id} not found.");
         if (repo.Status == RepositoryStatus.Deleting) throw new InvalidOperationException("Repository is being deleted.");
 
         bool branchChanged = false;
+        bool filterChanged = false;
         string oldBranch = repo.Branch;
 
         if (name is not null) repo.Rename(name);
@@ -128,7 +129,31 @@ public sealed class RepositoryService : IRepositoryService
             repo.SetGroup(gid);
         }
         if (syncIntervalSeconds.HasValue) repo.SetSyncInterval(syncIntervalSeconds);
-        else if (syncIntervalSeconds is null && groupId is null && name is null && gitUrl is null && branch is null && localPath is null)
+
+        // Directory filter handling
+        if (directoryFilterEnabled.HasValue)
+        {
+            var beforeEnabled = repo.DirectoryFilterEnabled;
+            var beforeDirs = repo.AllowedDirectories.ToArray();
+            repo.SetDirectoryFilter(directoryFilterEnabled.Value, allowedDirectories);
+            var afterEnabled = repo.DirectoryFilterEnabled;
+            var afterDirs = repo.AllowedDirectories.ToArray();
+            if (beforeEnabled != afterEnabled || !beforeDirs.SequenceEqual(afterDirs))
+                filterChanged = true;
+        }
+        else if (allowedDirectories is not null)
+        {
+            // If only dirs provided without flag, treat as enable if non-empty
+            // but we prefer explicit flag; if flag not provided but dirs provided, update dirs keeping enabled state
+            if (repo.DirectoryFilterEnabled)
+            {
+                var beforeDirs = repo.AllowedDirectories.ToArray();
+                repo.SetDirectoryFilter(true, allowedDirectories);
+                if (!beforeDirs.SequenceEqual(repo.AllowedDirectories.ToArray()))
+                    filterChanged = true;
+            }
+        }
+        else if (syncIntervalSeconds is null && groupId is null && name is null && gitUrl is null && branch is null && localPath is null && !directoryFilterEnabled.HasValue)
         {
             // no-op
         }
@@ -144,7 +169,118 @@ public sealed class RepositoryService : IRepositoryService
             repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false) ?? repo;
         }
 
+        // filterChanged will be handled by controller enqueuing Rebuild, but log here
+        if (filterChanged)
+        {
+            _logger.LogInformation("Directory filter changed for {Name}: enabled={Enabled} dirs=[{Dirs}]", repo.Name, repo.DirectoryFilterEnabled, string.Join(",", repo.AllowedDirectories));
+        }
+
         return repo;
+    }
+
+    public async Task<(bool Available, string? Error)> ValidateAsync(string gitUrl, Guid? groupId = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(gitUrl)) return (false, "GitUrl required");
+        try
+        {
+            // Resolve proxy/cred for validation
+            ProxyConfig? proxy = null;
+            Credential? cred = null;
+            if (groupId.HasValue)
+            {
+                var group = await _groupStore.GetByIdAsync(groupId.Value, ct).ConfigureAwait(false);
+                if (group is not null)
+                {
+                    if (group.ProxyId.HasValue) proxy = await _proxyStore.GetByIdAsync(group.ProxyId.Value, ct).ConfigureAwait(false);
+                    if (group.CredentialId.HasValue) cred = await _credStore.GetByIdAsync(group.CredentialId.Value, ct).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+                if (def is not null)
+                {
+                    if (def.ProxyId.HasValue) proxy = await _proxyStore.GetByIdAsync(def.ProxyId.Value, ct).ConfigureAwait(false);
+                    if (def.CredentialId.HasValue) cred = await _credStore.GetByIdAsync(def.CredentialId.Value, ct).ConfigureAwait(false);
+                }
+            }
+            await _git.LsRemoteAllAsync(gitUrl, proxy, cred, ct).ConfigureAwait(false);
+            return (true, null);
+        }
+        catch (Exception ex)
+        {
+            var masked = SecretMasker.Mask(ex.Message);
+            _logger.LogWarning(ex, "Validate failed for {Url}: {Err}", SecretMasker.Mask(gitUrl), masked);
+            return (false, masked);
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> GetBranchesAsync(string gitUrl, Guid? groupId = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(gitUrl)) throw new ArgumentException("gitUrl required", nameof(gitUrl));
+        ProxyConfig? proxy = null;
+        Credential? cred = null;
+        Guid? gid = groupId;
+        if (!gid.HasValue)
+        {
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            gid = def?.Id;
+        }
+        if (gid.HasValue)
+        {
+            var group = await _groupStore.GetByIdAsync(gid.Value, ct).ConfigureAwait(false);
+            if (group is not null)
+            {
+                if (group.ProxyId.HasValue) proxy = await _proxyStore.GetByIdAsync(group.ProxyId.Value, ct).ConfigureAwait(false);
+                if (group.CredentialId.HasValue) cred = await _credStore.GetByIdAsync(group.CredentialId.Value, ct).ConfigureAwait(false);
+            }
+        }
+        return await _git.ListRemoteBranchesAsync(gitUrl, proxy, cred, ct).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<string>> GetRootDirectoriesAsync(string gitUrl, string branch, Guid? groupId = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(gitUrl)) throw new ArgumentException("gitUrl required", nameof(gitUrl));
+        if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("branch required", nameof(branch));
+        ProxyConfig? proxy = null;
+        Credential? cred = null;
+        Guid? gid = groupId;
+        if (!gid.HasValue)
+        {
+            var def = await _groupStore.GetByNameAsync("Default", ct).ConfigureAwait(false);
+            gid = def?.Id;
+        }
+        if (gid.HasValue)
+        {
+            var group = await _groupStore.GetByIdAsync(gid.Value, ct).ConfigureAwait(false);
+            if (group is not null)
+            {
+                if (group.ProxyId.HasValue) proxy = await _proxyStore.GetByIdAsync(group.ProxyId.Value, ct).ConfigureAwait(false);
+                if (group.CredentialId.HasValue) cred = await _credStore.GetByIdAsync(group.CredentialId.Value, ct).ConfigureAwait(false);
+            }
+        }
+        return await _git.ListRemoteRootDirectoriesAsync(gitUrl, branch, proxy, cred, ct).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<string>> GetRootDirectoriesForRepositoryAsync(Guid repositoryId, string? branch = null, CancellationToken ct = default)
+    {
+        var repo = await _repoStore.GetByIdAsync(repositoryId, ct).ConfigureAwait(false) ?? throw new KeyNotFoundException($"Repository {repositoryId} not found.");
+        var effectiveBranch = string.IsNullOrWhiteSpace(branch) ? repo.Branch : branch!.Trim();
+        // If local clone exists, use local; otherwise fallback to remote
+        var localPath = repo.LocalPath.Value;
+        if (Directory.Exists(Path.Combine(localPath, ".git")))
+        {
+            try
+            {
+                return await _git.ListLocalRootDirectoriesAsync(localPath, effectiveBranch, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // fallback to remote
+            }
+        }
+        var (proxy, cred) = await GetEffectiveCredentialsAsync(repositoryId, ct).ConfigureAwait(false);
+        return await _git.ListRemoteRootDirectoriesAsync(repo.GitUrl.Value, effectiveBranch, proxy, cred, ct).ConfigureAwait(false);
     }
 
     public async Task<(ProxyConfig? Proxy, Credential? Credential)> GetEffectiveCredentialsAsync(Guid repositoryId, CancellationToken ct = default)
@@ -222,6 +358,8 @@ public sealed class RepositoryService : IRepositoryService
         catch (Exception ex)
         {
             var masked = SecretMasker.Mask(ex.Message);
+            // Фиксируем время попытки, чтобы polling отсчитывал interval с неудачи, а не молотил репо каждые 10s
+            repo.MarkSyncAttempted();
             repo.MarkError(masked);
             await _repoStore.UpsertAsync(repo, ct).ConfigureAwait(false);
             _logger.LogError(ex, "Sync failed for {Name}: {Err}", repo.Name, masked);

@@ -7,7 +7,7 @@ namespace CodeRag.Infrastructure.Persistence;
 
 /// <summary>
 /// Фабрика SQLite соединений с PRAGMA journal_mode=WAL, synchronous=NORMAL,
-/// foreign_keys=ON, busy_timeout=5000 и опциональной загрузкой vec0 extension.
+/// foreign_keys=ON, busy_timeout=60000 и опциональной загрузкой vec0 extension.
 /// Не падает если vec0.so отсутствует.
 /// </summary>
 public sealed class SqliteConnectionFactory : IDbConnectionFactory
@@ -69,7 +69,9 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
         cmd.CommandText = "PRAGMA foreign_keys=ON;";
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
-        cmd.CommandText = "PRAGMA busy_timeout=5000;";
+        // 300s: tolerate contention from parallel index writers (2 repos) + polling sync + probes.
+        // Rebuild cleanup (vec + trigram-FTS repo deletes) can hold the write lock for minutes.
+        cmd.CommandText = "PRAGMA busy_timeout=300000;";
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
         // Optional vec0 extension — thread-safe via Interlocked + lock.

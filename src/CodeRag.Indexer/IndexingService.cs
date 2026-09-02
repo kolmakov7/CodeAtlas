@@ -194,12 +194,12 @@ public sealed class IndexingService
         try
         {
             // 1) Update the local working copy + resolve the new HEAD.
-            await SetJobProgressAsync(job, 0.25, ct).ConfigureAwait(false);
+            await SetJobStatsAsync(job, 0.25, phase: "fetch", ct: ct).ConfigureAwait(false);
             // Clone — отдельный таск: если клона нет, делаем clone здесь (видно в jobs), а не в AddAsync.
             if (!Directory.Exists(repo.LocalPath.Value) || !Directory.Exists(Path.Combine(repo.LocalPath.Value, ".git")))
             {
                 _logger.LogInformation("Sync: local path {Path} not cloned, cloning branch {Branch} via proxy/cred", repo.LocalPath.Value, repo.Branch);
-                await SetJobProgressAsync(job, 0.10, ct).ConfigureAwait(false);
+                await SetJobStatsAsync(job, 0.10, phase: "clone", ct: ct).ConfigureAwait(false);
                 await _git.CloneAsync(repo.GitUrl.Value, repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
             }
             else
@@ -221,7 +221,7 @@ public sealed class IndexingService
             }
 
             // 2) Record what changed (git diff IndexedCommit..newHead).
-            await SetJobProgressAsync(job, 0.6, ct).ConfigureAwait(false);
+            await SetJobStatsAsync(job, 0.6, phase: "diff", ct: ct).ConfigureAwait(false);
             var diff = await _git.DiffAsync(repo.LocalPath.Value, repo.IndexedCommit, newHead, ct).ConfigureAwait(false);
             _logger.LogInformation("Sync diff repo {Repo}: {Count} changed files (full={Full})", repo.Id, diff.ChangedFiles.Count, diff.IsFullDiff);
 
@@ -262,7 +262,7 @@ public sealed class IndexingService
 
         try
         {
-            await SetJobProgressAsync(job, 0.10, ct).ConfigureAwait(false);
+            await SetJobStatsAsync(job, 0.10, phase: "clone", ct: ct).ConfigureAwait(false);
             // Idempotent: если уже склонирован — пропускаем
             if (!Directory.Exists(Path.Combine(repo.LocalPath.Value, ".git")))
             {
@@ -275,7 +275,7 @@ public sealed class IndexingService
                 await _git.FetchAsync(repo.LocalPath.Value, repo.Branch, proxy, cred, ct).ConfigureAwait(false);
             }
 
-            await SetJobProgressAsync(job, 0.70, ct).ConfigureAwait(false);
+            await SetJobStatsAsync(job, 0.70, phase: "head", ct: ct).ConfigureAwait(false);
             var head = await _git.GetHeadAsync(repo.LocalPath.Value, repo.Branch, ct).ConfigureAwait(false);
             repo.UpdateCurrentCommit(head);
             repo.MarkActive();
@@ -305,6 +305,13 @@ public sealed class IndexingService
         await _jobStore.UpdateProgressAsync(job.Id, progress, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Persist progress + детали этапа (total/done/phase/current_file) for the UI.</summary>
+    private async Task SetJobStatsAsync(IndexingJob job, double progress, int? totalItems = null, int? itemsDone = null, string? phase = null, string? currentFile = null, CancellationToken ct = default)
+    {
+        job.SetProgress(progress, totalItems, itemsDone, phase, currentFile);
+        await _jobStore.UpdateProgressAsync(job, ct).ConfigureAwait(false);
+    }
+
     private Task ExecuteIndexAsync(IndexingJob job, CancellationToken ct) =>
         ExecuteIndexCoreAsync(job, null, ct);
 
@@ -325,51 +332,70 @@ public sealed class IndexingService
         }
 
         var diff = precomputedDiff ?? await _git.DiffAsync(repo.LocalPath.Value, from, to, ct).ConfigureAwait(false);
+        // Применить directory filter ДО обнаружения файлов — исключённые директории не сканируются вообще
+        diff = ApplyDirectoryFilter(repo, diff);
         var total = diff.ChangedFiles.Count;
         if (total == 0)
         {
-            _logger.LogInformation("Index job {JobId}: empty diff, nothing to do", job.Id);
+            _logger.LogInformation("Index job {JobId}: empty diff (after filter), nothing to do", job.Id);
             await CommitIndexedAsync(repo, to, ct).ConfigureAwait(false);
             return;
         }
 
+        // Пресчитанный тотал до старта — UI показывает "N / total files" с самого начала.
+        await SetJobStatsAsync(job, 0.0, total, 0, "indexing", null, ct).ConfigureAwait(false);
+
         var processed = 0;
+        var csharpTouched = 0;
         var lastProgressSave = DateTime.UtcNow;
-        var pendingChunks = new List<Domain.Entities.Chunk>();
-        var csharpTouched = false;
+        using var progressGate = new SemaphoreSlim(1, 1);
+        var pendingChunks = new System.Collections.Concurrent.ConcurrentQueue<Domain.Entities.Chunk>();
+        var degree = Math.Max(1, _indexerOptions.CurrentValue.ParallelFileIndexers);
 
-        foreach (var cf in diff.ChangedFiles)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            if (IsCSharpPath(cf.Path) || (cf.Kind == GitChangeKind.Renamed && IsCSharpPath(cf.OldPath)))
-                csharpTouched = true;
-
-            if (cf.Kind == GitChangeKind.Deleted)
+        // Параллельная индексация файлов: git show + анализатор (объекты на вызов, thread-safe)
+        // + SQLite WAL с busy_timeout=300s на каждое соединение.
+        await Parallel.ForEachAsync(
+            diff.ChangedFiles,
+            new ParallelOptions { MaxDegreeOfParallelism = degree, CancellationToken = ct },
+            async (cf, token) =>
             {
-                await DeleteFileAsync(repo, cf.Path, ct).ConfigureAwait(false);
-            }
-            else
-            {
-                // Renamed: delete old, add new
-                if (cf.Kind == GitChangeKind.Renamed && !string.IsNullOrWhiteSpace(cf.OldPath))
-                    await DeleteFileAsync(repo, cf.OldPath!, ct).ConfigureAwait(false);
+                if (IsCSharpPath(cf.Path) || (cf.Kind == GitChangeKind.Renamed && IsCSharpPath(cf.OldPath)))
+                    Interlocked.Exchange(ref csharpTouched, 1);
 
-                await IndexFileAsync(repo, cf.Path, to!, pendingChunks, ct).ConfigureAwait(false);
-            }
+                if (cf.Kind == GitChangeKind.Deleted)
+                {
+                    await DeleteFileAsync(repo, cf.Path, token).ConfigureAwait(false);
+                }
+                else
+                {
+                    // Renamed: delete old, add new
+                    if (cf.Kind == GitChangeKind.Renamed && !string.IsNullOrWhiteSpace(cf.OldPath))
+                        await DeleteFileAsync(repo, cf.OldPath!, token).ConfigureAwait(false);
 
-            processed++;
+                    await IndexFileAsync(repo, cf.Path, to!, pendingChunks, token).ConfigureAwait(false);
+                }
 
-            // Progress (processed/total) — пишем в БД раз в N файлов / 1s (indexing.md §4)
-            var now = DateTime.UtcNow;
-            if (processed % 10 == 0 || (now - lastProgressSave).TotalSeconds >= 1)
-            {
-                var p = total == 0 ? 1.0 : (double)processed / total;
-                job.UpdateProgress(p);
-                await _jobStore.UpdateProgressAsync(job.Id, p, ct).ConfigureAwait(false);
-                lastProgressSave = now;
-            }
-        }
+                var done = Interlocked.Increment(ref processed);
+
+                // Progress (processed/total) — пишем в БД раз в N файлов / 1s (indexing.md §4).
+                // SemaphoreSlim — serializes progress writes from parallel workers (lock не может содержать await).
+                await progressGate.WaitAsync(token).ConfigureAwait(false);
+                try
+                {
+                    var now = DateTime.UtcNow;
+                    if (done % 10 == 0 || (now - lastProgressSave).TotalSeconds >= 1)
+                    {
+                        var p = (double)done / total;
+                        job.SetProgress(p, total, done, "indexing", cf.Path);
+                        await _jobStore.UpdateProgressAsync(job, token).ConfigureAwait(false);
+                        lastProgressSave = now;
+                    }
+                }
+                finally
+                {
+                    progressGate.Release();
+                }
+            });
 
         // Vector embedding is a SEPARATE task (isolates the slow model calls so Index progress reflects
         // parsing, not embedding). The structural chunks are now persisted, so enqueue an Embedding job that
@@ -383,11 +409,12 @@ public sealed class IndexingService
 
         // C# relations are rebuilt authoritatively from the whole repo once any C# file changed
         // (per-file C# symbols get fresh IDs each run, so only a full-repo extraction stays consistent).
-        if (csharpTouched)
+        if (csharpTouched == 1)
         {
+            await SetJobStatsAsync(job, job.Progress, total, total, "relations", null, ct).ConfigureAwait(false);
             try
             {
-                await RebuildCSharpRelationsAsync(repo, ct).ConfigureAwait(false);
+                await RebuildCSharpRelationsAsync(repo, to!, ct);
             }
             catch (Exception ex)
             {
@@ -398,8 +425,7 @@ public sealed class IndexingService
 
         await CommitIndexedAsync(repo, to, ct).ConfigureAwait(false);
 
-        job.UpdateProgress(1.0);
-        await _jobStore.UpdateProgressAsync(job.Id, 1.0, ct).ConfigureAwait(false);
+        await SetJobStatsAsync(job, 1.0, total, total, "commit", null, ct).ConfigureAwait(false);
     }
 
     private async Task DeleteFileAsync(Domain.Entities.Repository repo, string filePath, CancellationToken ct)
@@ -422,7 +448,7 @@ public sealed class IndexingService
         _logger.LogDebug("Deleted file {Path} ({Chunks} chunks)", filePath, chunkIds.Count);
     }
 
-    private async Task IndexFileAsync(Domain.Entities.Repository repo, string filePath, string commitSha, List<Domain.Entities.Chunk> pendingChunks, CancellationToken ct)
+    private async Task IndexFileAsync(Domain.Entities.Repository repo, string filePath, string commitSha, System.Collections.Concurrent.ConcurrentQueue<Domain.Entities.Chunk> pendingChunks, CancellationToken ct)
     {
         var fullPath = Path.Combine(repo.LocalPath.Value, filePath);
         string content;
@@ -437,16 +463,16 @@ public sealed class IndexingService
             catch (Exception ex)
             {
                 _logger.LogDebug(ex, "git show failed for {Path}@{Commit}, fallback to filesystem", filePath, commitSha);
-                // Fallback to filesystem
+                // Fallback to filesystem (legacy checkout). Без checkout-а файла на диске не будет —
+                // это нормальное состояние, не удаляем из индекса, а пропускаем.
                 try
                 {
                     if (!File.Exists(fullPath))
                     {
-                        _logger.LogWarning("File not found on disk, deleting from index: {Full}", fullPath);
-                        await DeleteFileAsync(repo, filePath, ct).ConfigureAwait(false);
+                        _logger.LogWarning("git show failed and file not on disk, skipping {Path}", filePath);
                         return;
                     }
-                    content = await File.ReadAllTextAsync(fullPath, ct).ConfigureAwait(false);
+                    content = ContentEncoding.Decode(await File.ReadAllBytesAsync(fullPath, ct).ConfigureAwait(false));
                 }
                 catch (Exception ex2)
                 {
@@ -462,11 +488,11 @@ public sealed class IndexingService
             {
                 if (!File.Exists(fullPath))
                 {
-                    _logger.LogWarning("File not found on disk, deleting from index: {Full}", fullPath);
-                    await DeleteFileAsync(repo, filePath, ct).ConfigureAwait(false);
+                    // Файл на диске не ожидается (no-checkout) — пропускаем, не трогаем индекс
+                    _logger.LogWarning("File not on disk (no-checkout), skipping {Path}", filePath);
                     return;
                 }
-                content = await File.ReadAllTextAsync(fullPath, ct).ConfigureAwait(false);
+                content = ContentEncoding.Decode(await File.ReadAllBytesAsync(fullPath, ct).ConfigureAwait(false));
             }
             catch (Exception ex)
             {
@@ -533,7 +559,7 @@ public sealed class IndexingService
 
         // Создать/обновить FileEntry
         var fileId = existing?.Id ?? Guid.NewGuid();
-        var fileEntry = Domain.Entities.FileEntry.Create(fileId, repo.Id, filePath, null, language, hash);
+        var fileEntry = Domain.Entities.FileEntry.Create(fileId, repo.Id, filePath, null, language, hash, DateTimeOffset.UtcNow);
         await _fileStore.UpsertAsync(fileEntry, ct).ConfigureAwait(false);
 
         var (budgetMaxChars, budgetOverlapChars) = GetChunkBudget(domain);
@@ -548,7 +574,7 @@ public sealed class IndexingService
                 await _fts.UpsertAsync(ch.Id, repo.Id, ch.Source, null, null, filePath, null, null, ct).ConfigureAwait(false);
                 if (ShouldEmbed(ch))
                 {
-                    pendingChunks.Add(ch);
+                    pendingChunks.Enqueue(ch);
                 }
             }
             return;
@@ -602,7 +628,7 @@ public sealed class IndexingService
 
                     if (ShouldEmbed(domainChunk))
                     {
-                        pendingChunks.Add(domainChunk);
+                        pendingChunks.Enqueue(domainChunk);
                     }
                 }
             }
@@ -636,7 +662,7 @@ public sealed class IndexingService
                 await _fts.UpsertAsync(ch.Id, repo.Id, ch.Source, null, null, filePath, null, null, ct).ConfigureAwait(false);
                 if (ShouldEmbed(ch))
                 {
-                    pendingChunks.Add(ch);
+                    pendingChunks.Enqueue(ch);
                 }
             }
         }
@@ -727,9 +753,10 @@ public sealed class IndexingService
 
         _logger.LogInformation("Embedding job {JobId}: {Total} chunks total, need re-embed in {Domains} domain(s)", job.Id, allChunks.Count, activeDomains);
 
+        await SetJobStatsAsync(job, total == 0 ? 1.0 : 0.0, total, 0, "embedding", null, ct).ConfigureAwait(false);
+
         if (total == 0)
         {
-            await SetJobProgressAsync(job, 1.0, ct).ConfigureAwait(false);
             return;
         }
 
@@ -747,13 +774,12 @@ public sealed class IndexingService
 
                 done += batch.Count;
                 var p = (double)done / total;
-                job.UpdateProgress(p);
-                await _jobStore.UpdateProgressAsync(job.Id, p, ct).ConfigureAwait(false);
+                job.SetProgress(p, total, done, "embedding", null);
+                await _jobStore.UpdateProgressAsync(job, ct).ConfigureAwait(false);
             }
         }
 
-        job.UpdateProgress(1.0);
-        await _jobStore.UpdateProgressAsync(job.Id, 1.0, ct).ConfigureAwait(false);
+        await SetJobStatsAsync(job, 1.0, total, total, "done", null, ct).ConfigureAwait(false);
     }
 
     private async Task ExecuteRebuildAsync(IndexingJob job, CancellationToken ct)
@@ -768,6 +794,7 @@ public sealed class IndexingService
         // ResetIndexAsync drops a dim-mismatched vec table (stale index) — the only place a
         // vec table is ever dropped, and only on explicit user-confirmed rebuild.
         // Code и text имеют свои модели/размерности — сбрасываем каждое пространство отдельно.
+        await SetJobStatsAsync(job, 0.0, phase: "clearing", ct: ct).ConfigureAwait(false);
         foreach (var domain in new[] { EmbeddingDomain.Code, EmbeddingDomain.Text })
         {
             try
@@ -787,11 +814,12 @@ public sealed class IndexingService
         await _fileStore.DeleteByRepositoryAsync(repo.Id, ct).ConfigureAwait(false);
         _logger.LogInformation("Rebuild job {JobId}: index for repo {Repo} cleared", job.Id, repo.Id);
 
+        await SetJobStatsAsync(job, job.Progress, phase: "diff", ct: ct).ConfigureAwait(false);
         var head = job.ToCommit ?? await _git.GetHeadAsync(repo.LocalPath.Value, repo.Branch, ct).ConfigureAwait(false);
         var diff = await _git.DiffAsync(repo.LocalPath.Value, null, head, ct).ConfigureAwait(false);
-        var fakeJob = IndexingJob.Create(job.Id, job.RepositoryId, JobType.Index, JobStatus.Running, job.StartedAt, null, head);
-        // reuse core
-        await ExecuteIndexCoreAsync(fakeJob, diff, ct).ConfigureAwait(false);
+        // reuse core (the REAL job entity — так финальный upsert в ExecuteAsync сохранит
+        // total_items/items_done/phase, а не стёртые значения fakeJob)
+        await ExecuteIndexCoreAsync(job, diff, ct).ConfigureAwait(false);
         await CommitIndexedAsync(repo, head, ct).ConfigureAwait(false);
     }
 
@@ -849,6 +877,24 @@ public sealed class IndexingService
             signature: s.Signature);
     }
 
+    private static GitDiff ApplyDirectoryFilter(Domain.Entities.Repository repo, GitDiff diff)
+    {
+        if (!repo.DirectoryFilterEnabled) return diff;
+        var filtered = diff.ChangedFiles.Where(f => {
+            // For deletes, check Path; for renames check both? Keep if either allowed?
+            // If filter enabled, only process files whose new path is allowed; deletes of non-allowed should be ignored
+            if (f.Kind == GitChangeKind.Deleted) return repo.IsPathAllowed(f.Path);
+            if (f.Kind == GitChangeKind.Renamed)
+            {
+                // Renamed: treat as delete old + add new; allow if new path allowed (old delete will be handled via IsPathAllowed on old)
+                // We'll keep entry if new path allowed; old path filter checked separately via separate handling? Keep entry.
+                return repo.IsPathAllowed(f.Path);
+            }
+            return repo.IsPathAllowed(f.Path);
+        }).ToList();
+        return new GitDiff(diff.FromCommit, diff.ToCommit, filtered, diff.IsFullDiff);
+    }
+
     private static bool IsCSharpPath(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
@@ -874,29 +920,38 @@ public sealed class IndexingService
         return false;
     }
 
-    private List<SourceFile> EnumerateCSharpFiles(string root, CancellationToken ct)
+    /// <summary>Список C# файлов на заданном коммите — прямо из git-объектов (без working tree), с учётом directory filter.</summary>
+    private async Task<List<SourceFile>> EnumerateCSharpFilesAsync(string repoPath, string commitSha, CancellationToken ct)
     {
-        var files = new List<SourceFile>();
-        if (!Directory.Exists(root)) return files;
-        foreach (var pattern in new[] { "*.cs", "*.csx" })
+        // Need repo to check filter; find repo by localPath (lookup)
+        Domain.Entities.Repository? filterRepo = null;
+        try
         {
-            foreach (var full in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+            var allRepos = await _repoStore.ListAsync(ct).ConfigureAwait(false);
+            filterRepo = allRepos.FirstOrDefault(r => string.Equals(r.LocalPath.Value, repoPath, StringComparison.Ordinal));
+        }
+        catch { }
+
+        var files = new List<SourceFile>();
+        var all = await _git.ListFilesAsync(repoPath, commitSha, ct).ConfigureAwait(false);
+        foreach (var path in all)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (filterRepo is not null && !filterRepo.IsPathAllowed(path)) continue;
+            if (!IsCSharpPath(path)) continue;
+            if (HasExcludedSegment(path)) continue;
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                if (HasExcludedSegment(full)) continue;
-                try
-                {
-                    var content = File.ReadAllText(full);
-                    if (string.IsNullOrWhiteSpace(content)) continue;
-                    files.Add(new SourceFile(Path.GetRelativePath(root, full), content));
-                }
-                catch { /* skip unreadable file */ }
+                var content = await _git.ShowFileAsync(repoPath, path, commitSha, ct).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(content)) continue;
+                files.Add(new SourceFile(path, content));
             }
+            catch { /* skip unreadable file */ }
         }
         return files;
     }
 
-    private async Task RebuildCSharpRelationsAsync(Domain.Entities.Repository repo, CancellationToken ct)
+    private async Task RebuildCSharpRelationsAsync(Domain.Entities.Repository repo, string commitSha, CancellationToken ct)
     {
         var extractor = _relationExtractors.FirstOrDefault(
             e => string.Equals(e.Language, SupportedLanguages.CSharp, StringComparison.OrdinalIgnoreCase));
@@ -906,7 +961,7 @@ public sealed class IndexingService
             return;
         }
 
-        var files = EnumerateCSharpFiles(repo.LocalPath.Value, ct);
+        var files = await EnumerateCSharpFilesAsync(repo.LocalPath.Value, commitSha, ct).ConfigureAwait(false);
         if (files.Count == 0)
         {
             // No C# source remains — clear all C# relations for the repo.

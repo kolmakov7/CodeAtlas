@@ -1,8 +1,56 @@
 import { useSearchParams, Link } from "react-router-dom";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useJobs, useJobActions, useRepositories } from "@/api/hooks";
 import { ProgressBar } from "@/components/ProgressBar";
 import { formatDate, formatDuration } from "@/utils/format";
+import type { IndexingJob } from "@/api/types";
+
+function jobItemsLabel(j: IndexingJob): string {
+  if (j.totalItems == null || j.totalItems <= 0) return "—";
+  const done = j.itemsDone ?? 0;
+  const unit = j.type === "Embedding" ? "chunks" : "files";
+  return `${done.toLocaleString()} / ${j.totalItems.toLocaleString()} ${unit}`;
+}
+
+function jobSpeed(j: IndexingJob): number | null {
+  if (j.status !== "Running" || !j.startedAt || !j.itemsDone) return null;
+  const elapsedSec = Math.max(1, (Date.now() - new Date(j.startedAt).getTime()) / 1000);
+  return j.itemsDone / elapsedSec;
+}
+
+function jobEta(j: IndexingJob): string {
+  if (j.status !== "Running" || j.totalItems == null || j.totalItems <= 0) return "—";
+  const speed = jobSpeed(j);
+  if (!speed) return "—";
+  const remainSec = (j.totalItems - (j.itemsDone ?? 0)) / speed;
+  return `~${formatDuration(new Date().toISOString(), new Date(Date.now() + remainSec * 1000).toISOString())}`;
+}
+
+function JobDetails({ j }: { j: IndexingJob }) {
+  const rows: Array<[string, React.ReactNode]> = [];
+  rows.push(["Phase", j.phase ?? "—"]);
+  rows.push(["Elapsed", formatDuration(j.startedAt, j.status === "Running" ? null : j.finishedAt)]);
+  if (j.totalItems != null) {
+    rows.push(["Items", jobItemsLabel(j)]);
+    const speed = jobSpeed(j);
+    if (speed != null) rows.push(["Speed", `${speed.toFixed(1)} items/s`]);
+    if (j.status === "Running") rows.push(["ETA", jobEta(j)]);
+  }
+  if (j.currentFile) rows.push(["Current file", <code style={{ fontSize: 11, wordBreak: "break-all" }}>{j.currentFile}</code>]);
+  if (j.fromCommit || j.toCommit) rows.push(["Range", <code style={{ fontSize: 11 }}>{(j.fromCommit ?? "∅").slice(0, 10)} → {(j.toCommit ?? "∅").slice(0, 10)}</code>]);
+  if (j.error) rows.push(["Error", <span style={{ color: "var(--danger)", wordBreak: "break-word", fontSize: 12 }}>{j.error}</span>]);
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: "4px 12px", fontSize: 12, padding: "4px 8px 8px 8px" }}>
+      {rows.map(([k, v]) => (
+        <Fragment key={k}>
+          <span style={{ color: "var(--text-muted)" }}>{k}</span>
+          <span>{v}</span>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
 
 export default function JobsPage() {
   const [sp, setSp] = useSearchParams();
@@ -14,6 +62,7 @@ export default function JobsPage() {
   const jobsQ = useJobs(qRepo || null, qStatus || null);
   const reposQ = useRepositories();
   const actions = useJobActions();
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   const apply = () => {
     const p = new URLSearchParams();
@@ -65,17 +114,27 @@ export default function JobsPage() {
             </thead>
             <tbody>
               {jobsQ.data.map((j) => (
-                <tr key={j.id}>
+                <Fragment key={j.id}>
+                <tr onClick={() => setExpanded(expanded === j.id ? null : j.id)} style={{ cursor: "pointer" }}>
                   <td>
-                    {j.repositoryName ? <Link to={`/repositories/${j.repositoryId}`}>{j.repositoryName}</Link> : <span style={{ fontFamily: "monospace", fontSize: 12 }}>{j.repositoryId.slice(0, 8)}</span>}
+                    {j.repositoryName ? <Link to={`/repositories/${j.repositoryId}`} onClick={(e) => e.stopPropagation()}>{j.repositoryName}</Link> : <span style={{ fontFamily: "monospace", fontSize: 12 }}>{j.repositoryId.slice(0, 8)}</span>}
                   </td>
                   <td>{j.type}</td>
                   <td><span className="badge">{j.status}</span></td>
                   <td style={{ whiteSpace: "nowrap", fontSize: 12 }}>{formatDate(j.startedAt)}</td>
-                  <td style={{ fontSize: 12 }}>{formatDuration(j.startedAt, j.finishedAt)}</td>
-                  <td style={{ minWidth: 120 }}><ProgressBar value={j.progress} /></td>
+                  <td style={{ fontSize: 12 }}>{formatDuration(j.startedAt, j.status === "Running" ? null : j.finishedAt)}</td>
+                  <td style={{ minWidth: 160 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ flex: 1 }}><ProgressBar value={j.progress} /></div>
+                      <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>{((j.progress ?? 0) * 100).toFixed(0)}%</span>
+                      <span style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{jobItemsLabel(j)}</span>
+                    </div>
+                    {j.phase && (j.status === "Running" || j.status === "Queued") && (
+                      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>phase: {j.phase}</div>
+                    )}
+                  </td>
                   <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", fontSize: 12, color: j.error ? "var(--danger)" : "var(--text-muted)" }} title={j.error ?? ""}>{j.error ?? "—"}</td>
-                  <td>
+                  <td onClick={(e) => e.stopPropagation()}>
                     <div style={{ display: "flex", gap: 6 }}>
                       {(j.status === "Running" || j.status === "Queued") && (
                         <button onClick={() => actions.cancel.mutate(j.id)} disabled={actions.cancel.isPending} style={{ fontSize: 12, padding: "4px 8px" }}>Cancel</button>
@@ -86,6 +145,14 @@ export default function JobsPage() {
                     </div>
                   </td>
                 </tr>
+                {expanded === j.id && (
+                  <tr>
+                    <td colSpan={8} style={{ background: "var(--bg-subtle, rgba(127,127,127,0.06))", padding: 0 }}>
+                      <JobDetails j={j} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

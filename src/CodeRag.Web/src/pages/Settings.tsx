@@ -165,12 +165,53 @@ export default function SettingsPage() {
         </div>
       )}
       {tab === "indexing" && (
-        <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <h3>Indexing</h3>
-          <label>Sync interval (seconds) <input type="number" value={form.indexing?.syncIntervalSeconds ?? ""} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, syncIntervalSeconds: e.target.value ? Number(e.target.value) : null } })} /></label>
-          <label>Max concurrent indexers <input type="number" value={form.indexing?.maxConcurrentIndexers ?? 2} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, maxConcurrentIndexers: Number(e.target.value) } })} /></label>
-          <label>Exclusions (glob, comma separated) <input value={(form.indexing?.exclusions ?? []).join(", ")} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, exclusions: e.target.value.split(",").map(s => s.trim()).filter(Boolean) } })} placeholder="**/bin/**, **/obj/**, **/node_modules/**" /></label>
-          <label>Language exclusions <input value={(form.indexing?.languageExclusions ?? []).join(", ")} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, languageExclusions: e.target.value.split(",").map(s => s.trim()).filter(Boolean) } })} placeholder="VBS, ..." /></label>
+        <div className="card" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <h3>Indexing — блок <code>Indexer</code> из <code>appsettings.json</code></h3>
+          <p style={{ fontSize: 12, color: "var(--text-muted)" }}>Настройки из секции <code>Indexer</code> (<code>appsettings.json</code>). Переопределяются через таблицу <code>settings</code> и применяются без пересборки образа — <code>FireReload</code> после сохранения.</p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <label>Sync interval (seconds) <input type="number" value={form.indexing?.syncIntervalSeconds ?? ""} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, syncIntervalSeconds: e.target.value ? Number(e.target.value) : null } })} placeholder="300" />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:DefaultSyncIntervalSeconds</code> — polling git fetch, default 300</span>
+            </label>
+            <label>Max concurrent indexers <input type="number" value={form.indexing?.maxConcurrentIndexers ?? 2} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, maxConcurrentIndexers: Number(e.target.value) } })} placeholder="2" />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:MaxConcurrentIndexers</code> — parallel jobs (SemaphoreSlim), из <code>appsettings.json</code></span>
+            </label>
+            <label>Parallel file indexers <input type="number" value={form.indexing?.parallelFileIndexers ?? 8} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, parallelFileIndexers: Number(e.target.value) } })} placeholder="8" />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:ParallelFileIndexers</code> — параллельность внутри джобы (Parallel.ForEachAsync), default 8, из <code>appsettings.json</code></span>
+            </label>
+            <label>File watcher debounce (ms) <input type="number" value={form.indexing?.fileWatcherDebounceMs ?? 1500} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, fileWatcherDebounceMs: Number(e.target.value) } })} placeholder="1500" />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:FileWatcherDebounceMs</code> — debounce FS watcher</span>
+            </label>
+          </div>
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}><input type="checkbox" checked={form.indexing?.enableFileWatcher ?? false} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, enableFileWatcher: e.target.checked } })} style={{ width: "auto" }} /> Enable file watcher (dev only)
+            <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: 8 }}><code>Indexer:EnableFileWatcher</code> — только для локальной разработки</span>
+          </label>
+
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600 }}>Chunk budget (RAG)</h4>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <label>Max chunk chars <input type="number" value={form.indexing?.maxChunkChars ?? 1500} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, maxChunkChars: Number(e.target.value) } })} placeholder="1500" />
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:MaxChunkChars</code> — target max chars, default 1500</span>
+              </label>
+              <label>Min embedding chars <input type="number" value={form.indexing?.minEmbeddingChars ?? 32} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, minEmbeddingChars: Number(e.target.value) } })} placeholder="32" />
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:MinEmbeddingChars</code> — skip embedding for tiny chunks</span>
+              </label>
+              <label>Chunk overlap fraction <input type="number" step="0.01" min={0} max={0.5} value={form.indexing?.chunkOverlapFraction ?? 0.15} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, chunkOverlapFraction: Number(e.target.value) } })} placeholder="0.15" />
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:ChunkOverlapFraction</code> — overlap 0.15</span>
+              </label>
+            </div>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+            <h4 style={{ fontSize: 13, fontWeight: 600 }}>Фильтры</h4>
+            <label>Exclusions (glob, comma separated) <input value={(form.indexing?.exclusions ?? []).join(", ")} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, exclusions: e.target.value.split(",").map(s => s.trim()).filter(Boolean) } })} placeholder="**/bin/**, **/obj/**, **/node_modules/**" />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:Exclusions</code></span>
+            </label>
+            <label>Language exclusions <input value={(form.indexing?.languageExclusions ?? []).join(", ")} onChange={(e) => setForm({ ...form, indexing: { ...form.indexing, languageExclusions: e.target.value.split(",").map(s => s.trim()).filter(Boolean) } })} placeholder="VBS, ..." />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}><code>Indexer:LanguageExclusions</code></span>
+            </label>
+          </div>
         </div>
       )}
       {tab === "embeddings" && (

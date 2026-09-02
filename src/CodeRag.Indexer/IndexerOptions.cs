@@ -10,6 +10,13 @@ public sealed class IndexerOptions
     /// <summary>Максимум конкурентных джоб индексации (SemaphoreSlim). Default 2 (Settings, indexing.md §4).</summary>
     public int MaxConcurrentIndexers { get; set; } = 2;
 
+    /// <summary>
+    /// Параллельность индексации файлов ВНУТРИ одной джобы (Parallel.ForEachAsync).
+    /// Каждый воркер: git show + анализатор + запись в БД (своё SQLite-соединение, WAL).
+    /// Default 8 — заполняет 8-ядерную машину; Roslyn/tree-sitter анализаторы thread-safe (объекты на вызов).
+    /// </summary>
+    public int ParallelFileIndexers { get; set; } = 8;
+
     /// <summary>Дефолтный интервал синхронизации одного репозитория (секунды). Per-repo переопределение через sync_interval_seconds.</summary>
     public int DefaultSyncIntervalSeconds { get; set; } = 300;
 

@@ -66,6 +66,27 @@ public interface IGitService
         ProxyConfig? proxy = null,
         Credential? credential = null,
         CancellationToken ct = default);
+
+    /// <summary>Список веток remote (фильтр refs/heads/*).</summary>
+    Task<IReadOnlyList<string>> ListRemoteBranchesAsync(
+        string remoteUrl,
+        ProxyConfig? proxy = null,
+        Credential? credential = null,
+        CancellationToken ct = default);
+
+    /// <summary>Корневые директории для ветки (через temp clone + ls-tree).</summary>
+    Task<IReadOnlyList<string>> ListRemoteRootDirectoriesAsync(
+        string remoteUrl,
+        string branch,
+        ProxyConfig? proxy = null,
+        Credential? credential = null,
+        CancellationToken ct = default);
+
+    /// <summary>Корневые директории локального репо для заданного коммита/ветки.</summary>
+    Task<IReadOnlyList<string>> ListLocalRootDirectoriesAsync(
+        string localPath,
+        string commitOrBranch,
+        CancellationToken ct = default);
 }
 
 public sealed record GitRemoteRef(string Ref, string Sha);

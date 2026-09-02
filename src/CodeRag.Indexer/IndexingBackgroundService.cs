@@ -50,6 +50,20 @@ public sealed class IndexingBackgroundService : BackgroundService
         try { await _runner.RestoreQueuedJobsAsync(stoppingToken).ConfigureAwait(false); }
         catch (Exception ex) { _logger.LogWarning(ex, "Failed to restore queued jobs"); }
 
+        // Репозитории, застрявшие в Syncing/Indexing после рестарта, разблокируем (джобы их уже в очереди)
+        try
+        {
+            var repos = await _repoStore.ListAsync(stoppingToken).ConfigureAwait(false);
+            foreach (var r in repos.Where(r => r.Status is RepositoryStatus.Syncing or RepositoryStatus.Indexing))
+            {
+                var stuck = r.Status;
+                r.MarkActive();
+                await _repoStore.UpsertAsync(r, stoppingToken).ConfigureAwait(false);
+                _logger.LogWarning("Reset stuck repo {Repo} status {Status} -> Active", r.Name, stuck);
+            }
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Failed to reset stuck repositories"); }
+
         // Запустить polling и потребление канала параллельно
         var consumeTask = ConsumeJobsAsync(stoppingToken);
         var pollTask = PollLoopAsync(stoppingToken);
@@ -61,13 +75,62 @@ public sealed class IndexingBackgroundService : BackgroundService
     {
         await foreach (var job in _runner.Reader.ReadAllAsync(ct).ConfigureAwait(false))
         {
-            await _runner.Semaphore.WaitAsync(ct).ConfigureAwait(false);
+            // Токен джобы берём ДО ожидания слота: отменённая джоба не должна
+            // сидеть в ожидании свободного воркера до последнего
+            var token = _runner.GetToken(job.Id);
 
-            // Запустить джобу без блокировки канала
+            // Если джоба в БД больше не в очереди (например, отменена через API), пропускаем
+            try
+            {
+                var fresh = await _jobStore.GetByIdAsync(job.Id, ct).ConfigureAwait(false);
+                if (fresh is not null && fresh.Status != JobStatus.Queued)
+                {
+                    _logger.LogInformation("Skipping job {JobId}: status is {Status}", job.Id, fresh.Status);
+                    // CTS удаляем только если джоба точно не выполняется (Running — выполняется, CTS уберёт finally)
+                    if (fresh.Status is JobStatus.Cancelled or JobStatus.Completed or JobStatus.Failed)
+                        _runner.RemoveCts(job.Id);
+                    continue;
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* БД временно недоступна — выполняем как обычно */ }
+
+            try
+            {
+                await _runner.Semaphore.WaitAsync(token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("Job {JobId} was cancelled while waiting for a worker slot", job.Id);
+                _runner.RemoveCts(job.Id);
+                continue;
+            }
+
+            // Запустить джобу без блокировки канала. Per-repo слот берётся внутри, чтобы
+            // не заслонять канал: джобы других репозиториев запускаются параллельно,
+            // а джобы одного репозитория строго по одной (git ref-lock race).
             _ = Task.Run(async () =>
             {
-                var token = _runner.GetToken(job.Id);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, token);
+                try
+                {
+                    await _runner.EnterRepoAsync(job.RepositoryId, linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Отменена, пока ждала per-repo слота (ExecuteAsync не запускался)
+                    try
+                    {
+                        job.MarkCancelled();
+                        await _jobStore.UpsertAsync(job, CancellationToken.None).ConfigureAwait(false);
+                        _logger.LogWarning("Job {JobId} cancelled while waiting for repo slot", job.Id);
+                    }
+                    catch { }
+                    _runner.RemoveCts(job.Id);
+                    _runner.Semaphore.Release();
+                    return;
+                }
+
                 try
                 {
                     await _indexingService.ExecuteAsync(job, linked.Token).ConfigureAwait(false);
@@ -79,6 +142,7 @@ public sealed class IndexingBackgroundService : BackgroundService
                 }
                 finally
                 {
+                    _runner.ExitRepo(job.RepositoryId);
                     _runner.RemoveCts(job.Id);
                     _runner.Semaphore.Release();
                 }

@@ -100,13 +100,14 @@ public sealed class GitService : IGitService
         var args = new List<string>();
         args.AddRange(proxyArgs);
         args.AddRange(auth.ConfigArgs);
+        AddNetworkTimeoutArgs(args);
         args.Add("fetch");
         args.Add("origin");
         args.Add(branch);
         // optional: --prune ?
 
         var env = MergeEnv(auth.Env, proxyEnv);
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, normalized, env, _logger, ct, Math.Min(_options.DefaultTimeoutSeconds, 300)).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
             throw CreateGitException("fetch", result, proxyUrl);
@@ -196,13 +197,14 @@ public sealed class GitService : IGitService
         var args = new List<string>();
         args.AddRange(proxyArgs);
         args.AddRange(auth.ConfigArgs);
+        AddNetworkTimeoutArgs(args);
         args.Add("ls-remote");
         args.Add(remoteUrl);
         if (!string.IsNullOrWhiteSpace(branch))
             args.Add(branch!);
 
         var env = MergeEnv(auth.Env, proxyEnv);
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, Math.Min(_options.DefaultTimeoutSeconds, 300)).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
             throw CreateGitException("ls-remote", result, proxyUrl);
@@ -228,11 +230,12 @@ public sealed class GitService : IGitService
         var args = new List<string>();
         args.AddRange(proxyArgs);
         args.AddRange(auth.ConfigArgs);
+        AddNetworkTimeoutArgs(args);
         args.Add("ls-remote");
         args.Add(remoteUrl);
 
         var env = MergeEnv(auth.Env, proxyEnv);
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, Math.Min(_options.DefaultTimeoutSeconds, 300)).ConfigureAwait(false);
         if (result.ExitCode != 0)
             throw CreateGitException("ls-remote", result, proxyUrl);
 
@@ -253,7 +256,171 @@ public sealed class GitService : IGitService
         return refs;
     }
 
+    public async Task<IReadOnlyList<string>> ListRemoteBranchesAsync(string remoteUrl, ProxyConfig? proxy = null, Credential? credential = null, CancellationToken ct = default)
+    {
+        var refs = await LsRemoteAllAsync(remoteUrl, proxy, credential, ct).ConfigureAwait(false);
+        var branches = refs
+            .Where(r => r.Ref.StartsWith("refs/heads/", StringComparison.Ordinal))
+            .Select(r => r.Ref.Substring("refs/heads/".Length))
+            .Distinct()
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
+        // Fallback: also consider remote HEAD symref if needed, but branches list is heads
+        return branches;
+    }
+
+    public async Task<IReadOnlyList<string>> ListRemoteRootDirectoriesAsync(string remoteUrl, string branch, ProxyConfig? proxy = null, Credential? credential = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(remoteUrl)) throw new ArgumentException("remoteUrl required", nameof(remoteUrl));
+        if (string.IsNullOrWhiteSpace(branch)) throw new ArgumentException("branch required", nameof(branch));
+
+        var tmpRoot = Path.Combine(Path.GetTempPath(), "coderag-preview-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmpRoot);
+        var cloneDir = Path.Combine(tmpRoot, "repo");
+        try
+        {
+            using var auth = GitAuthHelper.Build(credential, _protector, _options.SshKeysDir);
+            var proxyUrl = GitProxyHelper.BuildProxyUrl(proxy, _protector);
+            var proxyArgs = GitProxyHelper.BuildGitConfigArgs(proxyUrl);
+            var proxyEnv = GitProxyHelper.BuildEnv(proxyUrl, _options.NoProxy);
+
+            var args = new List<string>();
+            args.AddRange(proxyArgs);
+            args.AddRange(auth.ConfigArgs);
+            AddNetworkTimeoutArgs(args);
+            args.Add("clone");
+            args.Add("--no-checkout");
+            args.Add("--depth");
+            args.Add("1");
+            // filter blob:none to avoid downloading blobs for large repos (needs server support, fallback gracefully)
+            args.Add("--filter=blob:none");
+            args.Add("--branch");
+            args.Add(branch.Trim());
+            args.Add(remoteUrl);
+            args.Add(cloneDir);
+
+            var env = MergeEnv(auth.Env, proxyEnv);
+            var cloneTimeout = _options.CloneTimeoutSeconds > 0 ? _options.CloneTimeoutSeconds : _options.DefaultTimeoutSeconds;
+            GitRunResult result;
+            try
+            {
+                result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, null, env, _logger, ct, cloneTimeout).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                try { if (Directory.Exists(tmpRoot)) Directory.Delete(tmpRoot, recursive: true); } catch { }
+                throw;
+            }
+            if (result.ExitCode != 0)
+            {
+                // Fallback without filter (some servers don't support filter)
+                var args2 = new List<string>();
+                args2.AddRange(proxyArgs);
+                args2.AddRange(auth.ConfigArgs);
+                AddNetworkTimeoutArgs(args2);
+                args2.Add("clone");
+                args2.Add("--no-checkout");
+                args2.Add("--depth");
+                args2.Add("1");
+                args2.Add("--branch");
+                args2.Add(branch.Trim());
+                args2.Add(remoteUrl);
+                args2.Add(cloneDir);
+                result = await GitProcessRunner.RunAsync(_options.GitExecutable, args2, null, env, _logger, ct, cloneTimeout).ConfigureAwait(false);
+                if (result.ExitCode != 0)
+                {
+                    throw CreateGitException("clone preview", result, proxyUrl);
+                }
+            }
+
+            // Get HEAD commit then list files or tree
+            var headArgs = new List<string> { "rev-parse", "HEAD" };
+            var headRes = await GitProcessRunner.RunAsync(_options.GitExecutable, headArgs, cloneDir, null, _logger, ct).ConfigureAwait(false);
+            if (headRes.ExitCode != 0)
+                throw CreateGitException("rev-parse HEAD preview", headRes, null);
+            var head = headRes.StdOut.Trim();
+
+            // Use ls-tree --name-only HEAD without -r to get top-level entries, then also need directories via recursive
+            // Approach: get all files recursively then derive root dirs
+            var lsArgs = new List<string> { "ls-tree", "-r", "--name-only", head };
+            var lsRes = await GitProcessRunner.RunAsync(_options.GitExecutable, lsArgs, cloneDir, null, _logger, ct).ConfigureAwait(false);
+            if (lsRes.ExitCode != 0)
+                throw CreateGitException("ls-tree preview", lsRes, null);
+            var files = lsRes.StdOut.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+
+            var roots = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var f in files)
+            {
+                var slash = f.IndexOf('/');
+                if (slash > 0)
+                    roots.Add(f.Substring(0, slash));
+                else
+                    roots.Add(f); // top-level file is its own entry; we show it as file but could filter to dirs only? Show top-level dirs + files as directories? spec says корни directories, so include only dirs
+            }
+            // Filter to only directories (exclude bare files): keep those that had slash
+            var dirSet = new HashSet<string>(files.Where(f => f.Contains('/')).Select(f => f.Substring(0, f.IndexOf('/'))), StringComparer.Ordinal);
+            // If repo is flat (no subdirs), return empty? Better return sorted dirSet
+            var resultDirs = dirSet.OrderBy(s => s, StringComparer.Ordinal).ToList();
+            // If dirSet empty but files exist (flat repo), return empty list (no dirs to filter)
+            return resultDirs;
+        }
+        finally
+        {
+            try { if (Directory.Exists(tmpRoot)) Directory.Delete(tmpRoot, recursive: true); } catch { }
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> ListLocalRootDirectoriesAsync(string localPath, string commitOrBranch, CancellationToken ct = default)
+    {
+        var normalized = PathValidator.ValidateAndNormalize(localPath, _options.ReposRoot);
+        if (!Directory.Exists(Path.Combine(normalized, ".git")))
+            throw new InvalidOperationException($"Not a git repository: {normalized}");
+
+        // Resolve commit: if branch name, try rev-parse origin/branch else HEAD
+        string commitSha = commitOrBranch;
+        if (!IsValidSha(commitOrBranch))
+        {
+            // Try branch
+            var revArgs = new List<string> { "rev-parse", $"origin/{commitOrBranch}" };
+            var revRes = await GitProcessRunner.RunAsync(_options.GitExecutable, revArgs, normalized, null, _logger, ct).ConfigureAwait(false);
+            if (revRes.ExitCode == 0 && IsValidSha(revRes.StdOut.Trim()))
+                commitSha = revRes.StdOut.Trim();
+            else
+            {
+                var headRes = await GitProcessRunner.RunAsync(_options.GitExecutable, new List<string> { "rev-parse", "HEAD" }, normalized, null, _logger, ct).ConfigureAwait(false);
+                if (headRes.ExitCode == 0 && IsValidSha(headRes.StdOut.Trim()))
+                    commitSha = headRes.StdOut.Trim();
+                else
+                    throw CreateGitException("rev-parse local preview", revRes, null);
+            }
+        }
+
+        var lsArgs = new List<string> { "ls-tree", "-r", "--name-only", commitSha };
+        var lsRes = await GitProcessRunner.RunAsync(_options.GitExecutable, lsArgs, normalized, null, _logger, ct).ConfigureAwait(false);
+        if (lsRes.ExitCode != 0)
+            throw CreateGitException("ls-tree local", lsRes, null);
+        var files = lsRes.StdOut.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+        var dirSet = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in files)
+        {
+            var slash = f.IndexOf('/');
+            if (slash > 0) dirSet.Add(f.Substring(0, slash));
+        }
+        return dirSet.OrderBy(s => s, StringComparer.Ordinal).ToList();
+    }
+
     // --- helpers ---
+
+    /// <summary>
+    /// Быстрое падение при "черной дыре" сети: TCP connect до 30s,
+    /// скорость ниже 1KB/s дольше 60s = abort (иначе git может вешаться десятки минут).
+    /// </summary>
+    private static void AddNetworkTimeoutArgs(List<string> args)
+    {
+        args.Add("-c"); args.Add("http.connectTimeout=30");
+        args.Add("-c"); args.Add("http.lowSpeedLimit=1024");
+        args.Add("-c"); args.Add("http.lowSpeedTime=60");
+    }
 
     private static Dictionary<string, string> MergeEnv(IDictionary<string, string> a, IDictionary<string, string> b)
     {

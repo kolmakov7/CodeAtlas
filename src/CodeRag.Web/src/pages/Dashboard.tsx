@@ -171,8 +171,18 @@ export default function Dashboard() {
               {running.map((j) => (
                 <tr key={j.id}>
                   <td>{j.repositoryName ?? j.repositoryId.slice(0, 8)}</td>
-                  <td>{j.type}</td>
-                  <td style={{ minWidth: 140 }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><div className="progress" style={{ flex: 1 }}><div style={{ width: `${(j.progress ?? 0) * 100}%` }} /></div><span style={{ fontSize: 12 }}>{((j.progress ?? 0) * 100).toFixed(0)}%</span></div></td>
+                  <td>{j.type}{j.phase ? <span style={{ color: "var(--text-muted)", fontSize: 12 }}> · {j.phase}</span> : null}</td>
+                  <td style={{ minWidth: 200 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div className="progress" style={{ flex: 1 }}><div style={{ width: `${(j.progress ?? 0) * 100}%` }} /></div>
+                      <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>{((j.progress ?? 0) * 100).toFixed(0)}%</span>
+                      {j.totalItems != null && j.totalItems > 0 && (
+                        <span style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                          {(j.itemsDone ?? 0).toLocaleString()} / {j.totalItems.toLocaleString()} {j.type === "Embedding" ? "chunks" : "files"}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>

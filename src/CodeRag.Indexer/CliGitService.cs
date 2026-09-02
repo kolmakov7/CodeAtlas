@@ -58,6 +58,9 @@ public sealed class CliGitService : IGitService
         args.AddRange(proxyArgs);
         args.AddRange(auth.ConfigArgs);
         args.Add("clone");
+        // No working tree checkout: индексация читает файлы напрямую из объектов (git show),
+        // распаковка репозитория только жмёт диск и время клона.
+        args.Add("--no-checkout");
         args.Add("--branch");
         args.Add(branch.Trim());
         args.Add(remoteUrl);
@@ -109,6 +112,14 @@ public sealed class CliGitService : IGitService
             args.Add(branch.Trim());
 
         var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, repoPath, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        if (result.ExitCode != 0 && result.StdErr.Contains("cannot lock ref", StringComparison.OrdinalIgnoreCase))
+        {
+            // Конкурентный git-процесс сместил refs/remotes/origin/<branch> между read и lock.
+            // Per-repo джоб-лочки должны исключать это; retry as a safety net.
+            _logger.LogWarning("git fetch ref-lock race in {Repo}, retrying", repoPath);
+            await Task.Delay(1000, ct).ConfigureAwait(false);
+            result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, repoPath, env, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        }
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"git fetch failed in {repoPath}: {SecretMasker.Mask(result.StdErr)} {SecretMasker.Mask(result.StdOut)}");
         _logger.LogDebug("git fetch ok {Repo} branch={Branch}", repoPath, branch);
@@ -181,11 +192,11 @@ public sealed class CliGitService : IGitService
                 if (diff.Stdout.Trim().Length > 0)
                     changed.Add(new GitChangedFile(f, null, GitChangeKind.Modified));
             }
-            // Дополнительно: git diff --name-status -M для переименований
-            var nameStatus = await RunGitAsync(repoPath, $"diff --name-status -M {fromSha}..{toSha}", null, ct).ConfigureAwait(false);
+            // Дополнительно: git diff --name-status -M -z для переименований
+            var nameStatus = await RunGitAsync(repoPath, $"diff --name-status -M -z {fromSha}..{toSha}", null, ct).ConfigureAwait(false);
             if (nameStatus.ExitCode == 0)
             {
-                var parsed = ParseNameStatus(nameStatus.Stdout);
+                var parsed = ParseNameStatusZ(nameStatus.Stdout);
                 // Переопределяем changed если name-status дал переименования
                 var renameMap = parsed.Where(p => p.Kind == GitChangeKind.Renamed).ToList();
                 foreach (var r in renameMap)
@@ -198,7 +209,8 @@ public sealed class CliGitService : IGitService
         }
 
         // Нормальный инкрементальный diff
-        var result = await RunGitAsync(repoPath, $"diff --name-status -M {fromSha}..{toSha}", null, ct).ConfigureAwait(false);
+        // -z: NUL-разделённые сырые пути, без C-style кавычек (безопасно для кириллицы/пробелов)
+        var result = await RunGitAsync(repoPath, $"diff --name-status -M -z {fromSha}..{toSha}", null, ct).ConfigureAwait(false);
         if (result.ExitCode != 0)
         {
             _logger.LogWarning("git diff failed {From}..{To} in {Repo}: {Err} — fallback to full", fromSha, toSha, repoPath, result.Stderr);
@@ -206,7 +218,7 @@ public sealed class CliGitService : IGitService
             return new GitDiff(fromSha, toSha, files.Select(p => new GitChangedFile(p, null, GitChangeKind.Added)).ToList(), true);
         }
 
-        var changedFiles = ParseNameStatus(result.Stdout);
+        var changedFiles = ParseNameStatusZ(result.Stdout);
         return new GitDiff(fromSha, toSha, changedFiles, IsFullDiff: false);
     }
 
@@ -218,37 +230,39 @@ public sealed class CliGitService : IGitService
 
     public async Task<IReadOnlyList<string>> ListFilesAsync(string repoPath, string commitSha, CancellationToken ct)
     {
-        var r = await RunGitAsync(repoPath, $"ls-tree -r --name-only {commitSha}", null, ct).ConfigureAwait(false);
+        // -z: NUL-разделённые сырые пути, без C-style кавычек (безопасно для кириллицы/пробелов)
+        var r = await RunGitAsync(repoPath, $"ls-tree -r -z --name-only {commitSha}", null, ct).ConfigureAwait(false);
         if (r.ExitCode != 0)
             throw new InvalidOperationException($"git ls-tree failed for {commitSha} in {repoPath}: {r.Stderr}");
-        return r.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return r.Stdout.Split('\0', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     public async Task<string> ShowFileAsync(string repoPath, string filePath, string commitSha, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("filePath required", nameof(filePath));
         if (string.IsNullOrWhiteSpace(commitSha)) throw new ArgumentException("commitSha required", nameof(commitSha));
-        // git show не требует working tree файла, обходит NAME_MAX 255
+        // git show не требует working tree файла, обходит NAME_MAX 255.
+        // Сырые байты: содержимое репозиториев часто cp1251, декодирование — ContentEncoding.
         var spec = $"{commitSha}:{filePath}";
         var args = new List<string> { "show", spec };
-        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, repoPath, null, _logger, ct, _options.DefaultTimeoutSeconds).ConfigureAwait(false);
+        var result = await GitProcessRunner.RunAsync(_options.GitExecutable, args, repoPath, null, _logger, ct, _options.DefaultTimeoutSeconds, captureRawStdOut: true).ConfigureAwait(false);
         if (result.ExitCode != 0)
             throw new InvalidOperationException($"git show failed for {spec} in {repoPath}: {result.StdErr}");
-        return result.StdOut;
+        return ContentEncoding.Decode(result.RawStdOut!);
     }
 
     private static string EscapePath(string path) => "\"" + path.Replace("\"", "\\\"") + "\"";
 
-    private static IReadOnlyList<GitChangedFile> ParseNameStatus(string stdout)
+    /// <summary>Парсер вывода `git diff --name-status -M -z`: токены NUL-разделены.
+    /// Обычный: <status>\0<path>\0; переименование/копия: <status>\0<old>\0<new>\0.</summary>
+    private static IReadOnlyList<GitChangedFile> ParseNameStatusZ(string stdout)
     {
         var list = new List<GitChangedFile>();
-        var lines = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        foreach (var line in lines)
+        var tokens = stdout.Split('\0');
+        for (var i = 0; i < tokens.Length; i++)
         {
-            // Format: "M\tpath" or "A\tpath" or "D\tpath" or "R100\told\tnew"
-            var parts = line.Split('\t');
-            if (parts.Length < 2) continue;
-            var status = parts[0].Trim();
+            var status = tokens[i].Trim();
+            if (status.Length == 0) continue;
             var kind = status[0] switch
             {
                 'A' => GitChangeKind.Added,
@@ -259,10 +273,16 @@ public sealed class CliGitService : IGitService
                 'U' => GitChangeKind.Unmerged,
                 _ => GitChangeKind.Modified
             };
-            if (kind == GitChangeKind.Renamed && parts.Length >= 3)
-                list.Add(new GitChangedFile(parts[2].Trim(), parts[1].Trim(), kind));
-            else
-                list.Add(new GitChangedFile(parts[1].Trim(), null, kind));
+            if ((kind == GitChangeKind.Renamed || kind == GitChangeKind.Copied) && i + 2 < tokens.Length)
+            {
+                list.Add(new GitChangedFile(tokens[i + 2], tokens[i + 1], kind));
+                i += 2;
+            }
+            else if (i + 1 < tokens.Length)
+            {
+                list.Add(new GitChangedFile(tokens[i + 1], null, kind));
+                i += 1;
+            }
         }
         return list;
     }

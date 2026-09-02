@@ -16,9 +16,45 @@ public sealed class RepositoryStore : CodeRag.Domain.Ports.IRepositoryStore, IRe
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         // Check if group_id column exists (migration 005 may not have run yet — fallback to old schema)
         bool hasGroup = await HasColumnAsync(conn, "repositories", "group_id").ConfigureAwait(false);
+        bool hasFilter = await HasColumnAsync(conn, "repositories", "filter_enabled").ConfigureAwait(false);
         string sql;
         object p;
-        if (hasGroup)
+        var allowedJson = repository.AllowedDirectories.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(repository.AllowedDirectories);
+        var filterEnabled = repository.DirectoryFilterEnabled ? 1 : 0;
+        if (hasGroup && hasFilter)
+        {
+            sql = @"
+INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, group_id, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error, filter_enabled, allowed_directories)
+VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@groupId,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError,@filterEnabled,@allowedDirs)
+ON CONFLICT(id) DO UPDATE SET
+  name=excluded.name, git_url=excluded.git_url, branch=excluded.branch, local_path=excluded.local_path,
+  current_commit=excluded.current_commit, indexed_commit=excluded.indexed_commit, status=excluded.status,
+  enabled=excluded.enabled, group_id=excluded.group_id, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
+  sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
+  last_index_at=excluded.last_index_at, last_error=excluded.last_error, filter_enabled=excluded.filter_enabled, allowed_directories=excluded.allowed_directories;";
+            p = new
+            {
+                id = repository.Id.ToString(),
+                name = repository.Name,
+                gitUrl = repository.GitUrl.Value,
+                branch = repository.Branch,
+                localPath = repository.LocalPath.Value,
+                currentCommit = repository.CurrentCommit,
+                indexedCommit = repository.IndexedCommit,
+                status = repository.Status.ToString(),
+                enabled = repository.Enabled ? 1 : 0,
+                groupId = repository.GroupId?.ToString(),
+                proxyId = repository.ProxyId?.ToString(),
+                credentialId = repository.CredentialId?.ToString(),
+                syncInterval = repository.SyncIntervalSeconds,
+                lastSyncAt = repository.LastSyncAt?.ToString("o"),
+                lastIndexAt = repository.LastIndexAt?.ToString("o"),
+                lastError = repository.LastError,
+                filterEnabled = filterEnabled,
+                allowedDirs = allowedJson
+            };
+        }
+        else if (hasGroup)
         {
             sql = @"
 INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, group_id, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error)
@@ -87,10 +123,27 @@ ON CONFLICT(id) DO UPDATE SET
         {
             // UNIQUE constraint failed (likely repositories.name) — fallback to UPDATE by id
             // Happens when two concurrent upserts race or name already exists with different id
-            var updateSql = hasGroup
-                ? @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id"
-                : @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id";
+            string updateSql;
+            if (hasGroup && hasFilter)
+                updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError, filter_enabled=@filterEnabled, allowed_directories=@allowedDirs WHERE id=@id";
+            else if (hasGroup)
+                updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id";
+            else
+                updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id";
             await conn.ExecuteAsync(updateSql, p).ConfigureAwait(false);
+        }
+        // If filter column exists but we inserted without it (old path) then update filter separately
+        if (hasFilter && !hasGroup) // shouldn't happen after migration 005 but keep
+        {
+            try { await conn.ExecuteAsync("UPDATE repositories SET filter_enabled=@fe, allowed_directories=@ad WHERE id=@id;", new { fe = filterEnabled, ad = allowedJson, id = repository.Id.ToString() }).ConfigureAwait(false); } catch { }
+        }
+        else if (hasFilter && hasGroup)
+        {
+            // Already handled in main upsert; no extra needed. But if we took hasGroup-only path due to hasFilter false detection race, ensure
+        }
+        else if (hasFilter)
+        {
+            try { await conn.ExecuteAsync("UPDATE repositories SET filter_enabled=@fe, allowed_directories=@ad WHERE id=@id;", new { fe = filterEnabled, ad = allowedJson, id = repository.Id.ToString() }).ConfigureAwait(false); } catch { }
         }
     }
 
@@ -186,6 +239,8 @@ ON CONFLICT(id) DO UPDATE SET
     {
         var status = Enum.TryParse<RepositoryStatus>(r.status, out var st) ? st : RepositoryStatus.Active;
         Guid? groupId = string.IsNullOrWhiteSpace(r.group_id) ? null : Guid.Parse(r.group_id);
+        var allowed = ParseAllowed(r.allowed_directories);
+        var filterEnabled = r.filter_enabled.HasValue ? r.filter_enabled.Value != 0 : false;
         var repo = Repository.Rehydrate(
             Guid.Parse(r.id),
             r.name,
@@ -202,7 +257,9 @@ ON CONFLICT(id) DO UPDATE SET
             ParseDate(r.last_sync_at),
             ParseDate(r.last_index_at),
             r.last_error,
-            groupId);
+            groupId,
+            filterEnabled,
+            allowed);
 
         // Preserve status transitions that Rehydrate cannot express (Paused/Error without error)
         // Rehydrate already sets status, so only need to ensure error flag if needed.
@@ -214,6 +271,17 @@ ON CONFLICT(id) DO UPDATE SET
         }
 
         return repo;
+    }
+
+    private static IReadOnlyList<string> ParseAllowed(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<string>();
+        try
+        {
+            var arr = System.Text.Json.JsonSerializer.Deserialize<string[]>(json);
+            return arr ?? Array.Empty<string>();
+        }
+        catch { return Array.Empty<string>(); }
     }
 
     private static DateTimeOffset? ParseDate(string? s) =>
@@ -237,5 +305,7 @@ ON CONFLICT(id) DO UPDATE SET
         public string? last_sync_at { get; set; }
         public string? last_index_at { get; set; }
         public string? last_error { get; set; }
+        public int? filter_enabled { get; set; }
+        public string? allowed_directories { get; set; }
     }
 }

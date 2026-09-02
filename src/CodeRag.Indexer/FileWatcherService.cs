@@ -122,7 +122,9 @@ public sealed class FileWatcherService : BackgroundService
                 try
                 {
                     var repo = await _repoStore.GetByIdAsync(repoId).ConfigureAwait(false);
-                    if (repo is null || repo.Status is RepositoryStatus.Paused or RepositoryStatus.Deleting || !repo.Enabled) return;
+                    // Syncing/Indexing — не штампую новый Sync поверх уже работающего (git ref-lock race)
+                    if (repo is null || repo.Status is RepositoryStatus.Paused or RepositoryStatus.Deleting
+                        or RepositoryStatus.Syncing or RepositoryStatus.Indexing || !repo.Enabled) return;
 
                     var job = IndexingJob.Create(Guid.NewGuid(), repoId, JobType.Sync, JobStatus.Queued, DateTimeOffset.UtcNow, repo.IndexedCommit, null);
                     await _runner.EnqueueAsync(job).ConfigureAwait(false);

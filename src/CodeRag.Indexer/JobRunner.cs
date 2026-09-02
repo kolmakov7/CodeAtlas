@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
@@ -20,6 +21,10 @@ public sealed class JobRunner : IJobRunner, IAsyncDisposable
 
     private readonly Dictionary<Guid, CancellationTokenSource> _ctsMap = new();
     private readonly object _ctsLock = new();
+
+    // Per-repo lock: максимум одна джоба на репозиторий одновременно (иначе параллельные
+    // `git fetch` роняют друг друга: "cannot lock ref ... expected <sha>").
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _repoLocks = new();
 
     public JobRunner(IndexingJobStore store, IOptionsMonitor<IndexerOptions> options, ILogger<JobRunner> logger)
     {
@@ -102,6 +107,20 @@ public sealed class JobRunner : IJobRunner, IAsyncDisposable
         }
     }
 
+    /// <summary>Взять per-repo слот: ждёт, пока не завершится другая джоба того же репозитория.</summary>
+    public async Task EnterRepoAsync(Guid repoId, CancellationToken ct)
+    {
+        var repoLock = _repoLocks.GetOrAdd(repoId, _ => new SemaphoreSlim(1, 1));
+        await repoLock.WaitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Отпустить per-repo слот (после выполнения джобы).</summary>
+    public void ExitRepo(Guid repoId)
+    {
+        if (_repoLocks.TryGetValue(repoId, out var repoLock))
+            repoLock.Release();
+    }
+
     public void RemoveCts(Guid jobId)
     {
         lock (_ctsLock)
@@ -117,17 +136,34 @@ public sealed class JobRunner : IJobRunner, IAsyncDisposable
     /// <summary>Восстановление queued джоб после рестарта (ADR-008) — кладёт их обратно в Channel.</summary>
     public async Task RestoreQueuedJobsAsync(CancellationToken ct = default)
     {
+        // ВАЖНО: сначала возвращаем stale Running-джобы, затем восстанавливаем Queued.
+        // Консумер стартует только после этого метода, поэтому на момент stale-скана
+        // в процессе ещё нет "свежих" Running-джоб. Если бы порядок был обратным,
+        // консумер успел бы поставить восстановленную Queued-джобу в Running, и
+        // stale-скан повторно поставил бы её в очередь (двойное выполнение).
+        var stale = await _store.ListByStatusAsync(JobStatus.Running, ct).ConfigureAwait(false);
+        foreach (var j in stale)
+        {
+            j.Requeue();
+            await _store.UpsertAsync(j, ct).ConfigureAwait(false);
+            _logger.LogWarning("Re-queued stale running job {JobId} type={Type} repo={Repo}", j.Id, j.Type, j.RepositoryId);
+            await RestoreJobAsync(j, "Restored stale job {JobId} type={Type} repo={Repo}", ct);
+        }
+
         var queued = await _store.ListByStatusAsync(JobStatus.Queued, ct).ConfigureAwait(false);
         foreach (var j in queued)
+            await RestoreJobAsync(j, "Restored queued job {JobId} type={Type} repo={Repo}", ct);
+    }
+
+    private async Task RestoreJobAsync(IndexingJob j, string template, CancellationToken ct)
+    {
+        await _channel.Writer.WriteAsync(j, ct).ConfigureAwait(false);
+        lock (_ctsLock)
         {
-            await _channel.Writer.WriteAsync(j, ct).ConfigureAwait(false);
-            lock (_ctsLock)
-            {
-                if (!_ctsMap.ContainsKey(j.Id))
-                    _ctsMap[j.Id] = new CancellationTokenSource();
-            }
-            _logger.LogInformation("Restored queued job {JobId} type={Type} repo={Repo}", j.Id, j.Type, j.RepositoryId);
+            if (!_ctsMap.ContainsKey(j.Id))
+                _ctsMap[j.Id] = new CancellationTokenSource();
         }
+        _logger.LogInformation(template, j.Id, j.Type, j.RepositoryId);
     }
 
     public async ValueTask DisposeAsync()

@@ -25,6 +25,8 @@ export interface Repository {
   lastSyncAt?: string | null;
   lastIndexAt?: string | null;
   lastError?: string | null;
+  directoryFilterEnabled?: boolean;
+  allowedDirectories?: string[] | null;
 }
 
 export interface EmbeddingDomainStats {
@@ -182,6 +184,12 @@ export interface IndexingJob {
   finishedAt?: string | null;
   progress?: number | null; // 0..1
   error?: string | null;
+  fromCommit?: string | null;
+  toCommit?: string | null;
+  totalItems?: number | null; // files (Index/Rebuild) или chunks (Embedding)
+  itemsDone?: number | null;
+  phase?: string | null; // clearing/diff/clone/fetch/indexing/relations/embedding/commit
+  currentFile?: string | null;
 }
 
 export interface VectorStoredModel {
@@ -240,6 +248,12 @@ export interface Settings {
   indexing?: {
     syncIntervalSeconds?: number | null;
     maxConcurrentIndexers?: number;
+    parallelFileIndexers?: number;
+    enableFileWatcher?: boolean;
+    fileWatcherDebounceMs?: number;
+    maxChunkChars?: number;
+    chunkOverlapFraction?: number;
+    minEmbeddingChars?: number;
     exclusions?: string[]; // globs
     languageExclusions?: string[];
   };

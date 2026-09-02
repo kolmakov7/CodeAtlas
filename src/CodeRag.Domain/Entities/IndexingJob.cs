@@ -17,6 +17,15 @@ public sealed class IndexingJob
     public string? FromCommit { get; private set; }
     public string? ToCommit { get; private set; }
 
+    /// <summary>Всего единиц работы в джобе (файлы для Index/Rebuild, чанки для Embedding). Null — неизвестно/не применимо.</summary>
+    public int? TotalItems { get; private set; }
+    /// <summary>Обработано единиц работы.</summary>
+    public int? ItemsDone { get; private set; }
+    /// <summary>Текущий этап: clearing/diff/clone/fetch/indexing/relations/embedding/commit.</summary>
+    public string? Phase { get; private set; }
+    /// <summary>Последний обработанный путь (для файловых джоб).</summary>
+    public string? CurrentFile { get; private set; }
+
     private IndexingJob(Guid id, Guid repositoryId, JobType type, JobStatus status, DateTimeOffset startedAt)
     {
         Id = id;
@@ -55,6 +64,20 @@ public sealed class IndexingJob
         Progress = progress;
     }
 
+    /// <summary>
+    /// Обновить прогресс + детали (total/done/phase/current_file). Null-значения не перезаписывают
+    /// существующие — удобно вызывать с частичными обновлениями из параллельных воркеров.
+    /// </summary>
+    public void SetProgress(double progress, int? totalItems = null, int? itemsDone = null, string? phase = null, string? currentFile = null)
+    {
+        if (progress is < 0 or > 1) throw new DomainValidationException("Progress must be 0..1.");
+        Progress = progress;
+        if (totalItems.HasValue) TotalItems = totalItems;
+        if (itemsDone.HasValue) ItemsDone = itemsDone;
+        if (!string.IsNullOrEmpty(phase)) Phase = phase;
+        if (currentFile is not null) CurrentFile = currentFile;
+    }
+
     public void MarkCompleted(DateTimeOffset? at = null)
     {
         if (Status != JobStatus.Running) throw new DomainValidationException($"Job {Id} can only complete from Running.");
@@ -77,10 +100,24 @@ public sealed class IndexingJob
         FinishedAt = at ?? DateTimeOffset.UtcNow;
     }
 
+    /// <summary>Возврат в очередь (рестарт в середине Running — джобу догоняем заново, она идемпотентна).</summary>
+    public void Requeue()
+    {
+        Status = JobStatus.Queued;
+        FinishedAt = null;
+        Error = null;
+        Progress = 0;
+        TotalItems = null;
+        ItemsDone = null;
+        Phase = null;
+        CurrentFile = null;
+    }
+
     public static IndexingJob Rehydrate(
         Guid id, Guid repositoryId, JobType type, JobStatus status,
         DateTimeOffset startedAt, DateTimeOffset? finishedAt,
-        double progress, string? error, string? fromCommit, string? toCommit)
+        double progress, string? error, string? fromCommit, string? toCommit,
+        int? totalItems = null, int? itemsDone = null, string? phase = null, string? currentFile = null)
     {
         return new IndexingJob(id, repositoryId, type, status, startedAt)
         {
@@ -88,7 +125,11 @@ public sealed class IndexingJob
             Progress = progress,
             Error = string.IsNullOrWhiteSpace(error) ? null : error,
             FromCommit = string.IsNullOrWhiteSpace(fromCommit) ? null : fromCommit.Trim(),
-            ToCommit = string.IsNullOrWhiteSpace(toCommit) ? null : toCommit.Trim()
+            ToCommit = string.IsNullOrWhiteSpace(toCommit) ? null : toCommit.Trim(),
+            TotalItems = totalItems,
+            ItemsDone = itemsDone,
+            Phase = phase,
+            CurrentFile = currentFile
         };
     }
 }

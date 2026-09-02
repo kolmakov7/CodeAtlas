@@ -12,12 +12,14 @@ public sealed class JobsController : ControllerBase
 {
     private readonly IIndexingJobStore _store;
     private readonly IJobRunner _runner;
+    private readonly IRepositoryStore _repoStore;
     private readonly ILogger<JobsController> _logger;
 
-    public JobsController(IIndexingJobStore store, IJobRunner runner, ILogger<JobsController> logger)
+    public JobsController(IIndexingJobStore store, IJobRunner runner, IRepositoryStore repoStore, ILogger<JobsController> logger)
     {
         _store = store;
         _runner = runner;
+        _repoStore = repoStore;
         _logger = logger;
     }
 
@@ -30,9 +32,16 @@ public sealed class JobsController : ControllerBase
         if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<JobStatus>(status, true, out var st))
             jobs = jobs.Where(j => j.Status == st).ToList();
 
+        // Имена репозиториев для отображения в списке (одна выборка на все джобы).
+        var repos = await _repoStore.ListAsync(ct).ConfigureAwait(false);
+        var names = repos.ToDictionary(r => r.Id, r => r.Name);
+
         return Ok(jobs.Select(j => new JobDto(
-            j.Id, j.RepositoryId, j.Type.ToString(), j.Status.ToString(),
-            j.StartedAt.ToString("o"), j.FinishedAt?.ToString("o"), j.Progress, j.Error, j.FromCommit, j.ToCommit)).ToList());
+            j.Id, j.RepositoryId,
+            names.TryGetValue(j.RepositoryId, out var name) ? name : j.RepositoryId.ToString(),
+            j.Type.ToString(), j.Status.ToString(),
+            j.StartedAt.ToString("o"), j.FinishedAt?.ToString("o"), j.Progress, j.Error, j.FromCommit, j.ToCommit,
+            j.TotalItems, j.ItemsDone, j.Phase, j.CurrentFile)).ToList());
     }
 
     [HttpPost("{id:guid}/cancel")]

@@ -19,11 +19,15 @@ public sealed class IndexingJobStore : IIndexingJobStore
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         const string sql = @"
-INSERT INTO indexing_jobs(id, repository_id, type, status, started_at, finished_at, progress, error)
-VALUES (@id,@repo,@type,@status,@started,@finished,@progress,@error)
+INSERT INTO indexing_jobs(id, repository_id, type, status, started_at, finished_at, progress, error,
+                          total_items, items_done, phase, current_file, from_commit, to_commit)
+VALUES (@id,@repo,@type,@status,@started,@finished,@progress,@error,
+        @total,@done,@phase,@currentFile,@fromCommit,@toCommit)
 ON CONFLICT(id) DO UPDATE SET
   repository_id=excluded.repository_id, type=excluded.type, status=excluded.status,
-  started_at=excluded.started_at, finished_at=excluded.finished_at, progress=excluded.progress, error=excluded.error;";
+  started_at=excluded.started_at, finished_at=excluded.finished_at, progress=excluded.progress, error=excluded.error,
+  total_items=excluded.total_items, items_done=excluded.items_done, phase=excluded.phase,
+  current_file=excluded.current_file, from_commit=excluded.from_commit, to_commit=excluded.to_commit;";
         await conn.ExecuteAsync(sql, new
         {
             id = job.Id.ToString(),
@@ -33,7 +37,13 @@ ON CONFLICT(id) DO UPDATE SET
             started = job.StartedAt.ToString("o"),
             finished = job.FinishedAt?.ToString("o"),
             progress = job.Progress,
-            error = job.Error
+            error = job.Error,
+            total = job.TotalItems,
+            done = job.ItemsDone,
+            phase = job.Phase,
+            currentFile = job.CurrentFile,
+            fromCommit = job.FromCommit,
+            toCommit = job.ToCommit
         }).ConfigureAwait(false);
     }
 
@@ -68,6 +78,24 @@ ON CONFLICT(id) DO UPDATE SET
         await conn.ExecuteAsync("UPDATE indexing_jobs SET progress=@p WHERE id=@id;", new { p = progress, id = jobId.ToString() }).ConfigureAwait(false);
     }
 
+    /// <summary>Progress + детали (total/done/phase/current_file) одним UPDATE — для частых обновлений из воркеров.</summary>
+    public async Task UpdateProgressAsync(IndexingJob job, CancellationToken ct = default)
+    {
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        await conn.ExecuteAsync(@"
+UPDATE indexing_jobs SET
+  progress=@progress, total_items=@total, items_done=@done, phase=@phase, current_file=@currentFile
+WHERE id=@id;", new
+        {
+            progress = job.Progress,
+            total = job.TotalItems,
+            done = job.ItemsDone,
+            phase = job.Phase,
+            currentFile = job.CurrentFile,
+            id = job.Id.ToString()
+        }).ConfigureAwait(false);
+    }
+
     private static IndexingJob Map(JobRow r)
     {
         var id = Guid.Parse(r.id);
@@ -79,7 +107,8 @@ ON CONFLICT(id) DO UPDATE SET
         var from = r.fromCommit ?? r.from_commit;
         var to = r.toCommit ?? r.to_commit;
         var progress = r.progress ?? (status == JobStatus.Completed ? 1 : 0);
-        return IndexingJob.Rehydrate(id, repo, type, status, started, finished, progress, r.error, from, to);
+        return IndexingJob.Rehydrate(id, repo, type, status, started, finished, progress, r.error, from, to,
+            r.total_items, r.items_done, r.phase, r.current_file);
     }
 
     private sealed class JobRow
@@ -92,11 +121,13 @@ ON CONFLICT(id) DO UPDATE SET
         public string? finished_at { get; set; }
         public double? progress { get; set; }
         public string? error { get; set; }
-        // Поле from/to commit может храниться как часть type? Но схема storage.md не имеет fromCommit/toCommit колонок — храним опционально в error? Нет.
-        // Для совместимости с Domain IndexingJob.FromCommit/ToCommit — пробуем читать из опциональных колонок from_commit/to_commit если есть (миграция 002), иначе null.
+        public int? total_items { get; set; }
+        public int? items_done { get; set; }
+        public string? phase { get; set; }
+        public string? current_file { get; set; }
+        // Колонки from_commit/to_commit (миграция 006); Dapper мапит both-названия, fallback ниже.
         public string? fromCommit { get; set; }
         public string? toCommit { get; set; }
-        // Dapper маппит также колонки from_commit/to_commit -> fromCommit не совпадёт; добавим ниже fallback via dynamic.
         public string? from_commit { get; set; }
         public string? to_commit { get; set; }
     }
