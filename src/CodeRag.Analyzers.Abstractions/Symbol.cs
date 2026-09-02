@@ -38,6 +38,8 @@ public static class SymbolKind
     public const string Parameter = "Parameter";
     public const string Variable = "Variable";
     public const string Constant = "Constant";
+    // HTML
+    public const string Section = "Section";
     // SQL / VBS
     public const string Procedure = "Procedure";
     public const string View = "View";

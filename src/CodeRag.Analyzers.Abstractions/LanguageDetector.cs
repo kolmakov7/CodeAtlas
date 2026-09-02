@@ -43,6 +43,9 @@ public static class LanguageDetector
         [".tsx"] = SupportedLanguages.JavaScript,
         // Go
         [".go"] = SupportedLanguages.Go,
+        // HTML
+        [".html"] = SupportedLanguages.Html,
+        [".htm"] = SupportedLanguages.Html,
     };
 
     /// <summary>Определить язык по пути; <c>null</c> если неизвестен.</summary>

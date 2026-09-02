@@ -10,9 +10,10 @@ public static class SupportedLanguages
     public const string Cpp = "cpp";
     public const string JavaScript = "javascript";
     public const string Go = "go";
+    public const string Html = "html";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        CSharp, Python, Sql, Vbs, Cpp, JavaScript, Go
+        CSharp, Python, Sql, Vbs, Cpp, JavaScript, Go, Html
     };
 }

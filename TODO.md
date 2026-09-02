@@ -17,7 +17,7 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - [x] Determine exact nested-semantic-chunk behavior (which nodes are chunks, how children are excluded from parents)
 - [x] Add synthetic tests (one child, several children, three levels, siblings, non-chunk nested node)
 - [x] Research JavaScript (synthetic + real repo)
-- [ ] Research HTML
+- [x] Research HTML (synthetic + real repo)
 - [ ] Research CSS
 - [x] Research XML / XSLT (parser built + verified; chunk rule decided; implementation pending with XML stage)
 - [ ] Research SQL / T-SQL (SQL-ProcBench)
@@ -67,7 +67,10 @@ experiment results, links/commits of investigated repositories, tests added, cod
 - **JavaScript**: `variable_declaration > variable_declarator > function_expression`;
   nested `function_declaration` inside `statement_block`; `async function` = `function_declaration`;
   `class_declaration > method_definition`; `arrow_function`; IIFE = `call_expression > parenthesized_expression > function_expression`.
-- **HTML** (tree-sitter-html): `document > element (every tag) > start_tag/tag_name/attribute` + `text` nodes.
+- **HTML** (tree-sitter-html): `document > element > start_tag(tag_name, attribute*) + children + text`;
+  `<script>`/`<style>` are NOT `element` — separate `script_element`/`style_element` nodes whose content
+  is a `raw_text` child; void/self-closing tags (`<img/>`, `<meta/>`, `<br/>`) have `self_closing_tag`
+  (not `start_tag`) as first child with the same `tag_name`/`attribute` children inside.
 - **CSS** (tree-sitter-css): `stylesheet > rule_set (selectors + block)`, `media_statement`,
   `keyframes_statement > keyframe_block (from/to)`.
 
@@ -92,9 +95,14 @@ experiment results, links/commits of investigated repositories, tests added, cod
 3. `function_expression` becomes a JS chunk; symbol name from enclosing `variable_declarator` identifier.
 4. Root containers (`program`, `document`, `stylesheet`, `namespace_definition`) are NOT chunks
    (consistent with C#/JS/SQL behavior). Zero chunks → existing sliding-window fallback.
-5. HTML chunk set (tentative, finalize in HTML stage): sectioning elements
+5. HTML chunk set (FINAL): an `element` is a chunk iff its tag is sectioning/landmark
    (`article, aside, section, nav, main, header, footer, form, fieldset, details, dialog, template, figure, table`)
-   + `script`/`style` with content. `document/html/head/body` = structural wrappers, not chunks.
+   OR it has a non-empty `id` attribute (explicit semantic anchor — covers id-heavy div-based markup),
+   plus `script_element`/`style_element` with non-blank inline `raw_text` content (external `<script src>` is not).
+   `document/html/head/body` = structural wrappers, never chunks (even with id).
+   Symbol kind = new `SymbolKind.Section`; name = `tag` or `tag#id`.
+   Rationale for the id rule: corpus files mix sectioning tags with heavy div usage (e.g. 43–55 `<div>`s,
+   0–2 sectioning tags); id anchors are how real markup marks semantic blocks.
 6. CSS chunk set (tentative): `rule_set`, `media_statement`, `keyframes_statement`;
    `media_statement`/`keyframes_statement` exclude nested chunk ranges.
 7. XML: ship self-built `libtree-sitter-xml.so`; XML chunk set to be finalized after AST inspection
@@ -122,7 +130,14 @@ experiment results, links/commits of investigated repositories, tests added, cod
   several children (class excludes all methods, keeps non-chunk members), three levels
   (each level excludes only its own children), siblings, non-chunk nested node (if/for NOT cut),
   `function_expression` named from enclosing declarator, multi-byte UTF-8 (Cyrillic intact),
-  cross-language sanity (Python class excludes methods).
+   cross-language sanity (Python class excludes methods).
+- `tests/CodeRag.Tests/Unit/TreeSitterHtmlChunkTests.cs` — 7 tests, all passing:
+  sectioning elements are chunks while `html`/`head`/`body`/`div`/`title` are not (+ symbol Language == "html"),
+  nested sections (parent excludes child range, child keeps full content),
+  any element with id is a chunk (`div#hero`, `span#badge`) / without id is not,
+  inline `script`/`style` are chunks + excluded from parent `div#wrap`, external `<script src>` is not,
+  `html`/`head`/`body` with id never chunks (sliding-window fallback kicks in),
+  no-semantic-elements file falls back to sliding window, multi-byte UTF-8 (Cyrillic + CJK intact through exclusion).
 
 ## Code changes
 - `src/CodeRag.Analyzers.TreeSitter/TreeSitterAnalyzer.cs`:
@@ -134,7 +149,18 @@ experiment results, links/commits of investigated repositories, tests added, cod
     of child chunks → fall back to full `node.Text`.
   - New `function_expression` handler: Kind=Function, name from enclosing `variable_declarator`
     identifier, fallback "anonymous".
-  - Symbols/relations/fallback behavior unchanged. Full test suite: 208 passed / 1 skipped / 0 failed.
+  - Symbols/relations/fallback behavior unchanged.
+- JavaScript stage (committed `0c2bca7`): full test suite 208 passed / 1 skipped / 0 failed.
+- HTML stage (this commit):
+  - `SupportedLanguages.Html = "html"` added (+ `All` set); `SymbolKind.Section = "Section"` added.
+  - `LanguageDetector`: `.html`/`.htm` → `html`.
+  - `TreeSitterAnalyzer`: extension map `.html`/`.htm` → `"HTML"`, context map `"html"`,
+    `TreeSitterToSupported["html"] = Html`; chunk condition extended to `SymbolKind.Section`.
+  - New handlers: `HandleHtmlElement` (sectioning tags or any element with non-empty `id`;
+    `html`/`head`/`body` excluded; reads `start_tag` OR `self_closing_tag` for void elements),
+    `HandleRawTextElement` for `script_element`/`style_element` (chunk iff non-blank `raw_text`),
+    shared `GetIdFromStartTag` helper (handles quoted and unquoted values).
+  - Full test suite: 215 passed / 1 skipped / 0 failed.
 
 ## JavaScript — real repo validation
 - Corpus: `zxuqian/html-css-examples` commit `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6`
@@ -149,6 +175,22 @@ experiment results, links/commits of investigated repositories, tests added, cod
   full source).
 - Minified single-line files produce huge nesting counts (thousands of nested pairs) but remain
   correct; they are realistic only as vendor code.
+
+## HTML — real repo validation
+- Corpus: same `/tmp/htmlcss` (commit `2a9fc59f44aeda092cbac07472aaf0f1ead4e1a6`); 66 `.html` files
+  (hand-written examples, some div-centric, one full Chinese-language website).
+- Ran `TreeSitterAnalyzer` over all 66 files (harness `/tmp/opencode/tsre`, mode `repojs <dir> .html html`):
+  174 symbols, 174 chunks, 28/66 files contain nested chunks, 1 parse error.
+- Strict verification: **leafExact=142 leafMismatch=0** (every chunk without nested children equals the
+  exact source substring), **parentLeaks=0** (62 readable files).
+- 1 parse error: `23-fullwebsite-design-agency/index.html` — `hasError at 0:0`, grammar strictness on a
+  real-world page; tree-sitter error recovery still extracted all 13 sections correctly (recorded as
+  `AnalyzerError`, result still valid).
+- 4/66 files (05-button-hover, 06-libra-ui, 31-webcomponent, 52-day-night-toggle) have no semantic
+  elements at all (no sectioning tags, no ids, no inline scripts) → zero symbols → sliding-window
+  fallback by design (decision #4).
+- id-anchor rule confirmed on real markup: id-heavy div pages produce clean chunks
+  (`div#home`, `section#about-us`, `img#image`, `img#mask`, ...).
 
 ## XML / XSLT — verified results
 - Built `libtree-sitter-xml.so` from `tree-sitter-grammars/tree-sitter-xml` commit
@@ -178,12 +220,14 @@ experiment results, links/commits of investigated repositories, tests added, cod
   copied to output via csproj (mirrors TreeSitter.DotNet package layout). Decide at XML implementation step.
 
 ## Current task
-JS stage complete (implementation + tests + real-repo validation). Next: commit, then HTML stage.
+JS stage committed (`0c2bca7`). HTML stage implemented + validated; commit this state.
 
 ## Next step
-1. `git add` TODO.md + TreeSitterAnalyzer.cs + TreeSitterNestedChunkTests.cs; commit `tree-sitter: validate JavaScript chunking`.
-2. HTML stage: add `.html`/`.htm` mapping (TreeSitter language `html`, SupportedLanguages TBD — likely new
-   "html" or route via existing map), HTML chunk handlers per decision #5 (sectioning elements + script/style with
-   content; `document/html/head/body` not chunks), reuse the two-pass exclusion (sectioning elements nest).
-   Check what `SupportedLanguages` values exist (CodeRag.Analyzers.Abstractions) before adding.
-3. Synthetic HTML tests + run over /tmp/htmlcss 66 HTML files; update TODO.md; commit.
+1. Commit HTML stage: `git add` TODO.md + TreeSitterAnalyzer.cs + SupportedLanguages.cs + Symbol.cs +
+   LanguageDetector.cs + TreeSitterHtmlChunkTests.cs; commit `tree-sitter: validate HTML chunking`.
+2. CSS stage: add `.css` → `SupportedLanguages.Css = "css"` (new constant), extension/context maps
+   (`"CSS"` — bundled in TreeSitter.DotNet 1.3.0), CSS chunk handlers per decision #6
+   (`rule_set`, `media_statement`, `keyframes_statement` as chunks; nested `rule_set` inside
+   `media_statement` excluded from parent; `stylesheet` root not a chunk; at-rules like `@font-face` TBD —
+   inspect AST first with harness mode `css`), `SymbolKind` for CSS rules TBD (likely reuse a generic kind).
+   Synthetic tests + run over /tmp/htmlcss .css files; update TODO.md; commit.

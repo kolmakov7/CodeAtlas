@@ -6,7 +6,7 @@ using TreeSitter;
 namespace CodeRag.Analyzers.TreeSitter;
 
 /// <summary>
-/// Polyglot Tree-sitter анализатор для Python / JavaScript / Go / C++ / TypeScript (§15).
+/// Polyglot Tree-sitter анализатор для Python / JavaScript / Go / C++ / TypeScript / HTML (§15).
 /// Использует TreeSitter.DotNet Language("Python"/"JavaScript"/"Go"/"C++"/"TypeScript"),
 /// Parser.Parse, Query.Execute captures, символы function/class/method/call/import, FQN via stack, depth medium.
 /// </summary>
@@ -20,6 +20,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         [".tsx"] = "TSX",
         [".go"] = "Go",
         [".cpp"] = "C++", [".cc"] = "C++", [".cxx"] = "C++", [".c"] = "C++", [".h"] = "C++", [".hpp"] = "C++", [".hh"] = "C++", [".hxx"] = "C++",
+        [".html"] = "HTML", [".htm"] = "HTML",
     };
 
     private static readonly Dictionary<string, string> ContextToTreeSitter = new(StringComparer.OrdinalIgnoreCase)
@@ -29,6 +30,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["go"] = "Go",
         ["cpp"] = "C++",
         ["c++"] = "C++",
+        ["html"] = "HTML",
     };
 
     private static readonly Dictionary<string, string> TreeSitterToSupported = new(StringComparer.OrdinalIgnoreCase)
@@ -40,6 +42,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["go"] = SupportedLanguages.Go,
         ["c++"] = SupportedLanguages.Cpp,
         ["cpp"] = SupportedLanguages.Cpp,
+        ["html"] = SupportedLanguages.Html,
     };
 
     private static readonly Dictionary<string, string[]> LanguageLoadFallbacks = new(StringComparer.Ordinal)
@@ -68,6 +71,9 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["import_from_statement"] = HandleImport,
         ["import_declaration"] = HandleImport,
         ["namespace_definition"] = HandleNamespace,
+        ["element"] = HandleHtmlElement,
+        ["script_element"] = HandleRawTextElement,
+        ["style_element"] = HandleRawTextElement,
     };
 
     private readonly IChunkFactory _factory;
@@ -337,9 +343,9 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
                 relations.Add(new Relation(parentId.Value, symbol.Id, RelationType.Contains));
             }
 
-            // Чанк на function/class/method: источник собирается после обхода всего дерева,
+            // Чанк на function/class/method/section: источник собирается после обхода всего дерева,
             // чтобы исключить из него диапазоны вложенных семантических чанков
-            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method)
+            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section)
                 candidates.Add(new ChunkCandidate(node, symbol, startLine, endLine));
 
             created = symbol;
@@ -577,6 +583,64 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         // var foo = function() {} — имя из окружающего декларатора; иначе анонимная функция
         var parentVar = node.Parent?.Type == "variable_declarator" ? ExtractName(node.Parent!, c.TreeLang) : null;
         c.Name = parentVar ?? "anonymous";
+    }
+
+    /// <summary>
+    /// HTML semantic sections: sectioning/landmark elements, any element with an explicit id
+    /// (developer semantic anchor), and script/style with inline content.
+    /// document/html/head/body and plain structural elements are not chunks.
+    /// </summary>
+    private static readonly HashSet<string> HtmlSectioningTags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "article", "aside", "section", "nav", "main", "header", "footer",
+        "form", "fieldset", "details", "dialog", "template", "figure", "table"
+    };
+
+    private static void HandleHtmlElement(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang != "HTML") return;
+        // Обычные элементы дают start_tag, void/self-closing (img/br/meta/...) — self_closing_tag
+        var startTag = node.Children.FirstOrDefault(ch => ch.Type is "start_tag" or "self_closing_tag");
+        if (startTag == null) return;
+        var tagName = startTag.Children.FirstOrDefault(ch => ch.Type == "tag_name")?.Text;
+        if (string.IsNullOrWhiteSpace(tagName) || tagName is "html" or "head" or "body") return;
+
+        var id = GetIdFromStartTag(startTag);
+        if (!HtmlSectioningTags.Contains(tagName) && id == null) return;
+
+        c.Kind = SymbolKind.Section;
+        c.Name = id != null ? $"{tagName}#{id}" : tagName;
+    }
+
+    /// <summary>
+    /// script_element / style_element (tree-sitter-html отделяет их от обычных element):
+    /// чанк только если есть inline-контент (raw_text), внешние скрипты/стили — нет.
+    /// </summary>
+    private static void HandleRawTextElement(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang != "HTML") return;
+        var startTag = node.Children.FirstOrDefault(ch => ch.Type is "start_tag" or "self_closing_tag");
+        if (startTag == null) return;
+        var raw = node.Children.FirstOrDefault(ch => ch.Type == "raw_text");
+        if (raw == null || string.IsNullOrWhiteSpace(raw.Text)) return;
+
+        var tagName = startTag.Children.FirstOrDefault(ch => ch.Type == "tag_name")?.Text ?? node.Type;
+        var id = GetIdFromStartTag(startTag);
+        c.Kind = SymbolKind.Section;
+        c.Name = id != null ? $"{tagName}#{id}" : tagName;
+    }
+
+    private static string? GetIdFromStartTag(Node startTag)
+    {
+        foreach (var attr in startTag.Children.Where(ch => ch.Type == "attribute"))
+        {
+            if (attr.Children.FirstOrDefault(ch => ch.Type == "attribute_name")?.Text != "id") continue;
+            var value = attr.Children.FirstOrDefault(ch => ch.Type == "attribute_value")
+                ?? attr.Children.SelectMany(ch => ch.Children).FirstOrDefault(ch => ch.Type == "attribute_value");
+            if (!string.IsNullOrWhiteSpace(value?.Text))
+                return value.Text;
+        }
+        return null;
     }
 
     private static void HandleCall(Node node, NodeHandlerContext c) => c.CallNodes.Add(node);
