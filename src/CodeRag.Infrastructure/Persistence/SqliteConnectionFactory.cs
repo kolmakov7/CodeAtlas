@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using System.Data;
 using CodeRag.Domain.Ports;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
@@ -9,12 +9,15 @@ namespace CodeRag.Infrastructure.Persistence;
 /// Фабрика SQLite соединений с PRAGMA journal_mode=WAL, synchronous=NORMAL,
 /// foreign_keys=ON, busy_timeout=60000 и опциональной загрузкой vec0 extension.
 /// Не падает если vec0.so отсутствует.
+/// Layout: main = &lt;db&gt;, chunks = &lt;name&gt;-chunks.db, vec = &lt;name&gt;-vec.db (same directory).
 /// </summary>
 public sealed class SqliteConnectionFactory : IDbConnectionFactory
 {
     private readonly string _connectionString;
+    private readonly string _chunksConnectionString;
     private readonly string _vecConnectionString;
     private readonly string _dbPath;
+    private readonly string _chunksDbPath;
     private readonly string _vecDbPath;
     private readonly ILogger<SqliteConnectionFactory> _logger;
     private readonly string? _explicitVecPath;
@@ -28,33 +31,56 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
         if (string.IsNullOrWhiteSpace(dbPath)) throw new ArgumentException("dbPath must not be empty.", nameof(dbPath));
         _dbPath = Path.GetFullPath(dbPath);
         _connectionString = $"Data Source={_dbPath}";
-        _vecDbPath = ResolveVecDbPath(_dbPath);
+        _chunksDbPath = ResolveSiblingDbPath(_dbPath, "-chunks");
+        _chunksConnectionString = $"Data Source={_chunksDbPath}";
+        _vecDbPath = ResolveSiblingDbPath(_dbPath, "-vec");
         _vecConnectionString = $"Data Source={_vecDbPath}";
         _logger = logger;
         _explicitVecPath = string.IsNullOrWhiteSpace(vecExtensionPath) ? null : vecExtensionPath;
     }
 
+    public string Provider => "sqlite";
+    public string DataDir => Path.GetDirectoryName(_dbPath) ?? "";
     public string DbPath => _dbPath;
-    public string ConnectionString => _connectionString;
-    public bool IsVecAvailable => _vecAvailable;
+    public string ChunksDbPath => _chunksDbPath;
 
     /// <summary>Separate vector database: vec0 tables live in &lt;db&gt;-vec.db next to the main DB.</summary>
     public string VecDbPath => _vecDbPath;
 
-    private static string ResolveVecDbPath(string dbPath)
+    public string ConnectionString => _connectionString;
+    public bool IsVecAvailable => _vecAvailable;
+
+    private static string ResolveSiblingDbPath(string dbPath, string suffix)
     {
         var dir = Path.GetDirectoryName(dbPath) ?? "";
         var name = Path.GetFileNameWithoutExtension(dbPath);
         if (string.IsNullOrEmpty(name)) name = Path.GetFileName(dbPath);
-        return Path.Combine(dir, name + "-vec.db");
+        return Path.Combine(dir, name + suffix + ".db");
+    }
+
+    public async Task ProvisionAsync(CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(DataDir);
     }
 
     /// <summary>
     /// Создает открытое соединение с настроенными PRAGMA и попыткой загрузки vec0.
     /// </summary>
-    public async Task<SqliteConnection> CreateAsync(CancellationToken ct = default)
+    public async Task<IDbConnection> CreateAsync(CancellationToken ct = default)
     {
         var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct).ConfigureAwait(false);
+
+        await ConfigureConnectionAsync(conn, ct).ConfigureAwait(false);
+
+        return conn;
+    }
+
+    /// <summary>Opens a connection to the separate chunks database (chunks + chunks_fts).</summary>
+    public async Task<IDbConnection> CreateChunksAsync(CancellationToken ct = default)
+    {
+        Directory.CreateDirectory(DataDir);
+        var conn = new SqliteConnection(_chunksConnectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
         await ConfigureConnectionAsync(conn, ct).ConfigureAwait(false);
@@ -65,9 +91,9 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
     /// <summary>
     /// Opens a connection to the separate vector database (vec0 tables) with the same PRAGMAs.
     /// </summary>
-    public async Task<SqliteConnection> CreateVecAsync(CancellationToken ct = default)
+    public async Task<IDbConnection> CreateVecAsync(CancellationToken ct = default)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(_vecDbPath)!);
+        Directory.CreateDirectory(DataDir);
         var conn = new SqliteConnection(_vecConnectionString);
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
@@ -77,7 +103,7 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
     }
 
     /// <summary>Синхронная версия.</summary>
-    public SqliteConnection Create()
+    public IDbConnection Create()
     {
         var conn = new SqliteConnection(_connectionString);
         conn.Open();

@@ -1,5 +1,6 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Ports;
+using CodeRag.Infrastructure.Persistence;
 using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
@@ -43,7 +44,7 @@ ON CONFLICT(id) DO UPDATE SET
         {
             await conn.ExecuteAsync(sql2, p).ConfigureAwait(false);
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19) // constraint
+        catch (Exception ex) when (SqlDialect.IsUniqueViolation(_factory, ex))
         {
             await conn.ExecuteAsync(sql, p).ConfigureAwait(false);
         }

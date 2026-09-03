@@ -3,6 +3,7 @@ using System.Text.Json;
 using CodeRag.Domain.Ports;
 using Dapper;
 using Microsoft.Extensions.Logging;
+using IDbConnectionFactory = CodeRag.Domain.Ports.IDbConnectionFactory;
 
 namespace CodeRag.Infrastructure.Persistence.Repositories;
 
@@ -32,13 +33,14 @@ public sealed class DapperStatisticsRefresher : IStatisticsRefresher
         var name = await conn.ExecuteScalarAsync<string?>("SELECT name FROM repositories WHERE id=@id;", new { id = rid }).ConfigureAwait(false);
         if (name is null) return; // repository already deleted
 
+        using var chunksConn = await _factory.CreateChunksAsync(ct).ConfigureAwait(false);
         var fileCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM files WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
         var symbolCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM symbols WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
-        var chunkCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
+        var chunkCount = await chunksConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
         long vectorCount = 0;
         try
         {
-            vectorCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id=@rid);", new { rid }).ConfigureAwait(false);
+            vectorCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -47,7 +49,7 @@ public sealed class DapperStatisticsRefresher : IStatisticsRefresher
 
         var embedding = new Dictionary<string, (long Indexed, long Pending)>();
         foreach (var domain in DomainTokens)
-            embedding[domain] = await GetDomainStatsAsync(conn, rid, domain, ct).ConfigureAwait(false);
+            embedding[domain] = await GetDomainStatsAsync(conn, chunksConn, rid, domain, ct).ConfigureAwait(false);
 
         var failed = await GetFailedJobsAsync(conn, rid, ct).ConfigureAwait(false);
         var (relationCount, relationsByType) = await GetRelationStatsAsync(conn, rid, ct).ConfigureAwait(false);
@@ -188,24 +190,21 @@ public sealed class DapperStatisticsRefresher : IStatisticsRefresher
         await RefreshGlobalAsync(ct).ConfigureAwait(false);
     }
 
-    private async Task<(long Indexed, long Pending)> GetDomainStatsAsync(IDbConnection conn, string? rid, string domain, CancellationToken ct)
+    /// <summary>Per-domain totals from the chunks DB; indexed counts via vector_entries.repository_id (no cross-DB join).</summary>
+    private async Task<(long Indexed, long Pending)> GetDomainStatsAsync(IDbConnection mainConn, IDbConnection chunksConn, string? rid, string domain, CancellationToken ct)
     {
         try
         {
             long total, indexed;
             if (rid is null)
             {
-                total = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE embedding_domain=@domain;", new { domain }).ConfigureAwait(false);
-                indexed = await conn.ExecuteScalarAsync<long>(
-                    "SELECT COUNT(DISTINCT ve.chunk_id) FROM vector_entries ve INNER JOIN chunks c ON c.id = ve.chunk_id WHERE c.embedding_domain=@domain AND ve.domain=@domain;",
-                    new { domain }).ConfigureAwait(false);
+                total = await chunksConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE embedding_domain=@domain;", new { domain }).ConfigureAwait(false);
+                indexed = await mainConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE domain=@domain;", new { domain }).ConfigureAwait(false);
             }
             else
             {
-                total = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid AND embedding_domain=@domain;", new { rid, domain }).ConfigureAwait(false);
-                indexed = await conn.ExecuteScalarAsync<long>(
-                    "SELECT COUNT(DISTINCT ve.chunk_id) FROM vector_entries ve INNER JOIN chunks c ON c.id = ve.chunk_id WHERE c.repository_id=@rid AND c.embedding_domain=@domain AND ve.domain=@domain;",
-                    new { rid, domain }).ConfigureAwait(false);
+                total = await chunksConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid AND embedding_domain=@domain;", new { rid, domain }).ConfigureAwait(false);
+                indexed = await mainConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE repository_id=@rid AND domain=@domain;", new { rid, domain }).ConfigureAwait(false);
             }
             return (indexed, Math.Max(0, total - indexed));
         }

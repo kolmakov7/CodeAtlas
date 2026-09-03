@@ -1,12 +1,11 @@
 using System.Data;
-using System.Text;
 using System.Text.Json;
 using Dapper;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Ports;
 using CodeRag.Infrastructure.Persistence;
+using IDbConnectionFactory = CodeRag.Domain.Ports.IDbConnectionFactory;
 
 namespace CodeRag.Infrastructure.Vectors;
 
@@ -20,7 +19,7 @@ namespace CodeRag.Infrastructure.Vectors;
 /// </summary>
 public sealed class SqliteVecVectorStore : IVectorStore
 {
-    private readonly SqliteConnectionFactory _factory;
+    private readonly IDbConnectionFactory _factory;
     private readonly IVectorDimSource _dimSource;
     private readonly EmbeddingDomain _domain;
     private readonly ILogger<SqliteVecVectorStore> _logger;
@@ -38,7 +37,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
     private string DomainToken => _domain.ToText();
 
     public SqliteVecVectorStore(
-        SqliteConnectionFactory factory,
+        IDbConnectionFactory factory,
         IVectorDimSource dimSource,
         EmbeddingDomain domain,
         ILogger<SqliteVecVectorStore> logger,
@@ -124,9 +123,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
     embedding FLOAT[{dim}] distance_metric=cosine,
     repository_id TEXT
 );";
-                    using var cmd = conn.CreateCommand();
-                    cmd.CommandText = ddl;
-                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    await conn.ExecuteAsync(ddl).ConfigureAwait(false);
                     _logger.LogInformation("Created {Table} virtual table with dim={Dim}", Table, dim);
                 }
                 catch (Exception ex)
@@ -134,13 +131,11 @@ public sealed class SqliteVecVectorStore : IVectorStore
                     _logger.LogWarning(ex, "Failed to create {Table} PK variant, trying fallback DDL", Table);
                     try
                     {
-                        using var cmd2 = conn.CreateCommand();
-                        cmd2.CommandText = $@"CREATE VIRTUAL TABLE {Table} USING vec0(
+                        await conn.ExecuteAsync($@"CREATE VIRTUAL TABLE {Table} USING vec0(
     embedding FLOAT[{dim}],
     chunk_id TEXT,
     repository_id TEXT
-);";
-                        await cmd2.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+);").ConfigureAwait(false);
                         _logger.LogInformation("Created {Table} virtual table (fallback variant) with dim={Dim}", Table, dim);
                     }
                     catch (Exception ex2)
@@ -159,7 +154,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
         }
     }
 
-    private static async Task<int?> GetVecTableDimAsync(SqliteConnection conn, string table, CancellationToken ct)
+    private static async Task<int?> GetVecTableDimAsync(IDbConnection conn, string table, CancellationToken ct)
     {
         try
         {
@@ -349,8 +344,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
             {
                 _logger.LogDebug(ex, "{Table} delete-by-repository skipped (table not present)", Table);
             }
+            // repository_id is denormalized on vector_entries — no cross-DB join needed.
             await metaConn.ExecuteAsync(
-                @"DELETE FROM vector_entries WHERE domain=@domain AND chunk_id IN (SELECT id FROM chunks WHERE repository_id = @rid);",
+                @"DELETE FROM vector_entries WHERE domain=@domain AND repository_id = @rid;",
                 new { domain = DomainToken, rid }, transaction: metaTx).ConfigureAwait(false);
             tx.Commit();
             metaTx.Commit();
@@ -480,9 +476,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
                 }
                 catch
                 {
-                    // chunks live in the main DB — query there.
-                    using var mainConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-                    var chunkRepoMap = await LoadChunkRepoMapAsync(mainConn, rows.Select(r => r.ChunkId).ToList(), ct);
+                    // chunks live in the chunks DB — query there.
+                    using var chunksConn = await _factory.CreateChunksAsync(ct).ConfigureAwait(false);
+                    var chunkRepoMap = await LoadChunkRepoMapAsync(chunksConn, rows.Select(r => r.ChunkId).ToList(), ct);
                     var filtered2 = rows.Where(r => chunkRepoMap.TryGetValue(r.ChunkId, out var repo) && repoSet.Contains(repo.ToString()))
                         .Take(k)
                         .Select(r => new ScoredChunk(r.ChunkId, CosineSimilarity(r.Distance), r.Distance))
@@ -526,7 +522,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
     /// </summary>
     private static double CosineSimilarity(double distance) => Math.Clamp(1.0 - distance, 0.0, 1.0);
 
-    private async Task<IReadOnlyList<VecRow>?> TryQueryAsync(SqliteConnection conn, string sql, object param, CancellationToken ct)
+    private async Task<IReadOnlyList<VecRow>?> TryQueryAsync(IDbConnection conn, string sql, object param, CancellationToken ct)
     {
         try
         {
@@ -540,13 +536,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
         }
     }
 
-    private async Task<Dictionary<string, string>> LoadVectorEntriesAsync(SqliteConnection conn, string[] chunkIds, CancellationToken ct)
-    {
-        // vector_entries doesn't have repository_id; return empty
-        return new Dictionary<string, string>();
-    }
-
-    private async Task<Dictionary<Guid, Guid>> LoadChunkRepoMapAsync(SqliteConnection conn, List<Guid> chunkIds, CancellationToken ct)
+    private async Task<Dictionary<Guid, Guid>> LoadChunkRepoMapAsync(IDbConnection conn, List<Guid> chunkIds, CancellationToken ct)
     {
         if (chunkIds.Count == 0) return new();
         var ids = chunkIds.Select(g => g.ToString()).ToArray();
@@ -569,10 +559,20 @@ public sealed class SqliteVecVectorStore : IVectorStore
         {
             var now = DateTimeOffset.UtcNow.ToString("o");
             await conn.ExecuteAsync(
-                @"INSERT INTO vector_entries(chunk_id, vector_id, model, dim, context_length, domain, updated_at)
-                  VALUES (@chunkId, @vectorId, @model, @dim, @ctx, @domain, @now)
-                  ON CONFLICT(chunk_id) DO UPDATE SET vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, updated_at=excluded.updated_at;",
-                new { chunkId = e.ChunkId.ToString(), vectorId = e.ChunkId.ToString(), model = e.Model, dim = e.Dim, ctx = (object?)e.ContextLength ?? DBNull.Value, domain = DomainToken, now });
+                @"INSERT INTO vector_entries(chunk_id, repository_id, vector_id, model, dim, context_length, domain, updated_at)
+                  VALUES (@chunkId, @repoId, @vectorId, @model, @dim, @ctx, @domain, @now)
+                  ON CONFLICT(chunk_id) DO UPDATE SET repository_id=excluded.repository_id, vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, updated_at=excluded.updated_at;",
+                new
+                {
+                    chunkId = e.ChunkId.ToString(),
+                    repoId = e.RepositoryId.ToString(),
+                    vectorId = e.ChunkId.ToString(),
+                    model = e.Model,
+                    dim = e.Dim,
+                    ctx = (object?)e.ContextLength ?? DBNull.Value,
+                    domain = DomainToken,
+                    now
+                });
         }
     }
 

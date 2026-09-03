@@ -66,20 +66,21 @@ public sealed class StatisticsAndMcpUsageTests : IDisposable
         var chunkA = Guid.NewGuid();
         var chunkB = Guid.NewGuid();
         var chunkText = Guid.NewGuid();
-        await conn.ExecuteAsync(
+        using var chunksConn = await _factory.CreateChunksAsync();
+        await chunksConn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,content_hash,source,embedding_domain) VALUES(@i,@r,@f,@h,@s,@d)",
             new { i = chunkA.ToString(), r = repo.ToString(), f = fileId, h = "h1", s = "code", d = "code" });
-        await conn.ExecuteAsync(
+        await chunksConn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,content_hash,source,embedding_domain) VALUES(@i,@r,@f,@h,@s,@d)",
             new { i = chunkB.ToString(), r = repo.ToString(), f = fileId, h = "h2", s = "code", d = "code" });
-        await conn.ExecuteAsync(
+        await chunksConn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,content_hash,source,embedding_domain) VALUES(@i,@r,@f,@h,@s,@d)",
             new { i = chunkText.ToString(), r = repo.ToString(), f = fileId, h = "h3", s = "text", d = "text" });
 
         // One vector for chunkA (code domain), none for the others.
         await conn.ExecuteAsync(
-            "INSERT INTO vector_entries(chunk_id,vector_id,model,dim,domain) VALUES(@c,@v,@m,@d,@dom)",
-            new { c = chunkA.ToString(), v = Guid.NewGuid().ToString("N"), m = "test-embedding", d = 8, dom = "code" });
+            "INSERT INTO vector_entries(chunk_id,repository_id,vector_id,model,dim,domain) VALUES(@c,@r,@v,@m,@d,@dom)",
+            new { c = chunkA.ToString(), r = repo.ToString(), v = Guid.NewGuid().ToString("N"), m = "test-embedding", d = 8, dom = "code" });
 
         await conn.ExecuteAsync(
             "INSERT INTO relations(from_symbol_id,to_symbol_id,relation_type,repository_id) VALUES(@f,@t,@ty,@r)",

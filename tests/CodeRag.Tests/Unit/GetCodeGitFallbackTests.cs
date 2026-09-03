@@ -131,7 +131,7 @@ public sealed class GetCodeGitFallbackTests : IDisposable
         File.Delete(Path.Combine(_repoDir, "src", "Big.cs"));
         Directory.Delete(Path.Combine(_repoDir, ".git"), recursive: true); // git show must fail
 
-        using var conn = await _factory.CreateAsync();
+        using var conn = await _factory.CreateChunksAsync();
         await conn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,language,start_line,end_line,content_hash,source,embedding_domain) VALUES(@i,@r,@f,@l,@s,@e,@h,@src,@d)",
             new { i = Guid.NewGuid().ToString(), r = _repo.ToString(), f = _file.ToString(), l = "csharp", s = 1, e = 2, h = "x", src = "chunk source A\nchunk source B", d = "code" });
@@ -148,7 +148,7 @@ public sealed class GetCodeGitFallbackTests : IDisposable
         var service = await InitializeAsync(git: null);
         File.Delete(Path.Combine(_repoDir, "src", "Big.cs"));
 
-        using var conn = await _factory.CreateAsync();
+        using var conn = await _factory.CreateChunksAsync();
         await conn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,language,start_line,end_line,content_hash,source,embedding_domain) VALUES(@i,@r,@f,@l,@s,@e,@h,@src,@d)",
             new { i = Guid.NewGuid().ToString(), r = _repo.ToString(), f = _file.ToString(), l = "csharp", s = 1, e = 2, h = "x", src = "stitched line 1\nstitched line 2", d = "code" });

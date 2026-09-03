@@ -2,8 +2,11 @@ using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Models;
 using CodeRag.Domain.Ports;
+using CodeRag.Infrastructure.Persistence;
 using Dapper;
+using System.Data;
 using System.Text;
+using IDbConnectionFactory = CodeRag.Domain.Ports.IDbConnectionFactory;
 
 namespace CodeRag.Infrastructure.Stores;
 
@@ -36,16 +39,17 @@ public sealed class SymbolStore : CodeRag.Domain.Ports.ISymbolStore
         }
     }
 
-    private static async Task ExecuteUpsertAsync(Microsoft.Data.Sqlite.SqliteConnection conn, Microsoft.Data.Sqlite.SqliteTransaction? tx, Symbol s)
+    private async Task ExecuteUpsertAsync(IDbConnection conn, IDbTransaction? tx, Symbol s)
     {
-        const string sql = @"
-INSERT INTO symbols(id, repository_id, project_id, file_id, language, kind, name, fqn, namespace, parent_symbol_id, start_line, end_line, start_col, end_col, signature)
-VALUES (@id,@repo,@proj,@file,@lang,@kind,@name,@fqn,@ns,@parent,@sl,@el,@sc,@ec,@sig)
-ON CONFLICT(id) DO UPDATE SET
-  repository_id=excluded.repository_id, project_id=excluded.project_id, file_id=excluded.file_id,
-  language=excluded.language, kind=excluded.kind, name=excluded.name, fqn=excluded.fqn, namespace=excluded.namespace,
-  parent_symbol_id=excluded.parent_symbol_id, start_line=excluded.start_line, end_line=excluded.end_line,
-  start_col=excluded.start_col, end_col=excluded.end_col, signature=excluded.signature;";
+        var ns = SqlDialect.QuoteIdent(_factory, "namespace");
+        var sql = $@"
+ INSERT INTO symbols(id, repository_id, project_id, file_id, language, kind, name, fqn, {ns}, parent_symbol_id, start_line, end_line, start_col, end_col, signature)
+ VALUES (@id,@repo,@proj,@file,@lang,@kind,@name,@fqn,@ns,@parent,@sl,@el,@sc,@ec,@sig)
+ ON CONFLICT(id) DO UPDATE SET
+   repository_id=excluded.repository_id, project_id=excluded.project_id, file_id=excluded.file_id,
+   language=excluded.language, kind=excluded.kind, name=excluded.name, fqn=excluded.fqn, {ns}=excluded.{ns},
+   parent_symbol_id=excluded.parent_symbol_id, start_line=excluded.start_line, end_line=excluded.end_line,
+   start_col=excluded.start_col, end_col=excluded.end_col, signature=excluded.signature;";
 
         await conn.ExecuteAsync(sql, new
         {
@@ -140,7 +144,8 @@ ON CONFLICT(id) DO UPDATE SET
         CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        var sql = new StringBuilder("SELECT id FROM symbols WHERE (name LIKE @like COLLATE NOCASE OR fqn LIKE @like COLLATE NOCASE) ");
+        var where = $"({SqlDialect.NoCaseLike(_factory, "name", "@like")} OR {SqlDialect.NoCaseLike(_factory, "fqn", "@like")}) ";
+        var sql = new StringBuilder($"SELECT id FROM symbols WHERE {where}");
         var p = new DynamicParameters();
         p.Add("like", $"%{EscapeLike(term)}%");
         p.Add("limit", limit);
@@ -165,7 +170,7 @@ ON CONFLICT(id) DO UPDATE SET
         var placeholders = string.Join(",", ids.Select((_, i) => $"@id{i}"));
         var p = new DynamicParameters();
         for (int i = 0; i < ids.Length; i++) p.Add($"id{i}", ids[i]);
-        var sql = $"SELECT s.id, s.repository_id, s.file_id, s.language, s.kind, s.name, s.fqn, s.namespace, s.signature, s.start_line, s.end_line, f.path as file_path FROM symbols s JOIN files f ON f.id = s.file_id WHERE s.id IN ({placeholders});";
+        var sql = SymbolInfoSql(_factory) + $" WHERE s.id IN ({placeholders});";
         var rows = (await conn.QueryAsync<SymInfoRow>(sql, p).ConfigureAwait(false)).ToList();
         return rows.Select(ToInfo).ToList();
     }
@@ -181,7 +186,9 @@ ON CONFLICT(id) DO UPDATE SET
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         var q = term.Trim();
-        var sql = new StringBuilder("SELECT s.id, s.repository_id, s.file_id, s.language, s.kind, s.name, s.fqn, s.namespace, s.signature, s.start_line, s.end_line, f.path as file_path FROM symbols s JOIN files f ON f.id = s.file_id WHERE (s.name LIKE @like COLLATE NOCASE OR s.fqn LIKE @like COLLATE NOCASE OR s.namespace LIKE @like COLLATE NOCASE) ");
+        var ns = "s." + SqlDialect.QuoteIdent(_factory, "namespace");
+        var where = $"({SqlDialect.NoCaseLike(_factory, "s.name", "@like")} OR {SqlDialect.NoCaseLike(_factory, "s.fqn", "@like")} OR {SqlDialect.NoCaseLike(_factory, ns, "@like")}) ";
+        var sql = new StringBuilder(SymbolInfoSql(_factory) + $" WHERE {where}");
         var p = new DynamicParameters();
         p.Add("like", $"%{EscapeLike(q)}%");
         p.Add("limit", limit);
@@ -193,9 +200,17 @@ ON CONFLICT(id) DO UPDATE SET
         var kindOrder = new[] { SymbolKind.Class, SymbolKind.Interface, SymbolKind.Record, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Method };
         for (int i = 0; i < kindOrder.Length; i++) p.Add($"k{i}", kindOrder[i].ToString());
         var kindCase = string.Join(" ", kindOrder.Select((k, i) => $"WHEN @k{i} THEN {i}"));
-        sql.Append($" ORDER BY CASE WHEN s.name = @exact COLLATE NOCASE THEN 0 WHEN s.fqn = @exact COLLATE NOCASE THEN 1 ELSE 2 END, CASE s.kind {kindCase} ELSE 6 END, length(s.fqn), s.fqn LIMIT @limit OFFSET @offset;");
+        var exactName = SqlDialect.NoCaseEq(_factory, "s.name", "@exact");
+        var exactFqn = SqlDialect.NoCaseEq(_factory, "s.fqn", "@exact");
+        sql.Append($" ORDER BY CASE WHEN {exactName} THEN 0 WHEN {exactFqn} THEN 1 ELSE 2 END, CASE s.kind {kindCase} ELSE 6 END, length(s.fqn), s.fqn LIMIT @limit OFFSET @offset;");
         var rows = (await conn.QueryAsync<SymInfoRow>(sql.ToString(), p).ConfigureAwait(false)).ToList();
         return rows.Select(ToInfo).ToList();
+    }
+
+    private static string SymbolInfoSql(IDbConnectionFactory factory)
+    {
+        var ns = "s." + SqlDialect.QuoteIdent(factory, "namespace");
+        return $"SELECT s.id, s.repository_id, s.file_id, s.language, s.kind, s.name, s.fqn, {ns}, s.signature, s.start_line, s.end_line, f.path as file_path FROM symbols s JOIN files f ON f.id = s.file_id";
     }
 
     private static SymbolInfo ToInfo(SymInfoRow r) => new(Guid.Parse(r.id), Guid.Parse(r.repository_id), Guid.Parse(r.file_id), r.language, r.kind, r.name, r.fqn, r.@namespace, r.signature, r.start_line, r.end_line, r.file_path ?? string.Empty);

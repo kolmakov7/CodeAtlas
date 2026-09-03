@@ -1,20 +1,23 @@
+using System.Data;
 using System.Reflection;
+using CodeRag.Domain.Ports;
 using Dapper;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 
 namespace CodeRag.Infrastructure.Persistence;
 
 /// <summary>
-/// Применяет схему SQLite из embedded SQL миграций (DbUp-like).
-/// Таблица schema_migrations(version) отслеживает применённые версии.
+/// Применяет схему из embedded SQL миграций (DbUp-like) для каждой логической БД:
+/// Main (Migrations/{provider}/Main) и Chunks (Migrations/{provider}/Chunks).
+/// Таблица schema_migrations(version) в каждой БД отслеживает применённые версии.
+/// Provider = "Sqlite" | "Postgres" (выбран статически на старте).
 /// </summary>
 public sealed class DbInitializer
 {
-    private readonly SqliteConnectionFactory _factory;
+    private readonly IDbConnectionFactory _factory;
     private readonly ILogger<DbInitializer> _logger;
 
-    public DbInitializer(SqliteConnectionFactory factory, ILogger<DbInitializer> logger)
+    public DbInitializer(IDbConnectionFactory factory, ILogger<DbInitializer> logger)
     {
         _factory = factory;
         _logger = logger;
@@ -22,185 +25,152 @@ public sealed class DbInitializer
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(_factory.DbPath)!);
+        // Ensure backing storage exists (SQLite directories / PostgreSQL databases).
+        await _factory.ProvisionAsync(ct).ConfigureAwait(false);
 
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        var provider = SqlDialect.IsPostgres(_factory) ? "Postgres" : "Sqlite";
 
-        // Ensure schema_migrations exists (may already be in 001 but ensure early).
+        await MigrateAsync("Main", () => _factory.CreateAsync(ct), provider, ct).ConfigureAwait(false);
+        await MigrateAsync("Chunks", () => _factory.CreateChunksAsync(ct), provider, ct).ConfigureAwait(false);
+
+        WarnAboutLegacyLayout(provider, ct);
+    }
+
+    private async Task MigrateAsync(string kind, Func<Task<IDbConnection>> open, string provider, CancellationToken ct)
+    {
+        using var conn = await open().ConfigureAwait(false);
         await EnsureMigrationsTableAsync(conn, ct).ConfigureAwait(false);
 
-        var migrations = LoadEmbeddedMigrations();
+        var migrations = LoadEmbeddedMigrations(provider, kind);
+        if (migrations.Count == 0)
+        {
+            _logger.LogWarning("No embedded migrations found for {Provider}/{Kind} — skipping", provider, kind);
+            return;
+        }
 
-        foreach (var mig in migrations.OrderBy(m => m.Version))
+        foreach (var mig in migrations.OrderBy(m => m.Version, StringComparer.Ordinal))
         {
             var already = await IsAppliedAsync(conn, mig.Version, ct).ConfigureAwait(false);
             if (already)
             {
-                _logger.LogDebug("Migration {Version} already applied", mig.Version);
+                _logger.LogDebug("{Kind} migration {Version} already applied", kind, mig.Version);
                 continue;
             }
 
-            _logger.LogInformation("Applying migration {Version}", mig.Version);
+            _logger.LogInformation("Applying {Kind} migration {Version} ({Provider})", kind, mig.Version, provider);
             using var tx = conn.BeginTransaction();
             try
             {
-                // Split on ; but keep FTS/vector definitions intact.
-                // Use simple execution of whole script — SQLite handles multiple statements.
-                using var cmd = conn.CreateCommand();
-                cmd.Transaction = (SqliteTransaction)tx;
-                cmd.CommandText = mig.Sql;
-                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                // Whole-script execution: SQLite and Npgsql both support multiple statements
+                // in one command (no parameters in migration scripts).
+                await conn.ExecuteAsync(mig.Sql, transaction: tx).ConfigureAwait(false);
 
                 var now = DateTimeOffset.UtcNow.ToString("o");
                 await conn.ExecuteAsync(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (@v, @at);",
                     new { v = mig.Version, at = now },
-                    transaction: tx);
+                    transaction: tx).ConfigureAwait(false);
 
                 tx.Commit();
-                _logger.LogInformation("Migration {Version} applied", mig.Version);
+                _logger.LogInformation("{Kind} migration {Version} applied", kind, mig.Version);
             }
             catch (Exception ex)
             {
                 tx.Rollback();
-                _logger.LogError(ex, "Failed to apply migration {Version}", mig.Version);
+                _logger.LogError(ex, "Failed to apply {Kind} migration {Version} ({Provider})", kind, mig.Version, provider);
                 throw;
             }
         }
-
-        // One-shot: legacy DBs keep vec0 tables inside the main file — move them to the separate vector DB.
-        await MigrateLegacyVecTablesAsync(conn, ct).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Moves legacy vec0 tables (vec_chunks_code / vec_chunks_text) from the main DB file
-    /// to the separate vector database (coderag-vec.db), then drops the old tables.
-    /// Best-effort: a failure is logged, not fatal.
+    /// Alpha: the storage layout changed (chunks + vector split into separate databases,
+    /// vector_entries.repository_id added). Old single-file layouts are NOT migrated
+    /// automatically — surface a loud warning instead of corrupting the old data.
     /// </summary>
-    private async Task MigrateLegacyVecTablesAsync(SqliteConnection conn, CancellationToken ct)
+    private async Task WarnAboutLegacyLayout(string provider, CancellationToken ct)
     {
-        if (!_factory.IsVecAvailable)
-        {
-            _logger.LogWarning("sqlite-vec extension unavailable — legacy vec tables cannot be moved to the separate vector DB");
-            return;
-        }
-
-        string[] legacyTables;
-        try
-        {
-            legacyTables = (await conn.QueryAsync<string>(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('vec_chunks_code','vec_chunks_text');").ConfigureAwait(false)).ToArray();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Legacy vec table scan failed");
-            return;
-        }
-        if (legacyTables.Length == 0) return;
+        if (provider != "Sqlite") return;
 
         try
         {
-            await conn.ExecuteAsync("ATTACH DATABASE @path AS vecdb;", new { path = _factory.VecDbPath }).ConfigureAwait(false);
-            try
+            using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+            var legacyChunks = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('chunks','chunks_fts');").ConfigureAwait(false);
+            var hasLegacyVectorEntries = false;
+            var veSql = await conn.ExecuteScalarAsync<string?>(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vector_entries';").ConfigureAwait(false);
+            if (veSql is not null && !veSql.Contains("repository_id", StringComparison.Ordinal))
+                hasLegacyVectorEntries = true;
+
+            var hasMigrations = await IsAppliedAsync(conn, "001_initial", ct).ConfigureAwait(false);
+            if (hasMigrations) return; // properly initialized DB
+
+            var hasAnyTable = await conn.ExecuteScalarAsync<long>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name != 'schema_migrations';").ConfigureAwait(false);
+            if (hasAnyTable == 0) return; // brand-new empty database
+
+            if (legacyChunks > 0 || hasLegacyVectorEntries)
             {
-                foreach (var table in legacyTables)
-                {
-                    var ddl = await conn.QuerySingleOrDefaultAsync<string>(
-                        "SELECT sql FROM sqlite_master WHERE type='table' AND name=@t;", new { t = table }).ConfigureAwait(false);
-                    if (string.IsNullOrEmpty(ddl)) continue;
-
-                    var mainCount = Convert.ToInt64(await conn.ExecuteScalarAsync("SELECT COUNT(*) FROM main." + table + ";").ConfigureAwait(false));
-                    long vecCount = 0;
-                    try { vecCount = Convert.ToInt64(await conn.ExecuteScalarAsync("SELECT COUNT(*) FROM vecdb." + table + ";").ConfigureAwait(false)); }
-                    catch { vecCount = 0; } // table not present in the vec DB
-
-                    if (vecCount == 0 && mainCount > 0)
-                    {
-                        // Recreate with identical DDL in the vec database, then copy rows (embedding comes back as BLOB).
-                        var newDdl = ddl.Replace($"CREATE VIRTUAL TABLE {table}", $"CREATE VIRTUAL TABLE vecdb.{table}", StringComparison.OrdinalIgnoreCase);
-                        await conn.ExecuteAsync(newDdl).ConfigureAwait(false);
-                        await conn.ExecuteAsync(
-                            $"INSERT INTO vecdb.{table} (chunk_id, embedding, repository_id) " +
-                            $"SELECT chunk_id, embedding, repository_id FROM main.{table};").ConfigureAwait(false);
-                        vecCount = Convert.ToInt64(await conn.ExecuteScalarAsync("SELECT COUNT(*) FROM vecdb." + table + ";").ConfigureAwait(false));
-                        _logger.LogInformation("Migrated {Count} rows from {Table} to the separate vector DB", mainCount, table);
-                    }
-
-                    if (vecCount >= mainCount)
-                    {
-                        await conn.ExecuteAsync("DROP TABLE main." + table + ";").ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Kept legacy {Table}: vec DB has {Vec} rows, main DB has {Main} rows", table, vecCount, mainCount);
-                    }
-                }
+                _logger.LogWarning(
+                    "Legacy single-file CodeRag database detected at {Path}. The storage layout has changed: " +
+                    "chunks + FTS moved to {ChunksDb} and vector tables move to {VecDb}, and vector_entries gained repository_id. " +
+                    "Old data is NOT migrated automatically (alpha) — delete the old .db files to start fresh.",
+                    _factory.DbPath, _factory.ChunksDbPath, _factory.VecDbPath);
             }
-            finally
+            else
             {
-                await conn.ExecuteAsync("DETACH DATABASE vecdb;").ConfigureAwait(false);
+                _logger.LogWarning(
+                    "Pre-existing database at {Path} without schema_migrations — applying the consolidated initial schema on top of it",
+                    _factory.DbPath);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to migrate legacy vec tables to the separate vector DB");
+            _logger.LogDebug(ex, "Legacy layout check failed");
         }
     }
 
-    private static async Task EnsureMigrationsTableAsync(SqliteConnection conn, CancellationToken ct)
+    private static async Task EnsureMigrationsTableAsync(IDbConnection conn, CancellationToken ct)
     {
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);";
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        await conn.ExecuteAsync(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);").ConfigureAwait(false);
     }
 
-    private static async Task<bool> IsAppliedAsync(SqliteConnection conn, string version, CancellationToken ct)
+    private static async Task<bool> IsAppliedAsync(IDbConnection conn, string version, CancellationToken ct)
     {
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM schema_migrations WHERE version = @v;";
-        cmd.Parameters.AddWithValue("@v", version);
-        var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-        return Convert.ToInt64(result) > 0;
+        var result = await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = @v;", new { v = version }).ConfigureAwait(false);
+        return result > 0;
     }
 
-    private static IReadOnlyList<Migration> LoadEmbeddedMigrations()
+    private static IReadOnlyList<Migration> LoadEmbeddedMigrations(string provider, string kind)
     {
         var asm = typeof(DbInitializer).Assembly;
-        var names = asm.GetManifestResourceNames()
-            .Where(n => n.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
+        var prefix = $"CodeRag.Infrastructure.Persistence.Migrations.{provider}.{kind}.";
 
         var list = new List<Migration>();
-        foreach (var name in names)
+        foreach (var name in asm.GetManifestResourceNames())
         {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
+                continue;
+
             using var stream = asm.GetManifestResourceStream(name);
             if (stream is null) continue;
             using var reader = new StreamReader(stream);
             var sql = reader.ReadToEnd();
-
-            // Version from resource name or filename: expect 001_initial.sql
-            var version = ExtractVersion(name);
-            list.Add(new Migration(version, sql, name));
+            list.Add(new Migration(ExtractVersion(name), sql, name));
         }
 
-        // Fallback: if no embedded resources (e.g. during dev without embedding), try file beside dll.
+        // Fallback: file beside the assembly (dev scenarios without embedded resources).
         if (list.Count == 0)
         {
             var baseDir = Path.GetDirectoryName(typeof(DbInitializer).Assembly.Location) ?? AppContext.BaseDirectory;
-            var candidate = Path.Combine(baseDir, "Persistence", "Migrations", "001_initial.sql");
-            if (!File.Exists(candidate))
-                candidate = Path.Combine(AppContext.BaseDirectory, "001_initial.sql");
-            // also check project file path
-            var projPath = Path.Combine("/home/shizzz/CodeAtlas/src/CodeRag.Infrastructure/Persistence/Migrations/001_initial.sql");
-            if (File.Exists(projPath))
+            var dir = Path.Combine(baseDir, "Persistence", "Migrations", provider, kind);
+            if (Directory.Exists(dir))
             {
-                var sql = File.ReadAllText(projPath);
-                list.Add(new Migration("001_initial", sql, projPath));
-            }
-            else if (File.Exists(candidate))
-            {
-                var sql = File.ReadAllText(candidate);
-                list.Add(new Migration("001_initial", sql, candidate));
+                foreach (var file in Directory.GetFiles(dir, "*.sql").OrderBy(f => f, StringComparer.Ordinal))
+                    list.Add(new Migration(Path.GetFileNameWithoutExtension(file), File.ReadAllText(file), file));
             }
         }
 
@@ -209,33 +179,16 @@ public sealed class DbInitializer
 
     private static string ExtractVersion(string resourceName)
     {
-        // e.g. CodeRag.Infrastructure.Persistence.Migrations.001_initial.sql -> 001_initial
-        var file = resourceName.Split('.').Reverse().Take(3).Reverse().ToArray();
-        // Handles: 001_initial.sql -> ["001_initial","sql"]?
-        // Simpler: take filename
-        var name = Path.GetFileNameWithoutExtension(resourceName);
-        // If resourceName contains dots, take last segment before .sql
-        var parts = resourceName.Split('.');
-        for (int i = parts.Length - 1; i >= 0; i--)
-        {
-            if (parts[i] == "sql" && i > 0)
-            {
-                var maybe = parts[i - 1];
-                // Check if previous is like 001_initial
-                if (maybe.Contains("_") || maybe.All(char.IsDigit))
-                    return maybe;
-            }
-        }
-        // Fallback: extract 001_initial pattern via regex-ish
-        var idx = resourceName.LastIndexOf("001_", StringComparison.Ordinal);
-        if (idx >= 0)
-        {
-            var sub = resourceName.Substring(idx);
-            var dot = sub.IndexOf('.');
-            if (dot > 0) sub = sub.Substring(0, dot);
-            return sub;
-        }
-        return name;
+        // Embedded resource names use dots as separators:
+        //   CodeRag.Infrastructure.Persistence.Migrations.Sqlite.Main.001_initial.sql -> 001_initial
+        // File fallback paths use real separators and are handled by GetFileNameWithoutExtension.
+        if (resourceName.Contains('/') || resourceName.Contains('\\'))
+            return Path.GetFileNameWithoutExtension(resourceName);
+
+        var dot = resourceName.LastIndexOf('.'); // before "sql"
+        var beforeExt = dot > 0 ? resourceName[..dot] : resourceName;
+        var fileDot = beforeExt.LastIndexOf('.'); // before the version filename
+        return fileDot >= 0 ? beforeExt[(fileDot + 1)..] : beforeExt;
     }
 
     private sealed record Migration(string Version, string Sql, string ResourceName);

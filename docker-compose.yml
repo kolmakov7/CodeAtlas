@@ -20,6 +20,9 @@ services:
       Embeddings__Text__Model: ${TEXT_EMBEDDINGS_MODEL:-all-MiniLM-L6-v2}
       Embeddings__Text__Dimensions: ${TEXT_EMBEDDINGS_DIMENSIONS:-0}
       # прокси/credentials — через env или /data/settings.json
+      # Storage: sqlite (default, files in /data) or postgresql (uses the `postgres` service).
+      Storage__Provider: ${STORAGE__PROVIDER:-sqlite}
+      Storage__Postgres__ConnectionString: ${STORAGE__POSTGRES__CONNECTIONSTRING:-Host=postgres;Port=5432;Database=coderag;Username=coderag;Password=coderag}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 15s
@@ -28,6 +31,10 @@ services:
       start_period: 20s
     restart: unless-stopped
     user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
 
   # coderag-mcp — deprecated: MCP теперь в основном API (http://coderag:8080/mcp, Streamable HTTP).
   # Отдельный образ не нужен (stdio не используется). Оставлен для совместимости stdio через `profiles: ["mcp"]`.
@@ -70,6 +77,25 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    restart: unless-stopped
+
+  # PostgreSQL with pgvector + pg_trgm — opt-in via the `postgres` profile.
+  # Enable with STORAGE__PROVIDER=postgresql (e.g. in .env):
+  #   docker compose --profile postgres up
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: coderag
+      POSTGRES_USER: coderag
+      POSTGRES_PASSWORD: coderag
+    volumes: ["./data/postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coderag -d coderag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
   # Text vector space endpoint (OpenAI-compatible). Opt-in via the `embeddings` profile.

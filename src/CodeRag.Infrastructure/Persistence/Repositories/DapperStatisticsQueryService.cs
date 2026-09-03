@@ -1,16 +1,18 @@
 using System.Data;
 using System.Text.Json;
 using CodeRag.Domain.Ports;
+using CodeRag.Infrastructure.Persistence;
 using Dapper;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using IDbConnectionFactory = CodeRag.Domain.Ports.IDbConnectionFactory;
 
 namespace CodeRag.Infrastructure.Persistence.Repositories;
 
 /// <summary>
 /// Reads precomputed statistics snapshots (repository_stats / global_stats).
-/// Falls back to the legacy on-the-fly aggregation when a snapshot is missing
-/// (e.g. between migration and the first refresh).
+/// Falls back to the on-the-fly aggregation when a snapshot is missing.
+/// Live aggregation spans main + chunks databases (chunks counts come from the chunks DB,
+/// vector counts use vector_entries.repository_id — no cross-DB joins).
 /// </summary>
 public sealed class DapperStatisticsQueryService : IStatisticsQueryService
 {
@@ -103,35 +105,72 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
 
     public async Task<StorageSizes> GetStorageSizesAsync(CancellationToken ct = default)
     {
-        long sqliteBytes = 0, vectorBytes = 0, reposBytes = 0;
-        try { var fi = new FileInfo(_factory.DbPath); if (fi.Exists) sqliteBytes = fi.Length; } catch { }
-        // Vector tables live in the separate vec database — report its real file size.
-        try { var fi = new FileInfo(_factory.VecDbPath); if (fi.Exists) vectorBytes = fi.Length; } catch { }
+        long mainBytes = 0, vectorBytes = 0, reposBytes = 0;
 
-        // Fallback: legacy DBs keep vec0 tables inside the main DB file (or vec extension is absent
-        // and vectors are held in memory) — estimate from vector count so Dashboard doesn't stay at 0.
-        if (vectorBytes == 0 && sqliteBytes > 0)
+        if (SqlDialect.IsPostgres(_factory))
         {
+            // No local files — ask PostgreSQL for real database sizes.
             try
             {
                 using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-                var cnt = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries;").ConfigureAwait(false);
-                if (cnt > 0)
-                {
-                    vectorBytes = cnt * 1024 * 4; // ~4KB per vector
-                    if (vectorBytes > sqliteBytes) vectorBytes = sqliteBytes / 2;
-                }
+                mainBytes = await PgDatabaseSizeAsync(conn, _factory.DbPath, ct).ConfigureAwait(false)
+                           + await PgDatabaseSizeAsync(conn, _factory.ChunksDbPath, ct).ConfigureAwait(false);
+                vectorBytes = await PgDatabaseSizeAsync(conn, _factory.VecDbPath, ct).ConfigureAwait(false);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "pg_database_size query failed");
+            }
         }
+        else
+        {
+            try { var fi = new FileInfo(_factory.DbPath); if (fi.Exists) mainBytes += fi.Length; } catch { }
+            try { var fi = new FileInfo(_factory.ChunksDbPath); if (fi.Exists) mainBytes += fi.Length; } catch { }
+            // Vector tables live in the separate vec database — report its real file size.
+            try { var fi = new FileInfo(_factory.VecDbPath); if (fi.Exists) vectorBytes = fi.Length; } catch { }
+
+            // Fallback: vec extension absent and vectors are held in memory — estimate from vector
+            // count so Dashboard doesn't stay at 0.
+            if (vectorBytes == 0 && mainBytes > 0)
+            {
+                try
+                {
+                    using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+                    var cnt = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries;").ConfigureAwait(false);
+                    if (cnt > 0)
+                    {
+                        vectorBytes = cnt * 1024 * 4; // ~4KB per vector
+                        if (vectorBytes > mainBytes) vectorBytes = mainBytes / 2;
+                    }
+                }
+                catch { }
+            }
+        }
+
         try
         {
-            var reposRoot = Path.Combine(Path.GetDirectoryName(_factory.DbPath) ?? "/data", "repos");
-            if (Directory.Exists(reposRoot))
-                reposBytes = Directory.GetFiles(reposRoot, "*", SearchOption.AllDirectories).Sum(f => { try { return new FileInfo(f).Length; } catch { return 0; } });
+            var dataDir = _factory.DataDir;
+            if (!string.IsNullOrWhiteSpace(dataDir))
+            {
+                var reposRoot = Path.Combine(dataDir, "repos");
+                if (Directory.Exists(reposRoot))
+                    reposBytes = Directory.GetFiles(reposRoot, "*", SearchOption.AllDirectories).Sum(f => { try { return new FileInfo(f).Length; } catch { return 0; } });
+            }
         }
         catch { }
-        return new StorageSizes(sqliteBytes, vectorBytes, reposBytes);
+        return new StorageSizes(mainBytes, vectorBytes, reposBytes);
+    }
+
+    private static async Task<long> PgDatabaseSizeAsync(IDbConnection conn, string databaseName, CancellationToken ct)
+    {
+        try
+        {
+            return await conn.ExecuteScalarAsync<long>("SELECT pg_database_size(@name);", new { name = databaseName }).ConfigureAwait(false);
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private static RepositoryStatistics MapRepoSnapshot(Guid repositoryId, RepoStatsRow snap)
@@ -171,23 +210,23 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         };
     }
 
-    // --- Legacy on-the-fly aggregation (fallback only) ---
+    // --- On-the-fly aggregation (fallback only) ---
 
-    private async Task<RepositoryStatistics> GetRepositoryStatisticsLiveAsync(Guid repositoryId, SqliteConnection conn, CancellationToken ct)
+    private async Task<RepositoryStatistics> GetRepositoryStatisticsLiveAsync(Guid repositoryId, IDbConnection conn, CancellationToken ct)
     {
         var repoRow = await conn.QuerySingleOrDefaultAsync<RepoRow>("SELECT * FROM repositories WHERE id=@id;", new { id = repositoryId.ToString() }).ConfigureAwait(false);
         if (repoRow is null) throw new KeyNotFoundException($"Repository {repositoryId} not found.");
         var rid = repositoryId.ToString();
         var fileCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM files WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
         var symbolCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM symbols WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
-        var chunkCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
-        long vectorCount = 0;
-        try { vectorCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id=@rid);", new { rid }).ConfigureAwait(false); }
-        catch (Exception ex) { _logger.LogDebug(ex, "vector_entries count failed for {Repo}", repositoryId); }
+
+        using var chunksConn = await _factory.CreateChunksAsync(ct).ConfigureAwait(false);
+        var chunkCount = await chunksConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
+        var vectorCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
 
         var embeddingStats = new List<EmbeddingDomainStats>();
         foreach (var domain in DomainTokens)
-            embeddingStats.Add(await GetDomainStatsAsync(conn, rid, domain, ct).ConfigureAwait(false));
+            embeddingStats.Add(await GetDomainStatsAsync(conn, chunksConn, rid, domain, ct).ConfigureAwait(false));
         var failed = await GetFailedJobsAsync(conn, rid, ct).ConfigureAwait(false);
         var (relationCount, relationsByType) = await GetRelationStatsAsync(conn, rid, ct).ConfigureAwait(false);
 
@@ -195,8 +234,9 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
             relationCount, relationsByType, embeddingStats, failed, repoRow.indexed_commit, repoRow.current_commit, repoRow.status);
     }
 
-    private async Task<GlobalStatistics> GetGlobalStatisticsLiveAsync(SqliteConnection conn, CancellationToken ct)
+    private async Task<GlobalStatistics> GetGlobalStatisticsLiveAsync(IDbConnection conn, CancellationToken ct)
     {
+        using var chunksConn = await _factory.CreateChunksAsync(ct).ConfigureAwait(false);
         var repoRows = await conn.QueryAsync<RepoRow>("SELECT * FROM repositories ORDER BY name;").ConfigureAwait(false);
         var repoStats = new List<RepositoryStatistics>();
         foreach (var r in repoRows)
@@ -204,14 +244,12 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
             var rid = r.id;
             var fileCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM files WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
             var symbolCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM symbols WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
-            var chunkCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
-            long vectorCount = 0;
-            try { vectorCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id=@rid);", new { rid }).ConfigureAwait(false); }
-            catch (Exception ex) { _logger.LogDebug(ex, "vector_entries count failed for {Repo}", rid); }
+            var chunkCount = await chunksConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
+            var vectorCount = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM vector_entries WHERE repository_id=@rid;", new { rid }).ConfigureAwait(false);
 
             var embeddingStats = new List<EmbeddingDomainStats>();
             foreach (var domain in DomainTokens)
-                embeddingStats.Add(await GetDomainStatsAsync(conn, rid, domain, ct).ConfigureAwait(false));
+                embeddingStats.Add(await GetDomainStatsAsync(conn, chunksConn, rid, domain, ct).ConfigureAwait(false));
             var failed = await GetFailedJobsAsync(conn, rid, ct).ConfigureAwait(false);
             var (relationCount, relationsByType) = await GetRelationStatsAsync(conn, rid, ct).ConfigureAwait(false);
 
@@ -219,38 +257,31 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         }
         var totalFiles = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM files;").ConfigureAwait(false);
         var totalSymbols = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM symbols;").ConfigureAwait(false);
-        var totalChunks = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks;").ConfigureAwait(false);
+        var totalChunks = await chunksConn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM chunks;").ConfigureAwait(false);
         var totalJobs = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM indexing_jobs;").ConfigureAwait(false);
         var (totalRelations, globalRelationsByType) = await GetRelationStatsAsync(conn, null, ct).ConfigureAwait(false);
 
         var globalEmbeddingStats = new List<EmbeddingDomainStats>();
         foreach (var domain in DomainTokens)
-            globalEmbeddingStats.Add(await GetDomainStatsAsync(conn, null, domain, ct).ConfigureAwait(false));
+            globalEmbeddingStats.Add(await GetDomainStatsAsync(conn, chunksConn, null, domain, ct).ConfigureAwait(false));
         var globalFailed = await GetFailedJobsAsync(conn, null, ct).ConfigureAwait(false);
 
         return new GlobalStatistics(repoStats.Count, (int)totalFiles, (int)totalSymbols, (int)totalChunks, totalRelations, globalRelationsByType, (int)totalJobs, globalEmbeddingStats, globalFailed, repoStats);
     }
 
-    /// <summary>Per-domain embedding progress (indexed = has vector, pending = no vector) for a repo (or null = global).</summary>
-    private async Task<EmbeddingDomainStats> GetDomainStatsAsync(IDbConnection conn, string? rid, string domain, CancellationToken ct)
+    /// <summary>Per-domain embedding progress (indexed = has vector, pending = no vector) for a repo (or null = global).
+    /// total — chunks DB (embedding_domain), indexed — main DB (vector_entries.repository_id, no cross-DB join).</summary>
+    private async Task<EmbeddingDomainStats> GetDomainStatsAsync(IDbConnection mainConn, IDbConnection chunksConn, string? rid, string domain, CancellationToken ct)
     {
         int total, indexed;
         try
         {
-            if (rid is null)
-            {
-                total = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM chunks WHERE embedding_domain=@domain;", new { domain }).ConfigureAwait(false);
-                indexed = await conn.ExecuteScalarAsync<int>(
-                    "SELECT COUNT(DISTINCT ve.chunk_id) FROM vector_entries ve INNER JOIN chunks c ON c.id = ve.chunk_id WHERE c.embedding_domain=@domain AND ve.domain=@domain;",
-                    new { domain }).ConfigureAwait(false);
-            }
-            else
-            {
-                total = await conn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid AND embedding_domain=@domain;", new { rid, domain }).ConfigureAwait(false);
-                indexed = await conn.ExecuteScalarAsync<int>(
-                    "SELECT COUNT(DISTINCT ve.chunk_id) FROM vector_entries ve INNER JOIN chunks c ON c.id = ve.chunk_id WHERE c.repository_id=@rid AND c.embedding_domain=@domain AND ve.domain=@domain;",
-                    new { rid, domain }).ConfigureAwait(false);
-            }
+            total = rid is null
+                ? await chunksConn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM chunks WHERE embedding_domain=@domain;", new { domain }).ConfigureAwait(false)
+                : await chunksConn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM chunks WHERE repository_id=@rid AND embedding_domain=@domain;", new { rid, domain }).ConfigureAwait(false);
+            indexed = rid is null
+                ? await mainConn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM vector_entries WHERE domain=@domain;", new { domain }).ConfigureAwait(false)
+                : await mainConn.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM vector_entries WHERE repository_id=@rid AND domain=@domain;", new { rid, domain }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -289,18 +320,7 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Relation count query failed for {Repo}", rid ?? "global");
-            // Fallback for DBs without repository_id column (pre-004): count via symbol's repository_id
-            if (rid is not null)
-            {
-                try
-                {
-                    count = await conn.ExecuteScalarAsync<int>(
-                        "SELECT COUNT(*) FROM relations r WHERE EXISTS (SELECT 1 FROM symbols s WHERE s.id = r.from_symbol_id AND s.repository_id=@rid);",
-                        new { rid }).ConfigureAwait(false);
-                }
-                catch { count = 0; }
-            }
-            else count = 0;
+            count = 0;
         }
 
         var byType = new List<RelationTypeStats>();
@@ -320,17 +340,6 @@ public sealed class DapperStatisticsQueryService : IStatisticsQueryService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Relation by-type query failed for {Repo}", rid ?? "global");
-            if (rid is not null)
-            {
-                try
-                {
-                    var rows = await conn.QueryAsync<RelTypeRow>(
-                        "SELECT r.relation_type, COUNT(*) AS cnt FROM relations r WHERE EXISTS (SELECT 1 FROM symbols s WHERE s.id = r.from_symbol_id AND s.repository_id=@rid) GROUP BY r.relation_type ORDER BY cnt DESC;",
-                        new { rid }).ConfigureAwait(false);
-                    byType.AddRange(rows.Select(r => new RelationTypeStats(r.relation_type, r.cnt)));
-                }
-                catch { }
-            }
         }
         return (count, byType);
     }

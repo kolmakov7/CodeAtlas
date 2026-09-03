@@ -3,7 +3,6 @@ using CodeRag.Domain.Enums;
 using CodeRag.Domain.Models;
 using CodeRag.Domain.Ports;
 using Dapper;
-using Microsoft.Data.Sqlite;
 
 namespace CodeRag.Infrastructure.Stores;
 

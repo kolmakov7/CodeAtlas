@@ -40,7 +40,7 @@ public sealed class McpProgram
         Directory.CreateDirectory(dataDir);
         Directory.CreateDirectory(Path.Combine(dataDir, "keys"));
 
-        builder.Services.AddInfrastructure(dataDir);
+        builder.Services.AddInfrastructure(builder.Configuration, dataDir);
         builder.Services.AddGit();
         // Bind from Configuration (env + appsettings + settings table) instead of the no-arg
         // overload, which would fall back to the hardcoded EmbeddingOptions defaults.

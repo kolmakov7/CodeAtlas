@@ -1,4 +1,5 @@
 using CodeRag.Domain.Ports;
+using Dapper;
 using Microsoft.Extensions.Logging;
 
 namespace CodeRag.Infrastructure.Persistence.Repositories;
@@ -18,9 +19,7 @@ public sealed class DbHealthProbe : IDbHealthProbe
         try
         {
             using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT 1;";
-            await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            await conn.ExecuteScalarAsync("SELECT 1;").ConfigureAwait(false);
             sw.Stop();
             return new HealthProbeResult("Healthy", null, sw.Elapsed.TotalMilliseconds);
         }

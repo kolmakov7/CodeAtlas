@@ -71,13 +71,14 @@ public sealed class SearchDomainRankingTests : IDisposable
         await conn.ExecuteAsync(
             "INSERT INTO symbols(id,repository_id,file_id,language,kind,name,fqn) VALUES(@i,@r,@f,@l,@k,@n,@fqn)",
             new { i = _codeSymbol.ToString(), r = _repo.ToString(), f = _codeFile.ToString(), l = "csharp", k = "Class", n = "ZzzSymbol", fqn = "global::ZzzSymbol" });
-        await conn.ExecuteAsync(
+        using var chunksConn = await _factory.CreateChunksAsync();
+        await chunksConn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,symbol_id,language,start_line,end_line,content_hash,source) VALUES(@i,@r,@f,@s,@l,@sl,@el,@h,@src)",
             new { i = _codeChunk.ToString(), r = _repo.ToString(), f = _codeFile.ToString(), s = _codeSymbol.ToString(), l = "csharp", sl = 4, el = 16, h = "h1", src = "class ZzzSymbol { }" });
-        await conn.ExecuteAsync(
+        await chunksConn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,symbol_id,language,start_line,end_line,content_hash,source) VALUES(@i,@r,@f,@s,@l,@sl,@el,@h,@src)",
             new { i = _codeChunk2.ToString(), r = _repo.ToString(), f = _codeFile.ToString(), s = (object?)null, l = "csharp", sl = 17, el = 40, h = "h1b", src = "// more code" });
-        await conn.ExecuteAsync(
+        await chunksConn.ExecuteAsync(
             "INSERT INTO chunks(id,repository_id,file_id,symbol_id,language,start_line,end_line,content_hash,source) VALUES(@i,@r,@f,@s,@l,@sl,@el,@h,@src)",
             new { i = _docChunk.ToString(), r = _repo.ToString(), f = _docFile.ToString(), s = (object?)null, l = "markdown", sl = 1, el = 40, h = "h2", src = "# Docs" });
     }

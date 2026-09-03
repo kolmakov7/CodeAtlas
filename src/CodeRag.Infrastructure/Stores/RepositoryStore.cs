@@ -1,6 +1,7 @@
 using CodeRag.Domain.Entities;
 using CodeRag.Domain.Enums;
 using CodeRag.Domain.Ports;
+using CodeRag.Infrastructure.Persistence;
 using Dapper;
 
 namespace CodeRag.Infrastructure.Stores;
@@ -14,151 +15,49 @@ public sealed class RepositoryStore : CodeRag.Domain.Ports.IRepositoryStore
     public async Task UpsertAsync(Repository repository, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        // Check if group_id column exists (migration 005 may not have run yet — fallback to old schema)
-        bool hasGroup = await HasColumnAsync(conn, "repositories", "group_id").ConfigureAwait(false);
-        bool hasFilter = await HasColumnAsync(conn, "repositories", "filter_enabled").ConfigureAwait(false);
-        string sql;
-        object p;
-        var allowedJson = repository.AllowedDirectories.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(repository.AllowedDirectories);
-        var filterEnabled = repository.DirectoryFilterEnabled ? 1 : 0;
-        if (hasGroup && hasFilter)
+        var p = new
         {
-            sql = @"
-INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, group_id, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error, filter_enabled, allowed_directories)
-VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@groupId,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError,@filterEnabled,@allowedDirs)
-ON CONFLICT(id) DO UPDATE SET
-  name=excluded.name, git_url=excluded.git_url, branch=excluded.branch, local_path=excluded.local_path,
-  current_commit=excluded.current_commit, indexed_commit=excluded.indexed_commit, status=excluded.status,
-  enabled=excluded.enabled, group_id=excluded.group_id, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
-  sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
-  last_index_at=excluded.last_index_at, last_error=excluded.last_error, filter_enabled=excluded.filter_enabled, allowed_directories=excluded.allowed_directories;";
-            p = new
-            {
-                id = repository.Id.ToString(),
-                name = repository.Name,
-                gitUrl = repository.GitUrl.Value,
-                branch = repository.Branch,
-                localPath = repository.LocalPath.Value,
-                currentCommit = repository.CurrentCommit,
-                indexedCommit = repository.IndexedCommit,
-                status = repository.Status.ToString(),
-                enabled = repository.Enabled ? 1 : 0,
-                groupId = repository.GroupId?.ToString(),
-                proxyId = repository.ProxyId?.ToString(),
-                credentialId = repository.CredentialId?.ToString(),
-                syncInterval = repository.SyncIntervalSeconds,
-                lastSyncAt = repository.LastSyncAt?.ToString("o"),
-                lastIndexAt = repository.LastIndexAt?.ToString("o"),
-                lastError = repository.LastError,
-                filterEnabled = filterEnabled,
-                allowedDirs = allowedJson
-            };
-        }
-        else if (hasGroup)
-        {
-            sql = @"
-INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, group_id, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error)
-VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@groupId,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError)
-ON CONFLICT(id) DO UPDATE SET
-  name=excluded.name, git_url=excluded.git_url, branch=excluded.branch, local_path=excluded.local_path,
-  current_commit=excluded.current_commit, indexed_commit=excluded.indexed_commit, status=excluded.status,
-  enabled=excluded.enabled, group_id=excluded.group_id, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
-  sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
-  last_index_at=excluded.last_index_at, last_error=excluded.last_error;";
-            p = new
-            {
-                id = repository.Id.ToString(),
-                name = repository.Name,
-                gitUrl = repository.GitUrl.Value,
-                branch = repository.Branch,
-                localPath = repository.LocalPath.Value,
-                currentCommit = repository.CurrentCommit,
-                indexedCommit = repository.IndexedCommit,
-                status = repository.Status.ToString(),
-                enabled = repository.Enabled ? 1 : 0,
-                groupId = repository.GroupId?.ToString(),
-                proxyId = repository.ProxyId?.ToString(),
-                credentialId = repository.CredentialId?.ToString(),
-                syncInterval = repository.SyncIntervalSeconds,
-                lastSyncAt = repository.LastSyncAt?.ToString("o"),
-                lastIndexAt = repository.LastIndexAt?.ToString("o"),
-                lastError = repository.LastError
-            };
-        }
-        else
-        {
-            sql = @"
-INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error)
-VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError)
-ON CONFLICT(id) DO UPDATE SET
-  name=excluded.name, git_url=excluded.git_url, branch=excluded.branch, local_path=excluded.local_path,
-  current_commit=excluded.current_commit, indexed_commit=excluded.indexed_commit, status=excluded.status,
-  enabled=excluded.enabled, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
-  sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
-  last_index_at=excluded.last_index_at, last_error=excluded.last_error;";
-            p = new
-            {
-                id = repository.Id.ToString(),
-                name = repository.Name,
-                gitUrl = repository.GitUrl.Value,
-                branch = repository.Branch,
-                localPath = repository.LocalPath.Value,
-                currentCommit = repository.CurrentCommit,
-                indexedCommit = repository.IndexedCommit,
-                status = repository.Status.ToString(),
-                enabled = repository.Enabled ? 1 : 0,
-                proxyId = repository.ProxyId?.ToString(),
-                credentialId = repository.CredentialId?.ToString(),
-                syncInterval = repository.SyncIntervalSeconds,
-                lastSyncAt = repository.LastSyncAt?.ToString("o"),
-                lastIndexAt = repository.LastIndexAt?.ToString("o"),
-                lastError = repository.LastError
-            };
-        }
+            id = repository.Id.ToString(),
+            name = repository.Name,
+            gitUrl = repository.GitUrl.Value,
+            branch = repository.Branch,
+            localPath = repository.LocalPath.Value,
+            currentCommit = repository.CurrentCommit,
+            indexedCommit = repository.IndexedCommit,
+            status = repository.Status.ToString(),
+            enabled = repository.Enabled ? 1 : 0,
+            groupId = repository.GroupId?.ToString(),
+            proxyId = repository.ProxyId?.ToString(),
+            credentialId = repository.CredentialId?.ToString(),
+            syncInterval = repository.SyncIntervalSeconds,
+            lastSyncAt = repository.LastSyncAt?.ToString("o"),
+            lastIndexAt = repository.LastIndexAt?.ToString("o"),
+            lastError = repository.LastError,
+            filterEnabled = repository.DirectoryFilterEnabled ? 1 : 0,
+            allowedDirs = repository.AllowedDirectories.Count == 0 ? null : System.Text.Json.JsonSerializer.Serialize(repository.AllowedDirectories)
+        };
+
+        const string sql = @"
+ INSERT INTO repositories(id, name, git_url, branch, local_path, current_commit, indexed_commit, status, enabled, group_id, proxy_id, credential_id, sync_interval_seconds, last_sync_at, last_index_at, last_error, filter_enabled, allowed_directories)
+ VALUES (@id,@name,@gitUrl,@branch,@localPath,@currentCommit,@indexedCommit,@status,@enabled,@groupId,@proxyId,@credentialId,@syncInterval,@lastSyncAt,@lastIndexAt,@lastError,@filterEnabled,@allowedDirs)
+ ON CONFLICT(id) DO UPDATE SET
+   name=excluded.name, git_url=excluded.git_url, branch=excluded.branch, local_path=excluded.local_path,
+   current_commit=excluded.current_commit, indexed_commit=excluded.indexed_commit, status=excluded.status,
+   enabled=excluded.enabled, group_id=excluded.group_id, proxy_id=excluded.proxy_id, credential_id=excluded.credential_id,
+   sync_interval_seconds=excluded.sync_interval_seconds, last_sync_at=excluded.last_sync_at,
+   last_index_at=excluded.last_index_at, last_error=excluded.last_error, filter_enabled=excluded.filter_enabled, allowed_directories=excluded.allowed_directories;";
+
         try
         {
             await conn.ExecuteAsync(sql, p).ConfigureAwait(false);
         }
-        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
+        catch (Exception ex) when (SqlDialect.IsUniqueViolation(_factory, ex))
         {
             // UNIQUE constraint failed (likely repositories.name) — fallback to UPDATE by id
             // Happens when two concurrent upserts race or name already exists with different id
-            string updateSql;
-            if (hasGroup && hasFilter)
-                updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError, filter_enabled=@filterEnabled, allowed_directories=@allowedDirs WHERE id=@id";
-            else if (hasGroup)
-                updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id";
-            else
-                updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError WHERE id=@id";
+            const string updateSql = @"UPDATE repositories SET name=@name, git_url=@gitUrl, branch=@branch, local_path=@localPath, current_commit=@currentCommit, indexed_commit=@indexedCommit, status=@status, enabled=@enabled, group_id=@groupId, proxy_id=@proxyId, credential_id=@credentialId, sync_interval_seconds=@syncInterval, last_sync_at=@lastSyncAt, last_index_at=@lastIndexAt, last_error=@lastError, filter_enabled=@filterEnabled, allowed_directories=@allowedDirs WHERE id=@id";
             await conn.ExecuteAsync(updateSql, p).ConfigureAwait(false);
         }
-        // If filter column exists but we inserted without it (old path) then update filter separately
-        if (hasFilter && !hasGroup) // shouldn't happen after migration 005 but keep
-        {
-            try { await conn.ExecuteAsync("UPDATE repositories SET filter_enabled=@fe, allowed_directories=@ad WHERE id=@id;", new { fe = filterEnabled, ad = allowedJson, id = repository.Id.ToString() }).ConfigureAwait(false); } catch { }
-        }
-        else if (hasFilter && hasGroup)
-        {
-            // Already handled in main upsert; no extra needed. But if we took hasGroup-only path due to hasFilter false detection race, ensure
-        }
-        else if (hasFilter)
-        {
-            try { await conn.ExecuteAsync("UPDATE repositories SET filter_enabled=@fe, allowed_directories=@ad WHERE id=@id;", new { fe = filterEnabled, ad = allowedJson, id = repository.Id.ToString() }).ConfigureAwait(false); } catch { }
-        }
-    }
-
-    private static async Task<bool> HasColumnAsync(Microsoft.Data.Sqlite.SqliteConnection conn, string table, string column)
-    {
-        try
-        {
-            var rows = await conn.QueryAsync<dynamic>($"PRAGMA table_info({table});").ConfigureAwait(false);
-            foreach (var r in rows)
-            {
-                string name = r.name ?? r.Name ?? "";
-                if (string.Equals(name, column, StringComparison.OrdinalIgnoreCase)) return true;
-            }
-        } catch { }
-        return false;
     }
 
     public async Task<Repository?> GetByIdAsync(Guid id, CancellationToken ct = default)
@@ -190,13 +89,18 @@ ON CONFLICT(id) DO UPDATE SET
         await conn.ExecuteAsync("DELETE FROM repositories WHERE id = @id;", new { id = id.ToString() }).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Кросс-БД удаление: vector-БД (vec-таблицы), chunks-БД (chunks + chunks_fts),
+    /// main-БД (vector_entries по repository_id, indexing_errors, activity_log, repositories).
+    /// Транзакции не пересекают БД — при сбое возможна краткая рассинхронизация (принято для alpha).
+    /// </summary>
     public async Task DeleteCascadeAsync(Guid repositoryId, CancellationToken ct = default)
     {
         var rid = repositoryId.ToString();
-        // vec0 tables live in the separate vector DB — clean them there.
-        using var vecConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
-        using var vecTx = vecConn.BeginTransaction();
-        try
+
+        // 1) Vector DB (vec0 tables in SQLite / pgvector tables in Postgres).
+        using (var vecConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false))
+        using (var vecTx = vecConn.BeginTransaction())
         {
             foreach (var table in new[] { "vec_chunks_code", "vec_chunks_text", "vec_chunks" })
             {
@@ -204,51 +108,47 @@ ON CONFLICT(id) DO UPDATE SET
                 {
                     await vecConn.ExecuteAsync($"DELETE FROM {table} WHERE repository_id = @rid;", new { rid }, transaction: vecTx).ConfigureAwait(false);
                 }
-                catch { /* ignore if table not exists or aux column missing */ }
+                catch { /* ignore if table not created yet */ }
             }
             vecTx.Commit();
         }
-        catch
+
+        // 2) Chunks DB: chunks + FTS.
+        using (var chunksConn = await _factory.CreateChunksAsync(ct).ConfigureAwait(false))
+        using (var chunksTx = chunksConn.BeginTransaction())
         {
-            try { vecTx.Rollback(); } catch { }
+            await chunksConn.ExecuteAsync("DELETE FROM chunks WHERE repository_id = @rid;", new { rid }, transaction: chunksTx).ConfigureAwait(false);
+            await chunksConn.ExecuteAsync("DELETE FROM chunks_fts WHERE repository_id = @rid;", new { rid }, transaction: chunksTx).ConfigureAwait(false);
+            chunksTx.Commit();
         }
 
-        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        using var tx = conn.BeginTransaction();
-        try
+        // 3) Main DB: vector_entries (repository_id column added by the consolidated schema),
+        //    job errors / activity, and the repository itself.
+        using (var conn = await _factory.CreateAsync(ct).ConfigureAwait(false))
+        using (var tx = conn.BeginTransaction())
         {
-            // Explicit cleanup per storage.md §5 in transaction.
-            await conn.ExecuteAsync("DELETE FROM vector_entries WHERE chunk_id IN (SELECT id FROM chunks WHERE repository_id = @rid);", new { rid }, transaction: tx).ConfigureAwait(false);
-            await conn.ExecuteAsync("DELETE FROM chunks_fts WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
+            await conn.ExecuteAsync("DELETE FROM vector_entries WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             // Repo-scoped job errors / activity would otherwise survive with repository_id=NULL (SET NULL)
             await conn.ExecuteAsync("DELETE FROM indexing_errors WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             await conn.ExecuteAsync("DELETE FROM activity_log WHERE repository_id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
-
             await conn.ExecuteAsync("DELETE FROM repositories WHERE id = @rid;", new { rid }, transaction: tx).ConfigureAwait(false);
             tx.Commit();
         }
-        catch
-        {
-            tx.Rollback();
-            throw;
-        }
 
-        // Reclaim space: SQLite file keeps free pages after DELETE, dashboard would still show 117MB.
-        // VACUUM (outside transaction) rewrites the DB file to minimal size.
-        try
+        // Reclaim space: SQLite keeps free pages after DELETE — VACUUM rewrites the file (SQLite only).
+        if (!SqlDialect.IsPostgres(_factory))
         {
-            using var vacConn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-            await vacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
-            await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
+            foreach (var open in new[] { () => _factory.CreateAsync(ct), () => _factory.CreateChunksAsync(ct), () => _factory.CreateVecAsync(ct) })
+            {
+                try
+                {
+                    using var vacConn = await open().ConfigureAwait(false);
+                    await vacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
+                    await vacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
+                }
+                catch { /* best-effort, dashboard will still show correct logical counts */ }
+            }
         }
-        catch { /* best-effort, dashboard will still show correct logical counts */ }
-        try
-        {
-            using var vecVacConn = await _factory.CreateVecAsync(ct).ConfigureAwait(false);
-            await vecVacConn.ExecuteAsync("PRAGMA wal_checkpoint(TRUNCATE);").ConfigureAwait(false);
-            await vecVacConn.ExecuteAsync("VACUUM;").ConfigureAwait(false);
-        }
-        catch { /* best-effort */ }
     }
 
     public async Task<string?> GetLocalPathAsync(Guid id, CancellationToken ct = default)
