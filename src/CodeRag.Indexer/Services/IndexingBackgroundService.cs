@@ -105,14 +105,17 @@ public sealed class IndexingBackgroundService : BackgroundService
             }
 
             // Запустить джобу без блокировки канала. Per-repo слот берётся внутри, чтобы
-            // не заслонять канал: джобы других репозиториев запускаются параллельно,
-            // а джобы одного репозитория строго по одной (git ref-lock race).
+            // не заслонять канал: джобы других репозиториев запускаются параллельно.
+            // Слот нужен только джобам, мутирующим git (clone/fetch — ref-lock race);
+            // Index/Embedding/Relations/Rebuild — читатели и идут параллельно в рамках репо.
+            var blocksRepo = _indexingService.IsRepoBlocking(job.Type);
             _ = Task.Run(async () =>
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, token);
                 try
                 {
-                    await _runner.EnterRepoAsync(job.RepositoryId, linked.Token).ConfigureAwait(false);
+                    if (blocksRepo)
+                        await _runner.EnterRepoAsync(job.RepositoryId, linked.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -140,7 +143,8 @@ public sealed class IndexingBackgroundService : BackgroundService
                 }
                 finally
                 {
-                    _runner.ExitRepo(job.RepositoryId);
+                    if (blocksRepo)
+                        _runner.ExitRepo(job.RepositoryId);
                     _runner.RemoveCts(job.Id);
                     _runner.Semaphore.Release();
                 }

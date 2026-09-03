@@ -12,6 +12,9 @@ internal sealed class EmbeddingJobHandler : IIndexingJobHandler
 {
     public JobType JobType => JobType.Embedding;
 
+    /// <summary>Чистый читатель (chunks → embeddings) — параллелен с Index/Relations в рамках репо.</summary>
+    public bool BlocksRepo => false;
+
     private readonly IRepositoryStore _repoStore;
     private readonly IChunkStore _chunkStore;
     private readonly IEmbeddingProviderFactory _embeddingsFactory;

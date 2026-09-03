@@ -15,6 +15,9 @@ internal sealed class RebuildJobHandler : IIndexingJobHandler
 {
     public JobType JobType => JobType.Rebuild;
 
+    /// <summary>Читает git и перезаписывает БД — git-лок не нужен, Relations/Embedding идут параллельно.</summary>
+    public bool BlocksRepo => false;
+
     private readonly IRepositoryStore _repoStore;
     private readonly IChunkStore _chunkStore;
     private readonly ISymbolStore _symbolStore;

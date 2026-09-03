@@ -15,12 +15,14 @@ internal sealed class IndexJobHandler : IIndexingJobHandler
 {
     public JobType JobType => JobType.Index;
 
+    /// <summary>Читает git (diff/show) и пишет в БД — git-лок не нужен, Relations/Embedding идут параллельно.</summary>
+    public bool BlocksRepo => false;
+
     private readonly IRepositoryStore _repoStore;
     private readonly IGitService _git;
     private readonly IJobRunner _jobRunner;
     private readonly JobProgressReporter _progress;
     private readonly FileIndexer _fileIndexer;
-    private readonly CSharpRelationService _relationService;
     private readonly IOptionsMonitor<IndexerOptions> _options;
     private readonly ILogger<IndexJobHandler> _logger;
 
@@ -30,7 +32,6 @@ internal sealed class IndexJobHandler : IIndexingJobHandler
         IJobRunner jobRunner,
         JobProgressReporter progress,
         FileIndexer fileIndexer,
-        CSharpRelationService relationService,
         IOptionsMonitor<IndexerOptions> options,
         ILogger<IndexJobHandler> logger)
     {
@@ -39,7 +40,6 @@ internal sealed class IndexJobHandler : IIndexingJobHandler
         _jobRunner = jobRunner;
         _progress = progress;
         _fileIndexer = fileIndexer;
-        _relationService = relationService;
         _options = options;
         _logger = logger;
     }
@@ -115,11 +115,12 @@ internal sealed class IndexJobHandler : IIndexingJobHandler
             _logger.LogInformation("Index job {JobId} enqueued Embedding job {EmbedJob} ({Count} new chunks)", job.Id, embeddingJob.Id, pendingChunks.Count);
         }
 
+        // C# relations — отдельная фоновая джоба: параллельно Embedding, не растягивает Index.
         if (csharpTouched == 1)
         {
-            await _progress.SetStatsAsync(job, job.Progress, total, total, "relations", null, ct).ConfigureAwait(false);
-            try { await _relationService.RebuildAsync(repo, to!, ct).ConfigureAwait(false); }
-            catch (Exception ex) { _logger.LogWarning(ex, "C# relation extraction failed for repo {Repo}; keeping existing relations", repo.Id); }
+            var relationsJob = IndexingJob.Create(Guid.NewGuid(), repo.Id, JobType.Relations, JobStatus.Queued, DateTimeOffset.UtcNow, to, to);
+            await _jobRunner.EnqueueAsync(relationsJob, ct).ConfigureAwait(false);
+            _logger.LogInformation("Index job {JobId} enqueued Relations job {RelJob}", job.Id, relationsJob.Id);
         }
 
         await IndexingHelper.CommitIndexedAsync(_repoStore, repo, to!, ct).ConfigureAwait(false);

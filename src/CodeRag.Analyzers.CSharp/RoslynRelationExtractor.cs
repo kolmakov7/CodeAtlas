@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using CodeRag.Analyzers.Abstractions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -13,6 +14,8 @@ namespace CodeRag.Analyzers.CSharp;
 /// References = любое семантическое обращение к символу (типы, поля, вызовы, объекты...)
 /// из декларации символа-источника. Error-символы (неразрешённые внешние типы) игнорируются.
 /// Возвращает только связи, чьи оба конца реально существуют в каталоге.
+/// Обработка типов параллельна по потокам (semantic model на дерево строится один раз);
+/// все состояние-на-запуске живут в Scope — экземпляр переиспользуемый и thread-safe.
 /// </summary>
 public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
 {
@@ -22,115 +25,159 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
 
     public string Language => SupportedLanguages.CSharp;
 
+    // --- Фильтр путей: что относится к C# (жизненный цикл файла — за этим экстрактором) ---
+
+    private const string Extension = ".cs";
+    private const string ScriptExtension = ".csx";
+
+    private static readonly HashSet<string> ExcludedDirs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "bin", "obj", ".git", "node_modules", ".vs", "packages", ".nuget", "dist", "build", ".idea", ".gradle"
+    };
+
+    public bool IsRelevantPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (Path.GetExtension(path) is not (Extension or ScriptExtension)) return false;
+        foreach (var part in path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            if (part.Length > 0 && ExcludedDirs.Contains(part)) return false;
+        return true;
+    }
+
     private static readonly Lazy<IReadOnlyList<MetadataReference>> BclRefsLazy = new(GetBclReferencesInternal, true);
     private static readonly SymbolDisplayFormat FqnFormat = SymbolDisplayFormat.FullyQualifiedFormat;
 
-    private IReadOnlyList<MetadataReference> Refs => BclRefsLazy.Value;
+    private static IReadOnlyList<MetadataReference> Refs => BclRefsLazy.Value;
 
-    private CSharpCompilation? _compilation;
-    private Dictionary<string, List<CatalogSymbol>> _byFqn = new(StringComparer.Ordinal);
-    private Dictionary<string, List<CatalogSymbol>> _byNormFqn = new(StringComparer.Ordinal);
-    private Dictionary<(string Type, string Name, int Arity), List<CatalogSymbol>> _byMethodKey = new(new KeyComparer());
+    // Первый запуск в процессе платит JIT-компиляцией байндера Roslyn (интерпретируемые
+    // name-lookup методы). Одноразовая синтетическая extraction прогревает горячий путь.
+    private static readonly Lazy<bool> BinderPrewarm = new(() => { PrewarmBinder(); return true; }, true);
 
-    public async Task<IReadOnlyList<Relation>> ExtractAsync(RelationExtractionContext context, CancellationToken ct = default)
+    public async Task<IReadOnlyList<Relation>> ExtractAsync(
+        RelationExtractionContext context,
+        CancellationToken ct = default,
+        IProgress<RelationExtractionProgress>? progress = null)
     {
+        _ = BinderPrewarm.Value;
+
         var files = context.Files.Where(f => !string.IsNullOrWhiteSpace(f.Content)).ToList();
         if (files.Count == 0) return Array.Empty<Relation>();
 
         var catalog = await _catalog.GetSymbolsAsync(context.RepositoryId, null, ct).ConfigureAwait(false);
-        BuildIndexes(catalog);
 
         var trees = files.Select(f => CSharpSyntaxTree.ParseText(f.Content, path: f.Path)).ToList();
-        _compilation = CSharpCompilation.Create(
-            "CodeRag_Relations_" + Guid.NewGuid().ToString("N"),
-            trees,
-            Refs,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                .WithAllowUnsafe(true)
-                .WithNullableContextOptions(NullableContextOptions.Enable)
-                .WithOverflowChecks(false));
 
-        var seen = new HashSet<Relation>();
-        var relations = new List<Relation>();
-        void AddRel(Guid from, Guid to, string type)
+        var scope = new Scope
         {
-            if (from == Guid.Empty || to == Guid.Empty || from == to) return;
-            var rel = new Relation(from, to, type);
-            if (seen.Add(rel)) relations.Add(rel);
+            Compilation = CSharpCompilation.Create(
+                "CodeRag_Relations_" + Guid.NewGuid().ToString("N"),
+                trees,
+                Refs,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+                    .WithAllowUnsafe(true)
+                    .WithNullableContextOptions(NullableContextOptions.Enable)
+                    .WithOverflowChecks(false))
+        };
+        BuildIndexes(scope, catalog);
+
+        // Работа по типам (мелкое зерно): каждое дерево обрабатывается своим semantic model (один bind на дерево).
+        var typesPerTree = new List<TypeDeclarationSyntax>[trees.Count];
+        var totalItems = 0;
+        for (var i = 0; i < trees.Count; i++)
+        {
+            typesPerTree[i] = trees[i].GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>().ToList();
+            totalItems += typesPerTree[i].Count;
         }
 
-        var visitedNs = new HashSet<INamespaceSymbol>();
-        void WalkNamespace(INamespaceSymbol ns)
-        {
-            if (!visitedNs.Add(ns)) return;
-            foreach (var m in ns.GetMembers())
-            {
-                if (m is INamedTypeSymbol t) ProcessType(t, AddRel);
-                else if (m is INamespaceSymbol sub && !visitedNs.Contains(sub)) WalkNamespace(sub);
-            }
-        }
+        var visitedTypes = new ConcurrentDictionary<INamedTypeSymbol, byte>(SymbolEqualityComparer.Default);
+        var treeDone = new int[trees.Count];
+        var filesDone = 0;
 
         try
         {
-            WalkNamespace(_compilation.GlobalNamespace);
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, trees.Count).SelectMany(i => typesPerTree[i].Select(n => (Tree: i, Node: n))),
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount), CancellationToken = ct },
+                async (item, _) =>
+                {
+                    // Bind дерева один раз (кэш в scope); GetDeclaredSymbol дёшево.
+                    var model = scope.GetModel(trees[item.Tree]);
+                    if (model.GetDeclaredSymbol(item.Node) is not INamedTypeSymbol type) return;
+                    if (!visitedTypes.TryAdd(type, 0)) return; // partial: обрабатываем один раз
+                    try
+                    {
+                        ProcessType(scope, type);
+                    }
+                    catch
+                    {
+                        // Один сломанный тип не роняет весь прогон — сохраняем извлечённое.
+                    }
+
+                    if (Interlocked.Increment(ref treeDone[item.Tree]) == typesPerTree[item.Tree].Count)
+                    {
+                        var done = Interlocked.Increment(ref filesDone);
+                        progress?.Report(new RelationExtractionProgress(trees.Count, done, files[item.Tree].Path));
+                    }
+                });
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             // Leave whatever was extracted; never fail the indexing pipeline.
         }
 
-        return relations;
+        return scope.Relations.Keys.ToList();
     }
 
-    private void ProcessType(INamedTypeSymbol t, Action<Guid, Guid, string> add)
+    private void ProcessType(Scope scope, INamedTypeSymbol t)
     {
-        var selfId = ResolveSymbol(t);
+        var selfId = ResolveSymbol(scope, t);
         if (selfId is not null)
         {
             // Inherits (base class)
             var baseType = t.BaseType;
             if (baseType is not null && !IsObject(baseType))
             {
-                var baseId = ResolveSymbol(baseType);
-                if (baseId is not null) add(selfId.Value, baseId.Value, RelationType.Inherits);
+                var baseId = ResolveSymbol(scope, baseType);
+                if (baseId is not null) scope.AddRel(selfId.Value, baseId.Value, RelationType.Inherits);
             }
 
             // Implements (declared interfaces)
             foreach (var iface in t.Interfaces)
             {
-                var ifaceId = ResolveSymbol(iface);
-                if (ifaceId is not null) add(selfId.Value, ifaceId.Value, RelationType.Implements);
+                var ifaceId = ResolveSymbol(scope, iface);
+                if (ifaceId is not null) scope.AddRel(selfId.Value, ifaceId.Value, RelationType.Implements);
             }
 
             // References from the type declaration itself (attributes, base/interface lists, type param defaults)
-            EmitTypeHeadReferences(selfId.Value, t, add);
+            EmitTypeHeadReferences(scope, selfId.Value, t);
 
             foreach (var member in t.GetMembers().Where(m => m.ContainingType == t && m.Locations.Any(l => l.IsInSource)))
             {
                 // Contains (type -> member)
-                var memberId = ResolveSymbol(member);
+                var memberId = ResolveSymbol(scope, member);
                 if (memberId is null) continue;
-                add(selfId.Value, memberId.Value, RelationType.Contains);
+                scope.AddRel(selfId.Value, memberId.Value, RelationType.Contains);
 
                 // DependsOn (type -> referenced user types from member declarations)
-                EmitDependsOn(selfId.Value, member, add);
+                EmitDependsOn(scope, selfId.Value, member);
 
                 // References (member -> every symbol referenced in its declaration: types, fields, calls, ...)
-                EmitReferences(memberId.Value, member, add);
+                EmitReferences(scope, memberId.Value, member);
             }
         }
 
         // Calls / Overrides for methods (resolved by the method's own FQN, even if the type id is absent).
         foreach (var method in t.GetMembers().Where(m => m is IMethodSymbol && m.ContainingType == t && m.Locations.Any(l => l.IsInSource)))
         {
-            var methodId = ResolveSymbol(method);
+            var methodId = ResolveSymbol(scope, method);
             if (methodId is null) continue;
-            EmitCalls(methodId.Value, (IMethodSymbol)method, add);
-            EmitOverride(methodId.Value, (IMethodSymbol)method, add);
+            EmitCalls(scope, methodId.Value, (IMethodSymbol)method);
+            EmitOverride(scope, methodId.Value, (IMethodSymbol)method);
         }
     }
 
-    private void EmitDependsOn(Guid selfId, ISymbol member, Action<Guid, Guid, string> add)
+    private void EmitDependsOn(Scope scope, Guid selfId, ISymbol member)
     {
         var types = new List<ISymbol?>();
         switch (member)
@@ -148,67 +195,81 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
             default:
                 return;
         }
-        foreach (var t in types) CollectTypeDependencies(t, selfId, add);
+        foreach (var t in types) CollectTypeDependencies(scope, t, selfId);
     }
 
-    private void CollectTypeDependencies(ISymbol? type, Guid selfId, Action<Guid, Guid, string> add)
+    private void CollectTypeDependencies(Scope scope, ISymbol? type, Guid selfId)
     {
         if (type is null) return;
-        if (type is IArrayTypeSymbol arr) { CollectTypeDependencies(arr.ElementType, selfId, add); return; }
-        if (type is IPointerTypeSymbol ptr) { CollectTypeDependencies(ptr.PointedAtType, selfId, add); return; }
+        if (type is IArrayTypeSymbol arr) { CollectTypeDependencies(scope, arr.ElementType, selfId); return; }
+        if (type is IPointerTypeSymbol ptr) { CollectTypeDependencies(scope, ptr.PointedAtType, selfId); return; }
         if (type is INamedTypeSymbol nts)
         {
-            var id = ResolveSymbol(nts);
-            if (id is not null && id.Value != selfId) add(selfId, id.Value, RelationType.DependsOn);
-            foreach (var ga in nts.TypeArguments) CollectTypeDependencies(ga, selfId, add);
+            var id = ResolveSymbol(scope, nts);
+            if (id is not null && id.Value != selfId) scope.AddRel(selfId, id.Value, RelationType.DependsOn);
+            foreach (var ga in nts.TypeArguments) CollectTypeDependencies(scope, ga, selfId);
         }
     }
 
-    private void EmitCalls(Guid methodId, IMethodSymbol method, Action<Guid, Guid, string> add)
+    private void EmitCalls(Scope scope, Guid methodId, IMethodSymbol method)
     {
-        if (_compilation is null) return;
         foreach (var declRef in method.DeclaringSyntaxReferences)
         {
             SyntaxNode node;
             try { node = declRef.GetSyntax(); }
             catch { continue; }
 
-            var model = _compilation.GetSemanticModel(node.SyntaxTree);
+            var model = scope.GetModel(node.SyntaxTree);
             foreach (var inv in node.DescendantNodes().OfType<InvocationExpressionSyntax>())
             {
                 var target = model.GetSymbolInfo(inv).Symbol as IMethodSymbol;
                 if (target is null) continue;
-                var targetId = ResolveSymbol(target);
-                if (targetId is not null) add(methodId, targetId.Value, RelationType.Calls);
+                var targetId = ResolveSymbol(scope, target);
+                if (targetId is not null) scope.AddRel(methodId, targetId.Value, RelationType.Calls);
             }
         }
     }
 
-    private void EmitOverride(Guid methodId, IMethodSymbol method, Action<Guid, Guid, string> add)
+    private void EmitOverride(Scope scope, Guid methodId, IMethodSymbol method)
     {
         if (!method.IsOverride) return;
         var overriden = method.OverriddenMethod;
         if (overriden is null) return;
-        var id = ResolveSymbol(overriden);
-        if (id is not null) add(methodId, id.Value, RelationType.Overrides);
+        var id = ResolveSymbol(scope, overriden);
+        if (id is not null) scope.AddRel(methodId, id.Value, RelationType.Overrides);
     }
 
     /// <summary>References (member -> referenced symbol) for every resolved semantic reference in the member's declaration.</summary>
-    private void EmitReferences(Guid selfId, ISymbol member, Action<Guid, Guid, string> add)
+    private void EmitReferences(Scope scope, Guid selfId, ISymbol member)
     {
         var decl = GetSourceSyntax(member);
         if (decl is null) return;
-        foreach (var node in decl.DescendantNodes())
+        WalkReferences(scope, selfId, decl);
+    }
+
+    /// <summary>
+    /// Ходит по поддереву декларации, не спускаясь во вложенные типы:
+    /// их связи извлекает собственный ProcessType (без этого тело вложенного класса
+    /// пересчитывалось бы для каждого внешнего члена).
+    /// </summary>
+    private void WalkReferences(Scope scope, Guid selfId, SyntaxNode node)
+    {
+        var sym = GetReferencedSymbol(scope, node);
+        if (sym is not null && !IsErrorSymbol(sym))
         {
-            var sym = GetReferencedSymbol(node);
-            if (sym is null || IsErrorSymbol(sym)) continue;
-            var id = ResolveSymbol(sym);
-            if (id is not null && id.Value != selfId) add(selfId, id.Value, RelationType.References);
+            var id = ResolveSymbol(scope, sym);
+            if (id is not null && id.Value != selfId) scope.AddRel(selfId, id.Value, RelationType.References);
+        }
+
+        foreach (var child in node.ChildNodes())
+        {
+            if (child is TypeDeclarationSyntax) continue;
+            WalkReferences(scope, selfId, child);
         }
     }
 
     /// <summary>References for the type declaration head: attributes, base/interface lists, type parameter constraints.</summary>
-    private void EmitTypeHeadReferences(Guid selfId, INamedTypeSymbol t, Action<Guid, Guid, string> add)
+    private void EmitTypeHeadReferences(Scope scope, Guid selfId, INamedTypeSymbol t)
     {
         var decl = GetSourceSyntax(t);
         if (decl is not TypeDeclarationSyntax tds) return;
@@ -220,10 +281,10 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         {
             foreach (var node in head.DescendantNodesAndSelf())
             {
-                var sym = GetReferencedSymbol(node);
+                var sym = GetReferencedSymbol(scope, node);
                 if (sym is null || IsErrorSymbol(sym)) continue;
-                var id = ResolveSymbol(sym);
-                if (id is not null && id.Value != selfId) add(selfId, id.Value, RelationType.References);
+                var id = ResolveSymbol(scope, sym);
+                if (id is not null && id.Value != selfId) scope.AddRel(selfId, id.Value, RelationType.References);
             }
         }
     }
@@ -242,10 +303,9 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         return null;
     }
 
-    private ISymbol? GetReferencedSymbol(SyntaxNode node)
+    private static ISymbol? GetReferencedSymbol(Scope scope, SyntaxNode node)
     {
-        if (_compilation is null) return null;
-        var model = _compilation.GetSemanticModel(node.SyntaxTree);
+        var model = scope.GetModel(node.SyntaxTree);
         switch (node)
         {
             case IdentifierNameSyntax:
@@ -268,18 +328,125 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         }
     }
 
+    private static void PrewarmBinder()
+    {
+        try
+        {
+            var tree = CSharpSyntaxTree.ParseText(PrewarmSource);
+            var compilation = CSharpCompilation.Create(
+                "CodeRag_Prewarm",
+                new[] { tree },
+                Refs,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+            var model = compilation.GetSemanticModel(tree);
+            // Две прогонки по тем же узлам/вызовам, что и основная extraction,
+            // чтобы горячие методы байндера прошли порог JIT-промоушена.
+            for (var pass = 0; pass < 2; pass++)
+            {
+                foreach (var node in tree.GetRoot().DescendantNodes())
+                    GetReferencedSymbol(new Scope { Compilation = compilation }, node);
+            }
+        }
+        catch { /* prewarm is best-effort */ }
+    }
+
+    private const string PrewarmSource = """
+        using System;
+        using System.Collections.Generic;
+        using System.Threading.Tasks;
+
+        namespace Prewarm
+        {
+            public interface IHandler<in T>
+            {
+                Task HandleAsync(T item, CancellationToken ct);
+            }
+
+            public record ItemDto(Guid Id, string Name, DateTimeOffset CreatedAtUtc);
+
+            public class BaseService
+            {
+                protected Guid SelfId { get; set; }
+                protected Dictionary<string, object> Cache { get; } = new();
+
+                public virtual Guid Resolve(Guid? id) => id ?? Guid.NewGuid();
+                public virtual async Task<string> RunAsync(ItemDto item)
+                {
+                    var key = $"id:{item.Id}";
+                    if (Cache.TryGetValue(key, out var cached) && cached is string s) return s;
+                    var result = FormatName(item.Name, item.CreatedAtUtc);
+                    Cache[key] = result;
+                    await Task.CompletedTask;
+                    return result;
+                }
+
+                private static string FormatName(string name, DateTimeOffset at)
+                    => name.Length > 32 ? name[..32] : name;
+            }
+
+            [Serializable]
+            public class ItemService : BaseService, IHandler<ItemDto>
+            {
+                private readonly Func<Guid, ItemDto> _lookup;
+
+                public ItemService(Func<Guid, ItemDto> lookup)
+                {
+                    _lookup = lookup;
+                    SelfId = Guid.NewGuid();
+                }
+
+                public override Guid Resolve(Guid? id) => id ?? SelfId;
+
+                public override async Task<string> RunAsync(ItemDto item)
+                {
+                    var found = _lookup(item.Id);
+                    var list = new List<ItemDto> { found, item };
+                    var first = list.FirstOrDefault(x => x.Id == item.Id);
+                    return await base.RunAsync(first ?? item);
+                }
+
+                public async Task<int> CountAsync(IEnumerable<ItemDto> items)
+                {
+                    var count = 0;
+                    foreach (var i in items)
+                    {
+                        if (i.Name.Length > 0) count++;
+                        if (i.CreatedAtUtc < DateTimeOffset.UtcNow) _ = Resolve(i.Id);
+                    }
+                    return count;
+                }
+            }
+
+            public static class Program
+            {
+                public static async Task Main()
+                {
+                    var service = new ItemService(id => new ItemDto(id, "sample", DateTimeOffset.UtcNow));
+                    await service.RunAsync(new ItemDto(Guid.NewGuid(), "x", DateTimeOffset.UtcNow));
+                    _ = service.Resolve(null);
+                }
+            }
+        }
+        """;
+
     /// <summary>Error symbols (unresolved types) render as bare names and must never resolve to catalog symbols.</summary>
     private static bool IsErrorSymbol(ISymbol? s)
         => s is not null && s.GetType().Name == "ErrorTypeSymbol";
 
-    private Guid? ResolveSymbol(ISymbol s)
+    private Guid? ResolveSymbol(Scope scope, ISymbol s)
     {
         if (s is null || IsErrorSymbol(s)) return null;
-        if (s is IMethodSymbol m) return ResolveMethod(m);
-        if (s is INamedTypeSymbol nt) return ResolveFqn(nt.ToDisplayString(FqnFormat));
+        // Кэш на исполнение: горячие символы (string, Guid, частые DTO) разыгрываются один раз.
+        return scope.SymbolIds.GetOrAdd(s, sym => ResolveSymbolCore(scope, sym));
+    }
+
+    private static Guid? ResolveSymbolCore(Scope scope, ISymbol s)
+    {
+        if (s is IMethodSymbol m) return ResolveMethod(scope, m);
+        if (s is INamedTypeSymbol nt) return ResolveFqn(scope, nt.ToDisplayString(FqnFormat));
         if (s is IPropertySymbol or IFieldSymbol or IEventSymbol)
-            return ResolveFqn(MemberFqn(s));
-        return ResolveFqn(s.ToDisplayString(FqnFormat));
+            return ResolveFqn(scope, MemberFqn(s));
+        return ResolveFqn(scope, s.ToDisplayString(FqnFormat));
     }
 
     /// <summary>FQN for member symbols: `ContainingTypeFQN.MemberName` (member symbols render as bare names under FullyQualifiedFormat).</summary>
@@ -294,25 +461,25 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         return member.ToDisplayString(FqnFormat);
     }
 
-    private Guid? ResolveMethod(IMethodSymbol m)
+    private static Guid? ResolveMethod(Scope scope, IMethodSymbol m)
     {
         var fqn = MethodFqn(m);
-        var byFqn = ResolveFqn(fqn);
+        var byFqn = ResolveFqn(scope, fqn);
         if (byFqn is not null) return byFqn;
 
         var ctFqn = m.ContainingType?.ToDisplayString(FqnFormat);
         if (string.IsNullOrWhiteSpace(ctFqn)) return null;
         var key = (Normalize(ctFqn), m.Name, m.Parameters.Length);
-        if (_byMethodKey.TryGetValue(key, out var list) && list.Count == 1) return list[0].Id;
+        if (scope.ByMethodKey.TryGetValue(key, out var list) && list.Count == 1) return list[0].Id;
         return null;
     }
 
-    private Guid? ResolveFqn(string? fqn)
+    private static Guid? ResolveFqn(Scope scope, string? fqn)
     {
         if (string.IsNullOrWhiteSpace(fqn)) return null;
-        if (_byFqn.TryGetValue(fqn, out var l1) && l1.Count == 1) return l1[0].Id;
+        if (scope.ByFqn.TryGetValue(fqn, out var l1) && l1.Count == 1) return l1[0].Id;
         var nk = Normalize(fqn);
-        if (_byNormFqn.TryGetValue(nk, out var l2) && l2.Count == 1) return l2[0].Id;
+        if (scope.ByNormFqn.TryGetValue(nk, out var l2) && l2.Count == 1) return l2[0].Id;
         return null;
     }
 
@@ -325,19 +492,15 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
             : $"{containingTypeFqn}.{m.Name}({paramList})";
     }
 
-    private void BuildIndexes(IReadOnlyList<CatalogSymbol> catalog)
+    private static void BuildIndexes(Scope scope, IReadOnlyList<CatalogSymbol> catalog)
     {
-        _byFqn = new Dictionary<string, List<CatalogSymbol>>(StringComparer.Ordinal);
-        _byNormFqn = new Dictionary<string, List<CatalogSymbol>>(StringComparer.Ordinal);
-        _byMethodKey = new Dictionary<(string, string, int), List<CatalogSymbol>>(new KeyComparer());
-
         foreach (var c in catalog)
         {
             if (string.IsNullOrWhiteSpace(c.Fqn)) continue;
-            AddList(_byFqn, c.Fqn, c);
-            AddList(_byNormFqn, Normalize(c.Fqn), c);
+            AddList(scope.ByFqn, c.Fqn, c);
+            AddList(scope.ByNormFqn, Normalize(c.Fqn), c);
             var mk = ParseMethodKey(c.Fqn);
-            if (mk is not null) AddList(_byMethodKey, mk.Value, c);
+            if (mk is not null) AddList(scope.ByMethodKey, mk.Value, c);
         }
     }
 
@@ -392,6 +555,26 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
             => a.Type == b.Type && a.Name == b.Name && a.Arity == b.Arity;
         public int GetHashCode((string Type, string Name, int Arity) obj)
             => HashCode.Combine(obj.Type, obj.Name, obj.Arity);
+    }
+
+    /// <summary>Состояние одного прогона (экстрактор — синглтон в DI, параллельные прогоны не должны видеться).</summary>
+    private sealed class Scope
+    {
+        public CSharpCompilation Compilation { get; init; } = null!;
+        public ConcurrentDictionary<SyntaxTree, SemanticModel> Models { get; } = new();
+        public ConcurrentDictionary<ISymbol, Guid?> SymbolIds { get; } = new(SymbolEqualityComparer.Default);
+        public Dictionary<string, List<CatalogSymbol>> ByFqn { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, List<CatalogSymbol>> ByNormFqn { get; } = new(StringComparer.Ordinal);
+        public Dictionary<(string Type, string Name, int Arity), List<CatalogSymbol>> ByMethodKey { get; } = new(new KeyComparer());
+        public ConcurrentDictionary<Relation, byte> Relations { get; } = new();
+
+        public SemanticModel GetModel(SyntaxTree tree) => Models.GetOrAdd(tree, t => Compilation.GetSemanticModel(t));
+
+        public void AddRel(Guid from, Guid to, string type)
+        {
+            if (from == Guid.Empty || to == Guid.Empty || from == to) return;
+            Relations.TryAdd(new Relation(from, to, type), 0);
+        }
     }
 
     private static IReadOnlyList<MetadataReference> GetBclReferencesInternal()

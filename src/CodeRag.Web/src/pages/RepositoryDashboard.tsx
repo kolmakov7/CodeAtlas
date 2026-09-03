@@ -185,6 +185,7 @@ export default function RepositoryDashboard() {
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
             <button onClick={() => actions.sync.mutate(repo.id)} disabled={busy || actions.sync.isPending}>Sync</button>
             <button onClick={() => actions.reindex.mutate(repo.id)} disabled={busy || actions.reindex.isPending}>Re-index</button>
+            <button onClick={() => actions.relations.mutate(repo.id)} disabled={busy || actions.relations.isPending}>Relations</button>
             {repo.status !== "Paused" ? (
               <button onClick={() => actions.pause.mutate(repo.id)} disabled={actions.pause.isPending}>Pause</button>
             ) : (

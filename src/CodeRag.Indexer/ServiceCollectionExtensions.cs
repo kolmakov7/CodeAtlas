@@ -27,7 +27,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<JobProgressReporter>();
         services.AddSingleton<GitCredentialResolver>();
         services.AddSingleton<FileIndexer>();
-        services.AddSingleton<CSharpRelationService>();
+        services.AddSingleton<RepositoryRelationService>();
         services.AddSingleton<EmbeddingService>();
 
         // Handlers — Strategy per JobType (OCP: новый тип = новый класс)
@@ -37,6 +37,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IIndexingJobHandler>(sp => sp.GetRequiredService<IndexJobHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, EmbeddingJobHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, RebuildJobHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, RelationsJobHandler>());
 
         // Dispatcher (тонкий, делегирует в handlers)
         services.AddSingleton<IndexingService>();

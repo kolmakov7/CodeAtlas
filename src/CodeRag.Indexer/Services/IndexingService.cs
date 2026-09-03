@@ -29,6 +29,10 @@ public sealed class IndexingService
         _statsRefresher = statsRefresher;
     }
 
+    /// <summary>Нужен ли per-repo лок для джобы типа <paramref name="type"/> (см. <see cref="Handlers.IIndexingJobHandler.BlocksRepo"/>).</summary>
+    public bool IsRepoBlocking(Domain.Enums.JobType type)
+        => _handlers.TryGetValue(type, out var h) && h.BlocksRepo;
+
     public async Task ExecuteAsync(IndexingJob job, CancellationToken ct)
     {
         _logger.LogInformation("Executing job {JobId} type={Type} repo={Repo}", job.Id, job.Type, job.RepositoryId);

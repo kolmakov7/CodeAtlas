@@ -297,6 +297,23 @@ public sealed class RepositoriesController : ControllerBase
         return Accepted(new { jobId = job.Id });
     }
 
+    [HttpPost("{id:guid}/relations")]
+    public async Task<IActionResult> Relations(Guid id, CancellationToken ct)
+    {
+        var repo = await _repoStore.GetByIdAsync(id, ct).ConfigureAwait(false);
+        if (repo is null) return Problem(title: $"Repository {id} not found", statusCode: 404);
+        if (repo.Status == RepositoryStatus.Paused) return Problem(title: "Repository is paused", statusCode: 409);
+
+        var commit = repo.IndexedCommit;
+        if (string.IsNullOrWhiteSpace(commit))
+            return Problem(title: "Repository has no indexed commit yet", statusCode: 422);
+
+        _logger.LogInformation("POST /api/repositories/{Id}/relations commit={Commit}", id, commit);
+        var job = IndexingJob.Create(Guid.NewGuid(), id, JobType.Relations, JobStatus.Queued, DateTimeOffset.UtcNow, commit, commit);
+        await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
+        return Accepted(new { jobId = job.Id });
+    }
+
     [HttpPost("rebuild-all")]
     public async Task<IActionResult> RebuildAll(CancellationToken ct)
     {

@@ -11,4 +11,11 @@ public interface IIndexingJobHandler
 {
     JobType JobType { get; }
     Task ExecuteAsync(IndexingJob job, CancellationToken ct);
+
+    /// <summary>
+    /// Нужно ли удерживать per-repo лок на время выполнения (строго одна джоба репозитория).
+    /// True только для джоб, мутирующих git-репозиторий (clone/fetch — ref-lock race).
+    /// Чистые читатели/DB-джобы (Index/Embedding/Relations/Rebuild) идут параллельно в рамках репо.
+    /// </summary>
+    bool BlocksRepo => true;
 }
