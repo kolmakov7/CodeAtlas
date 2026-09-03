@@ -215,7 +215,16 @@ internal sealed class FileIndexer
             }
             await PersistChunksAsync(allChunks, repo.Id, filePath, pendingChunks, ct).ConfigureAwait(false);
 
-            if (language != SupportedLanguages.CSharp && result.Relations.Count > 0)
+            var wholeRepoLanguages = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                SupportedLanguages.CSharp,
+                SupportedLanguages.Python,
+                SupportedLanguages.JavaScript,
+                SupportedLanguages.Go,
+                SupportedLanguages.Cpp,
+                SupportedLanguages.Sql
+            };
+            if (!wholeRepoLanguages.Contains(language ?? "") && result.Relations.Count > 0)
             {
                 var domainRelations = result.Relations.Select(ToDomainRelation).Where(r => r is not null)!.ToList();
                 if (domainRelations.Count > 0)

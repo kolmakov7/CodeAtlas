@@ -27,6 +27,11 @@ public static class AnalyzerServiceCollectionExtensions
 
         // Relation extractors (whole-repo, per language). C# uses Roslyn.
         services.AddSingleton<IRepositoryRelationExtractor, RoslynRelationExtractor>();
+        services.AddSingleton<IRepositoryRelationExtractor, TreeSitter.Relations.PythonRelationExtractor>();
+        services.AddSingleton<IRepositoryRelationExtractor, TreeSitter.Relations.JavaScriptRelationExtractor>();
+        services.AddSingleton<IRepositoryRelationExtractor, TreeSitter.Relations.GoRelationExtractor>();
+        services.AddSingleton<IRepositoryRelationExtractor, TreeSitter.Relations.CppRelationExtractor>();
+        services.AddSingleton<IRepositoryRelationExtractor, Sql.SqlRelationExtractor>();
         return services;
     }
 
