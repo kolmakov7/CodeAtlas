@@ -6,8 +6,8 @@ using TreeSitter;
 namespace CodeRag.Analyzers.TreeSitter;
 
 /// <summary>
-/// Polyglot Tree-sitter анализатор для Python / JavaScript / Go / C++ / TypeScript / HTML (§15).
-/// Использует TreeSitter.DotNet Language("Python"/"JavaScript"/"Go"/"C++"/"TypeScript"),
+/// Polyglot Tree-sitter анализатор для Python / JavaScript / Go / C++ / C / Java / Rust / Ruby / PHP / Bash / JSON / HTML (§15).
+/// Использует TreeSitter.DotNet Language("Python"/"JavaScript"/"Go"/"C++"/"C"/"Java"/"Rust"/"Ruby"/"PHP"/"Bash"/"JSON"/"TypeScript"),
 /// Parser.Parse, Query.Execute captures, символы function/class/method/call/import, FQN via stack, depth medium.
 /// </summary>
 public sealed class TreeSitterAnalyzer : ICodeAnalyzer
@@ -19,7 +19,14 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         [".ts"] = "TypeScript",
         [".tsx"] = "TSX",
         [".go"] = "Go",
-        [".cpp"] = "C++", [".cc"] = "C++", [".cxx"] = "C++", [".c"] = "C++", [".h"] = "C++", [".hpp"] = "C++", [".hh"] = "C++", [".hxx"] = "C++",
+        [".c"] = "C", [".h"] = "C",
+        [".cpp"] = "C++", [".cc"] = "C++", [".cxx"] = "C++", [".hpp"] = "C++", [".hh"] = "C++", [".hxx"] = "C++",
+        [".java"] = "Java",
+        [".rs"] = "Rust",
+        [".rb"] = "Ruby", [".rake"] = "Ruby", [".gemspec"] = "Ruby",
+        [".php"] = "PHP", [".phtml"] = "PHP", [".php3"] = "PHP", [".php4"] = "PHP", [".php5"] = "PHP",
+        [".sh"] = "Bash", [".bash"] = "Bash", [".zsh"] = "Bash",
+        [".json"] = "JSON", [".jsonc"] = "JSON",
         [".html"] = "HTML", [".htm"] = "HTML",
         [".css"] = "CSS",
         [".xml"] = "Xml", [".xsl"] = "Xml", [".xslt"] = "Xml",
@@ -32,6 +39,13 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["go"] = "Go",
         ["cpp"] = "C++",
         ["c++"] = "C++",
+        ["c"] = "C",
+        ["java"] = "Java",
+        ["rust"] = "Rust",
+        ["ruby"] = "Ruby",
+        ["php"] = "PHP",
+        ["bash"] = "Bash",
+        ["json"] = "JSON",
         ["html"] = "HTML",
         ["css"] = "CSS",
         ["xml"] = "Xml",
@@ -45,7 +59,14 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["tsx"] = SupportedLanguages.JavaScript,
         ["go"] = SupportedLanguages.Go,
         ["c++"] = SupportedLanguages.Cpp,
+        ["c"] = SupportedLanguages.C,
         ["cpp"] = SupportedLanguages.Cpp,
+        ["java"] = SupportedLanguages.Java,
+        ["rust"] = SupportedLanguages.Rust,
+        ["ruby"] = SupportedLanguages.Ruby,
+        ["php"] = SupportedLanguages.Php,
+        ["bash"] = SupportedLanguages.Bash,
+        ["json"] = SupportedLanguages.Json,
         ["html"] = SupportedLanguages.Html,
         ["css"] = SupportedLanguages.Css,
         ["xml"] = SupportedLanguages.Xml,
@@ -54,6 +75,13 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
     private static readonly Dictionary<string, string[]> LanguageLoadFallbacks = new(StringComparer.Ordinal)
     {
         ["C++"] = new[] { "Cpp", "cpp", "c++" },
+        ["C"] = new[] { "c", "C" },
+        ["Java"] = new[] { "java", "JAVA" },
+        ["Rust"] = new[] { "rust", "RUST" },
+        ["Ruby"] = new[] { "ruby", "RUBY" },
+        ["PHP"] = new[] { "php", "Php", "PHP" },
+        ["Bash"] = new[] { "bash", "BASH", "sh" },
+        ["JSON"] = new[] { "json", "JSON", "Json" },
         ["TypeScript"] = new[] { "Typescript", "typescript", "TSX", "tsx" },
         ["TSX"] = new[] { "TypeScript", "typescript" },
         ["JavaScript"] = new[] { "Javascript", "javascript", "JS" },
@@ -64,11 +92,27 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["class_definition"] = HandleClassLike,
         ["class_declaration"] = HandleClassLike,
         ["class_specifier"] = HandleClassLike,
+        ["struct_specifier"] = HandleClassLike,
         ["type_declaration"] = HandleClassLike,
+        ["interface_declaration"] = HandleClassLike,
+        ["enum_declaration"] = HandleClassLike,
+        ["record_declaration"] = HandleClassLike,
+        ["annotation_type_declaration"] = HandleClassLike,
+        ["struct_item"] = HandleClassLike,
+        ["enum_item"] = HandleClassLike,
+        ["impl_item"] = HandleClassLike,
+        ["trait_item"] = HandleClassLike,
+        ["mod_item"] = HandleClassLike,
+        ["class"] = HandleClassLike,
+        ["module"] = HandleClassLike,
         ["function_definition"] = HandleFunctionDefinition,
         ["function_declaration"] = HandleFunctionDeclaration,
+        ["function_item"] = HandleFunctionItem,
         ["method_declaration"] = HandleMethod,
         ["method_definition"] = HandleMethod,
+        ["method"] = HandleMethod,
+        ["singleton_method"] = HandleMethod,
+        ["constructor_declaration"] = HandleMethod,
         ["arrow_function"] = HandleArrowFunction,
         ["function_expression"] = HandleFunctionExpression,
         ["call"] = HandleCall,
@@ -83,6 +127,8 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         ["rule_set"] = HandleCssRule,
         ["media_statement"] = HandleCssRule,
         ["keyframes_statement"] = HandleCssRule,
+        ["object"] = HandleJson,
+        ["pair"] = HandleJsonPair,
     };
 
     private readonly IChunkFactory _factory;
@@ -354,7 +400,9 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
             // Чанк на function/class/method/section: источник собирается после обхода всего дерева,
             // чтобы исключить из него диапазоны вложенных семантических чанков
-            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section or SymbolKind.Rule or SymbolKind.Element)
+            // Namespace не чанк (как в research: root containers не чанки), Module (Rust mod, Ruby module) — чанк
+            if (kind is SymbolKind.Class or SymbolKind.Function or SymbolKind.Method or SymbolKind.Section or SymbolKind.Rule or SymbolKind.Element
+                or SymbolKind.Module or SymbolKind.Constructor or SymbolKind.Interface)
                 candidates.Add(new ChunkCandidate(node, symbol, startLine, endLine));
 
             created = symbol;
@@ -454,6 +502,29 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
             var deep = FindIdentifierDeep(node);
             if (!string.IsNullOrWhiteSpace(deep)) return deep;
         }
+        // PHP: name type is "name" (not identifier); Ruby: "constant"
+        if (treeLang is "PHP")
+        {
+            foreach (var child in node.Children)
+                if (child.Type is "name" or "identifier") return child.Text.Trim();
+            foreach (var child in node.Children)
+                foreach (var grand in child.Children)
+                    if (grand.Type is "name" or "identifier") return grand.Text.Trim();
+        }
+        // Ruby: class/module name is "constant" (e.g. MyClass), not identifier; Bash: function name is "word"
+        if (treeLang is "Ruby")
+        {
+            foreach (var child in node.Children)
+                if (child.Type is "constant" or "identifier" or "method_name") return child.Text.Trim();
+            foreach (var child in node.Children)
+                foreach (var grand in child.Children)
+                    if (grand.Type is "constant" or "identifier" or "method_name") return grand.Text.Trim();
+        }
+        if (treeLang is "Bash")
+        {
+            foreach (var child in node.Children)
+                if (child.Type is "word" or "identifier" or "variable_name") return child.Text.Trim().Trim('"').Trim('\'');
+        }
         // Общий поиск: ищем identifier содержащие "identifier"
         foreach (var child in node.Children)
         {
@@ -509,7 +580,7 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
     private static string? FindIdentifierDeep(Node node)
     {
-        if (node.Type.Contains("identifier")) return node.Text.Trim();
+        if (node.Type.Contains("identifier") || node.Type is "constant" or "word" or "method_name" or "name") return node.Text.Trim();
         foreach (var child in node.Children)
         {
             var res = FindIdentifierDeep(child);
@@ -545,24 +616,35 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
     {
         // Go: type MyStruct struct { ... } — считаем как Class
         if (node.Type == "type_declaration" && c.TreeLang != "Go") return;
+        // Ruby/PHP/Java specific dispatch but all map to Class
+        if (node.Type is "class" or "module" && c.TreeLang != "Ruby") return;
+        // Rust/PHP/Java handled generically
         c.Kind = SymbolKind.Class;
+        // Rust mod_item is a module — map to Module kind for clarity
+        if (node.Type == "mod_item" && c.TreeLang == "Rust")
+            c.Kind = SymbolKind.Module;
+        else if (node.Type == "module" && c.TreeLang == "Ruby")
+            c.Kind = SymbolKind.Module;
         c.Name = ExtractName(node, c.TreeLang);
         // Go type_declaration содержит type_spec с identifier; если имя пустое — пропустим
-        if (c.Kind == SymbolKind.Class && node.Type == "type_declaration")
+        if (c.Kind is SymbolKind.Class or SymbolKind.Module && node.Type == "type_declaration")
         {
             c.Name = ExtractName(node) ?? c.Name;
             if (string.IsNullOrWhiteSpace(c.Name)) c.Kind = null;
         }
+        if (string.IsNullOrWhiteSpace(c.Name)) c.Kind = null;
     }
 
     private static void HandleFunctionDefinition(Node node, NodeHandlerContext c)
     {
-        if (c.TreeLang == "C++" || c.TreeLang == "Python")
+        // Python / C / C++ / PHP / Bash all use function_definition
+        if (c.TreeLang is "C++" or "Python" or "C" or "PHP" or "Bash")
         {
             c.Kind = SymbolKind.Function;
-            if (c.Stack.Count > 0 && c.Stack.Peek().Kind == SymbolKind.Class)
+            if (c.Stack.Count > 0 && c.Stack.Peek().Kind is SymbolKind.Class or SymbolKind.Module)
                 c.Kind = SymbolKind.Method;
             c.Name = ExtractName(node, c.TreeLang);
+            if (string.IsNullOrWhiteSpace(c.Name)) c.Kind = null;
         }
     }
 
@@ -572,10 +654,26 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
         c.Name = ExtractName(node, c.TreeLang);
     }
 
+    private static void HandleFunctionItem(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang != "Rust") return;
+        c.Kind = SymbolKind.Function;
+        if (c.Stack.Count > 0 && c.Stack.Peek().Kind is SymbolKind.Class or SymbolKind.Module)
+            c.Kind = SymbolKind.Method;
+        c.Name = ExtractName(node, c.TreeLang);
+        if (string.IsNullOrWhiteSpace(c.Name)) c.Kind = null;
+    }
+
     private static void HandleMethod(Node node, NodeHandlerContext c)
     {
+        // Java constructor_declaration, Go/C++ method_declaration, Ruby method/singleton_method, Rust handled via function_item above
+        if (c.TreeLang == "Rust" && node.Type != "function_item") { /* Rust methods are function_item inside impl, not method_declaration */ }
         c.Kind = SymbolKind.Method;
+        // Java constructors: map to Constructor kind when name matches enclosing class
+        if (c.TreeLang == "Java" && node.Type == "constructor_declaration")
+            c.Kind = SymbolKind.Constructor;
         c.Name = ExtractName(node, c.TreeLang);
+        if (string.IsNullOrWhiteSpace(c.Name)) c.Kind = null;
     }
 
     private static void HandleArrowFunction(Node node, NodeHandlerContext c)
@@ -693,6 +791,59 @@ public sealed class TreeSitterAnalyzer : ICodeAnalyzer
 
         c.Kind = SymbolKind.Rule;
         c.Name = name;
+    }
+
+    /// <summary>
+    /// JSON container objects: chunk = object containing ≥1 nested object/array (container rule анал. XML).
+    /// Name = key of enclosing pair if nested, else "json" for top-level.
+    /// </summary>
+    private static void HandleJson(Node node, NodeHandlerContext c)
+    {
+        if (c.TreeLang != "JSON") return;
+        if (node.Type != "object") return;
+        // object is chunk iff it contains a pair whose value is object or array (container)
+        bool isContainer = false;
+        foreach (var pair in node.Children.Where(ch => ch.Type == "pair"))
+        {
+            var value = pair.Children.FirstOrDefault(ch => ch.Type == "value");
+            if (value == null) value = pair.Children.FirstOrDefault(ch => ch.Type is "object" or "array");
+            if (value != null)
+            {
+                // value node may contain object/array child
+                if (value.Children.Any(ch => ch.Type is "object" or "array")) { isContainer = true; break; }
+                if (value.Type is "object" or "array") { isContainer = true; break; }
+            }
+        }
+        // также считаем top-level object как чанк если он содержит любой pair (иначе fallback)
+        // Для удобства: top-level document>object без родителя pair — считаем контейнером если >1 pair
+        if (!isContainer)
+        {
+            var pairCount = node.Children.Count(ch => ch.Type == "pair");
+            if (pairCount >= 2 && node.Parent?.Type == "document") isContainer = true;
+        }
+        if (!isContainer) return;
+        c.Kind = SymbolKind.Section;
+        var parentPair = node.Parent;
+        if (parentPair != null && parentPair.Type == "pair")
+        {
+            var keyNode = parentPair.Children.FirstOrDefault(ch => ch.Type == "string");
+            if (keyNode != null)
+            {
+                var key = keyNode.Text.Trim().Trim('"').Trim('\'');
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    c.Name = key.Length > 100 ? key[..100] : key;
+                    return;
+                }
+            }
+        }
+        c.Name = "json";
+    }
+
+    private static void HandleJsonPair(Node node, NodeHandlerContext c)
+    {
+        // Pair itself is never a chunk — only its object value is.
+        return;
     }
 
     private static string? GetIdFromStartTag(Node startTag)

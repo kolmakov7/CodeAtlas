@@ -25,15 +25,36 @@ public static class LanguageDetector
         [".vb"] = SupportedLanguages.Vbs,
         [".vba"] = SupportedLanguages.Vbs,
         [".bas"] = SupportedLanguages.Vbs,
-        // C++
+        // C / C++
+        [".c"] = SupportedLanguages.C,
+        [".h"] = SupportedLanguages.C,
         [".cpp"] = SupportedLanguages.Cpp,
         [".cc"] = SupportedLanguages.Cpp,
         [".cxx"] = SupportedLanguages.Cpp,
-        [".c"] = SupportedLanguages.Cpp,
-        [".h"] = SupportedLanguages.Cpp,
         [".hpp"] = SupportedLanguages.Cpp,
         [".hh"] = SupportedLanguages.Cpp,
         [".hxx"] = SupportedLanguages.Cpp,
+        // Java
+        [".java"] = SupportedLanguages.Java,
+        // Rust
+        [".rs"] = SupportedLanguages.Rust,
+        // Ruby
+        [".rb"] = SupportedLanguages.Ruby,
+        [".rake"] = SupportedLanguages.Ruby,
+        [".gemspec"] = SupportedLanguages.Ruby,
+        // PHP
+        [".php"] = SupportedLanguages.Php,
+        [".phtml"] = SupportedLanguages.Php,
+        [".php3"] = SupportedLanguages.Php,
+        [".php4"] = SupportedLanguages.Php,
+        [".php5"] = SupportedLanguages.Php,
+        // Bash
+        [".sh"] = SupportedLanguages.Bash,
+        [".bash"] = SupportedLanguages.Bash,
+        [".zsh"] = SupportedLanguages.Bash,
+        // JSON
+        [".json"] = SupportedLanguages.Json,
+        [".jsonc"] = SupportedLanguages.Json,
         // JavaScript / TypeScript (TS маппится в javascript для MVP, §13)
         [".js"] = SupportedLanguages.JavaScript,
         [".mjs"] = SupportedLanguages.JavaScript,
@@ -73,6 +94,9 @@ public static class LanguageDetector
         if (lower.Contains("python")) return SupportedLanguages.Python;
         if (lower.Contains("node") || lower.Contains("js")) return SupportedLanguages.JavaScript;
         if (lower.Contains("go")) return SupportedLanguages.Go;
+        if (lower.Contains("bash") || lower.Contains("sh")) return SupportedLanguages.Bash;
+        if (lower.Contains("ruby")) return SupportedLanguages.Ruby;
+        if (lower.Contains("php")) return SupportedLanguages.Php;
         return null;
     }
 

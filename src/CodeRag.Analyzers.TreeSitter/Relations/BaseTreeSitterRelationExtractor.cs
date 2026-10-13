@@ -43,14 +43,14 @@ public abstract class BaseTreeSitterRelationExtractor : IRepositoryRelationExtra
         var index = new TreeSitterRelationHelpers.CatalogIndex(catalog);
         var scope = new Scope();
 
-        // Загружаем Language инстансы per TreeSitterName (кеш на extractor)
-        var langCache = new Dictionary<string, Language>(StringComparer.Ordinal);
+        // Загружаем Language инстансы per TreeSitterName (кеш на extractor) — потокобезопасно для Parallel.ForEachAsync
+        var langCache = new ConcurrentDictionary<string, Language>(StringComparer.Ordinal);
 
         Language? GetOrLoad(string name)
         {
             if (langCache.TryGetValue(name, out var l)) return l;
             var loaded = TreeSitterRelationHelpers.TryLoadLanguage(name);
-            if (loaded != null) langCache[name] = loaded;
+            if (loaded != null) langCache.TryAdd(name, loaded);
             return loaded;
         }
 
@@ -91,6 +91,7 @@ public abstract class BaseTreeSitterRelationExtractor : IRepositoryRelationExtra
 
         // Освобождаем Language инстансы
         foreach (var l in langCache.Values) try { l.Dispose(); } catch { }
+        langCache.Clear();
 
         return scope.Relations.Keys.ToList();
     }

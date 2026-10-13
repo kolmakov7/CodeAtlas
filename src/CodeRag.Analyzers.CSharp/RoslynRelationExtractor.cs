@@ -470,16 +470,16 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         var ctFqn = m.ContainingType?.ToDisplayString(FqnFormat);
         if (string.IsNullOrWhiteSpace(ctFqn)) return null;
         var key = (Normalize(ctFqn), m.Name, m.Parameters.Length);
-        if (scope.ByMethodKey.TryGetValue(key, out var list) && list.Count == 1) return list[0].Id;
+        if (scope.ByMethodKey.TryGetValue(key, out var list) && list.Count > 0) return list[0].Id;
         return null;
     }
 
     private static Guid? ResolveFqn(Scope scope, string? fqn)
     {
         if (string.IsNullOrWhiteSpace(fqn)) return null;
-        if (scope.ByFqn.TryGetValue(fqn, out var l1) && l1.Count == 1) return l1[0].Id;
+        if (scope.ByFqn.TryGetValue(fqn, out var l1) && l1.Count > 0) return l1[0].Id;
         var nk = Normalize(fqn);
-        if (scope.ByNormFqn.TryGetValue(nk, out var l2) && l2.Count == 1) return l2[0].Id;
+        if (scope.ByNormFqn.TryGetValue(nk, out var l2) && l2.Count > 0) return l2[0].Id;
         return null;
     }
 
@@ -592,11 +592,11 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         Add(typeof(Enumerable).Assembly.Location);
         Add(typeof(List<>).Assembly.Location);
         Add(typeof(System.Runtime.GCSettings).Assembly.Location);
-
+        // Попытка подтянуть часто встречающиеся в BCS/GlobalConnector фасады (System.Web, System.Data, System.Xml...)
         var runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
         if (runtimeDir != null)
         {
-            foreach (var dll in new[] { "System.Runtime.dll", "System.Collections.dll", "netstandard.dll", "System.Private.CoreLib.dll", "System.Linq.dll", "System.Threading.dll", "System.Collections.Immutable.dll", "System.Memory.dll" })
+            foreach (var dll in new[] { "System.Runtime.dll", "System.Collections.dll", "netstandard.dll", "System.Private.CoreLib.dll", "System.Linq.dll", "System.Threading.dll", "System.Collections.Immutable.dll", "System.Memory.dll", "System.Data.dll", "System.Xml.dll", "System.Xml.ReaderWriter.dll", "System.Web.dll", "System.Net.Http.dll", "System.ComponentModel.dll" })
                 Add(Path.Combine(runtimeDir, dll));
         }
 
@@ -605,13 +605,17 @@ public sealed class RoslynRelationExtractor : IRepositoryRelationExtractor
         {
             foreach (var p in tpa.Split(Path.PathSeparator))
             {
-                if (p.EndsWith("System.Runtime.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Collections.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("netstandard.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Linq.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Private.CoreLib.dll", StringComparison.OrdinalIgnoreCase) ||
-                    p.EndsWith("System.Console.dll", StringComparison.OrdinalIgnoreCase))
+                var name = Path.GetFileName(p);
+                if (string.IsNullOrEmpty(name)) continue;
+                // Расширенный набор: ранее брали только 6 dll, теперь все System.*/Microsoft.* + ключевые facades.
+                // Это снижает число ErrorTypeSymbol для BCS файлов (System.Web, System.Data.Common и т.п.)
+                if (name.StartsWith("System.", StringComparison.OrdinalIgnoreCase) ||
+                    name.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("netstandard.dll", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("mscorlib.dll", StringComparison.OrdinalIgnoreCase))
+                {
                     Add(p);
+                }
             }
         }
 

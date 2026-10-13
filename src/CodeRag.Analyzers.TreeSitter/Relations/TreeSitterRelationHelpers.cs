@@ -73,18 +73,18 @@ internal static class TreeSitterRelationHelpers
         public Guid? ResolveFqn(string? fqn)
         {
             if (string.IsNullOrWhiteSpace(fqn)) return null;
-            if (ByFqn.TryGetValue(fqn, out var l1) && l1.Count == 1) return l1[0].Id;
+            if (ByFqn.TryGetValue(fqn, out var l1) && l1.Count > 0) return l1[0].Id;
             var nk = Normalize(fqn);
-            if (ByNormFqn.TryGetValue(nk, out var l2) && l2.Count == 1) return l2[0].Id;
+            if (ByNormFqn.TryGetValue(nk, out var l2) && l2.Count > 0) return l2[0].Id;
             return null;
         }
 
         public Guid? ResolveByName(string? name)
         {
             if (string.IsNullOrWhiteSpace(name)) return null;
-            if (ByName.TryGetValue(name, out var l1) && l1.Count == 1) return l1[0].Id;
+            if (ByName.TryGetValue(name, out var l1) && l1.Count > 0) return l1[0].Id;
             var lower = name.ToLowerInvariant();
-            if (ByNameLower.TryGetValue(lower, out var l2) && l2.Count == 1) return l2[0].Id;
+            if (ByNameLower.TryGetValue(lower, out var l2) && l2.Count > 0) return l2[0].Id;
             return null;
         }
 
@@ -98,7 +98,7 @@ internal static class TreeSitterRelationHelpers
                 // Try suffix match: any FQN ends with ".qualifier.callee" or ".callee" with qualifier segment
                 foreach (var kv in ByFqn)
                 {
-                    if (kv.Value.Count != 1) continue;
+                    if (kv.Value.Count == 0) continue;
                     var fqn = kv.Key;
                     if (fqn.EndsWith("." + calleeName, StringComparison.Ordinal) && fqn.Contains(qualifier, StringComparison.Ordinal))
                         return kv.Value[0].Id;

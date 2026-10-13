@@ -141,21 +141,21 @@ public sealed class SqlRelationExtractor : IRepositoryRelationExtractor
         public Guid? ResolveFqn(string? fqn)
         {
             if (string.IsNullOrWhiteSpace(fqn)) return null;
-            if (ByFqn.TryGetValue(fqn, out var l1) && l1.Count == 1) return l1[0].Id;
+            if (ByFqn.TryGetValue(fqn, out var l1) && l1.Count > 0) return l1[0].Id;
             var n = Normalize(fqn);
-            if (ByNorm.TryGetValue(n, out var l2) && l2.Count == 1) return l2[0].Id;
+            if (ByNorm.TryGetValue(n, out var l2) && l2.Count > 0) return l2[0].Id;
             // try bracket stripped
             var stripped = fqn.Replace("[", "").Replace("]", "");
-            if (ByFqn.TryGetValue(stripped, out var l3) && l3.Count == 1) return l3[0].Id;
-            if (ByNorm.TryGetValue(Normalize(stripped), out var l4) && l4.Count == 1) return l4[0].Id;
+            if (ByFqn.TryGetValue(stripped, out var l3) && l3.Count > 0) return l3[0].Id;
+            if (ByNorm.TryGetValue(Normalize(stripped), out var l4) && l4.Count > 0) return l4[0].Id;
             return null;
         }
         public Guid? ResolveName(string? name)
         {
             if (string.IsNullOrWhiteSpace(name)) return null;
             var clean = name.Replace("[", "").Replace("]", "").Trim();
-            if (ByName.TryGetValue(clean, out var l1) && l1.Count == 1) return l1[0].Id;
-            if (ByFqn.TryGetValue(clean, out var l2) && l2.Count == 1) return l2[0].Id;
+            if (ByName.TryGetValue(clean, out var l1) && l1.Count > 0) return l1[0].Id;
+            if (ByFqn.TryGetValue(clean, out var l2) && l2.Count > 0) return l2[0].Id;
             return null;
         }
     }
