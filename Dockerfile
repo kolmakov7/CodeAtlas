@@ -27,6 +27,8 @@ COPY src/CodeRag.Indexer/CodeRag.Indexer.csproj src/CodeRag.Indexer/
 COPY src/CodeRag.Search/CodeRag.Search.csproj src/CodeRag.Search/
 COPY src/CodeRag.Mcp/CodeRag.Mcp.csproj src/CodeRag.Mcp/
 COPY src/CodeRag.Application/CodeRag.Application.csproj src/CodeRag.Application/
+COPY src/CodeRag.Llm/CodeRag.Llm.csproj src/CodeRag.Llm/
+COPY src/CodeRag.Documentation/CodeRag.Documentation.csproj src/CodeRag.Documentation/
 COPY src/CodeRag.Api/CodeRag.Api.csproj src/CodeRag.Api/
 COPY tests/CodeRag.Tests/CodeRag.Tests.csproj tests/CodeRag.Tests/
 
@@ -38,10 +40,17 @@ COPY . .
 # Publish Api (Release). SkipWebBuild: Web UI is already built in the web-build stage
 # (avoids a second npm ci + npm run build inside this stage, see CodeRag.Api.csproj)
 RUN dotnet publish src/CodeRag.Api/CodeRag.Api.csproj -c Release -o /app/publish -p:SkipWebBuild=true
-RUN find /root/.nuget -name "vec0.so" -exec cp {} /app/publish/vec0.so \; 2>/dev/null; ls -lh /app/publish/vec0.so 2>&1 || echo "vec0 not found"
+# Copy the sqlite-vec native matching the BUILD arch. A bare `find -name vec0.so` matched both
+# runtimes/linux-x64 and runtimes/linux-arm64 and could copy the wrong (arm64) binary, which then
+# fails to load at runtime and silently degrades vectors to the in-memory fallback.
+RUN ARCH=$(uname -m); case "$ARCH" in x86_64|amd64) RID=linux-x64 ;; aarch64|arm64) RID=linux-arm64 ;; *) RID=linux-x64 ;; esac; \
+    find /root/.nuget -path "*/runtimes/$RID/native/vec0.so" -exec cp {} /app/publish/vec0.so \; 2>/dev/null; \
+    od -An -tx1 -N20 /app/publish/vec0.so | grep -qE ' 3e 00$| b7 00$' && echo "vec0 arch ok ($RID)" || echo "vec0 ARCH MISMATCH ($RID)"; ls -lh /app/publish/vec0.so 2>&1 || echo "vec0 not found"
 # Publish Mcp (Release) — stdio sidecar, shares Storage/Search
 RUN dotnet publish src/CodeRag.Mcp/CodeRag.Mcp.csproj -c Release -o /app/mcp -p:SkipWebBuild=true
-RUN find /root/.nuget -name "vec0.so" -exec cp {} /app/mcp/vec0.so \; 2>/dev/null; ls -lh /app/mcp/vec0.so 2>&1 || echo "vec0 mcp not found"
+RUN ARCH=$(uname -m); case "$ARCH" in x86_64|amd64) RID=linux-x64 ;; aarch64|arm64) RID=linux-arm64 ;; *) RID=linux-x64 ;; esac; \
+    find /root/.nuget -path "*/runtimes/$RID/native/vec0.so" -exec cp {} /app/mcp/vec0.so \; 2>/dev/null; \
+    ls -lh /app/mcp/vec0.so 2>&1 || echo "vec0 mcp not found"
 
 # Runtime image
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
