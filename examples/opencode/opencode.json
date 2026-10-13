@@ -10,10 +10,5 @@
       "enabled": true,
       "timeout": 30000
     }
-  },
-  "permission": {
-    "skill": {
-      "codeatlas": "allow"
-    }
   }
 }

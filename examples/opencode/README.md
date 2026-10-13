@@ -10,7 +10,6 @@ This folder contains:
 | File | Goes to |
 |---|---|
 | `opencode.json` | your project root (or `~/.config/opencode/`) |
-| `skills/codeatlas/SKILL.md` | `.opencode/skills/codeatlas/SKILL.md` (or `~/.config/opencode/skills/codeatlas/`) |
 
 > No machine-specific paths are hardcoded. Everything path-related is driven by two
 > environment variables (see step 2).
@@ -57,20 +56,11 @@ The `mcp.codeatlas` block launches the server with:
 OpenCode registers the server's tools prefixed with the server name, so they appear as
 `codeatlas_search_code`, `codeatlas_find_symbol`, `codeatlas_repositories`, etc.
 
-## 3. Add the skill
+The agent learns how to use the tools entirely from the MCP tool descriptions (each tool
+documents its parameters, output format, and recommended chaining), so no skill or extra
+prompt is required.
 
-Copy the skill folder into your project's OpenCode skills directory:
-
-```bash
-mkdir -p .opencode/skills
-cp -r skills/codeatlas .opencode/skills/
-```
-
-The skill teaches the agent when and how to combine the `codeatlas_*` tools (search →
-`symbolId` → callers/callees/implementations). For a global install, copy it to
-`~/.config/opencode/skills/codeatlas/` instead.
-
-## 4. Verify
+## 3. Verify
 
 ```bash
 opencode mcp list        # "codeatlas" should show as running/connected
@@ -123,6 +113,6 @@ Pass them through by adding them to the `mcp.codeatlas.environment` object in
   the settings table in `coderag.db` doesn't match the running embedding servers. Fix the
   `settings` rows (`Embeddings:Code:*` / `Embeddings:Text:*`) or use the env overrides
   above.
-- **Skills not showing** — the file must be `SKILL.md` (all caps), `name` must equal the
-  folder name (`codeatlas`), and it must live under `.opencode/skills/` (or the global
-  skills dir).
+- **Agent doesn't know how to use the tools** — the tool descriptions come from the MCP
+  server's `CodeRag.Mcp` assembly; if you built the DLL from an older commit, rebuild and
+  re-point `CODEATLAS_MCP_DLL` at the new assembly.
