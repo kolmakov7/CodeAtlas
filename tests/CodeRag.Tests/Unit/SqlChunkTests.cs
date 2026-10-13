@@ -13,6 +13,12 @@ public class SqlChunkTests
     private static Task<AnalyzeResult> AnalyzeSql(string sql)
         => new SqlAnalyzer().AnalyzeAsync(Ctx("t.sql", sql), default);
 
+    private static string ExtractSqlSource(string enriched)
+    {
+        var idx = enriched.IndexOf('\n');
+        return idx >= 0 ? enriched[(idx + 1)..] : enriched;
+    }
+
     [Fact]
     public async Task ChunkSource_Stays_Within_Statement_Boundaries()
     {
@@ -39,16 +45,25 @@ public class SqlChunkTests
         var ca = r.Chunks.Single(c => c.SymbolId == sa.Id);
         var cb = r.Chunks.Single(c => c.SymbolId == sb.Id);
 
-        ca.Source.Should().StartWith("CREATE PROCEDURE dbo.ProcA");
-        ca.Source.Should().EndWith("END");
-        ca.Source.Should().Contain("SELECT 1;");
-        ca.Source.Should().NotContain("dbo.ProcB");
-        ca.Source.Should().NotContain("GO");
+        // Verify semantic enrichment is present
+        ca.Source.Should().Contain("-- CodeAtlas Semantic Index:");
+        ca.Source.Should().Contain("Kind=Procedure");
+        ca.Source.Should().Contain("Procedure=ProcA");
+        
+        // Verify original SQL content is intact after the header
+        var rawA = ExtractSqlSource(ca.Source);
+        rawA.Should().StartWith("CREATE PROCEDURE dbo.ProcA");
+        rawA.Should().EndWith("END");
+        rawA.Should().Contain("SELECT 1;");
+        rawA.Should().NotContain("dbo.ProcB");
+        rawA.Should().NotContain("GO");
 
-        cb.Source.Should().StartWith("CREATE PROCEDURE dbo.ProcB");
-        cb.Source.Should().Contain("SELECT 2;");
-        cb.Source.Should().NotContain("SELECT 1;");
-        cb.Source.Should().NotContain("dbo.ProcA");
+        // Verify semantic enrichment for ProcB
+        var rawB = ExtractSqlSource(cb.Source);
+        rawB.Should().StartWith("CREATE PROCEDURE dbo.ProcB");
+        rawB.Should().Contain("SELECT 2;");
+        rawB.Should().NotContain("SELECT 1;");
+        rawB.Should().NotContain("dbo.ProcA");
     }
 
     [Fact]
@@ -65,7 +80,15 @@ public class SqlChunkTests
         // "CREATE TABLE dbo.T (Id INT);" is 28 chars — EndColumn is 1-based exclusive
         sym.EndColumn.Should().Be(29);
         var chunk = r.Chunks.Single(c => c.SymbolId == sym.Id);
-        chunk.Source.Should().Be("CREATE TABLE dbo.T (Id INT);");
+        
+        // Verify semantic enrichment is present
+        chunk.Source.Should().Contain("-- CodeAtlas Semantic Index:");
+        chunk.Source.Should().Contain("Kind=Table");
+        chunk.Source.Should().Contain("Tables=dbo.T");
+        
+        // Verify original SQL is intact
+        var raw = ExtractSqlSource(chunk.Source);
+        raw.Should().Be("CREATE TABLE dbo.T (Id INT);");
     }
 
     [Fact]
@@ -89,10 +112,15 @@ public class SqlChunkTests
         r.Chunks.Should().HaveCount(3);
 
         var viewChunk = r.Chunks.Single(c => c.SymbolId == r.Symbols.Single(s => s.Name == "V1").Id);
-        viewChunk.Source.Should().StartWith("CREATE VIEW dbo.V1");
-        viewChunk.Source.Should().EndWith("dbo.T;");
-        viewChunk.Source.Should().NotContain("PROCEDURE");
-        viewChunk.Source.Should().NotContain("CREATE TABLE");
+        var viewRaw = ExtractSqlSource(viewChunk.Source);
+        viewRaw.Should().StartWith("CREATE VIEW dbo.V1");
+        viewRaw.Should().EndWith("dbo.T;");
+        viewRaw.Should().NotContain("PROCEDURE");
+        viewRaw.Should().NotContain("CREATE TABLE");
+
+        // Verify semantic enrichment for view
+        viewChunk.Source.Should().Contain("Kind=View");
+        viewChunk.Source.Should().Contain("dbo.T");
     }
 
     [Fact]
@@ -115,12 +143,14 @@ public class SqlChunkTests
         r.Errors.Should().BeEmpty();
         r.Symbols.Should().HaveCount(2);
         var first = r.Chunks.First(c => c.SymbolId == r.Symbols.First(s => s.Name == "Регистрация").Id);
-        first.Source.Should().Contain("注册");
-        first.Source.Should().Contain("привет мир");
-        first.Source.Should().Contain("日本語");
+        var firstRaw = ExtractSqlSource(first.Source);
+        firstRaw.Should().Contain("注册");
+        firstRaw.Should().Contain("привет мир");
+        firstRaw.Should().Contain("日本語");
         var second = r.Chunks.First(c => c.SymbolId == r.Symbols.First(s => s.Name == "Second").Id);
-        second.Source.Should().NotContain("注册");
-        second.Source.Should().NotContain("привет");
+        var secondRaw = ExtractSqlSource(second.Source);
+        secondRaw.Should().NotContain("注册");
+        secondRaw.Should().NotContain("привет");
     }
 
     [Fact]
@@ -143,8 +173,14 @@ public class SqlChunkTests
         r.Symbols.Should().Contain(s => s.Kind == SymbolKind.Trigger && s.Name == "trg");
         r.Chunks.Should().HaveCount(3);
         var procChunk = r.Chunks.Single(c => c.SymbolId == r.Symbols.Single(s => s.Name == "RecalcTotals").Id);
-        procChunk.Source.Should().StartWith("CREATE OR ALTER PROCEDURE dbo.RecalcTotals");
-        procChunk.Source.Should().NotContain("fnX");
+        var procRaw = ExtractSqlSource(procChunk.Source);
+        procRaw.Should().StartWith("CREATE OR ALTER PROCEDURE dbo.RecalcTotals");
+        procRaw.Should().NotContain("fnX");
+
+        // Verify semantic enrichment includes UPDATE operation and table reference
+        procChunk.Source.Should().Contain("Kind=Procedure");
+        procChunk.Source.Should().Contain("Operations=UPDATE,CREATE");
+        procChunk.Source.Should().Contain("Tables=dbo.T");
     }
 
     [Fact]
@@ -169,10 +205,19 @@ public class SqlChunkTests
         var tableChunk = r.Chunks.Single(c => c.SymbolId == tableSym.Id);
 
         // child keeps full content; parent excludes the child's range
-        tableChunk.Source.Should().Be("CREATE TABLE #tmp (Id INT);");
-        procChunk.Source.Should().StartWith("CREATE PROCEDURE dbo.ETL");
-        procChunk.Source.Should().NotContain("CREATE TABLE #tmp");
-        procChunk.Source.Should().Contain("INSERT INTO #tmp VALUES (1);");
+        var tableRaw = ExtractSqlSource(tableChunk.Source);
+        tableRaw.Should().Be("CREATE TABLE #tmp (Id INT);");
+        
+        var procRaw = ExtractSqlSource(procChunk.Source);
+        procRaw.Should().StartWith("CREATE PROCEDURE dbo.ETL");
+        procRaw.Should().NotContain("CREATE TABLE #tmp");
+        procRaw.Should().Contain("INSERT INTO #tmp VALUES (1);");
+
+        // Verify semantic enrichment for procedure
+        procChunk.Source.Should().Contain("Kind=Procedure");
+        procChunk.Source.Should().Contain("Operations=INSERT,CREATE");
+        procChunk.Source.Should().Contain("Tables=#tmp");
+        procChunk.Source.Should().Contain("INSERT INTO #tmp");
 
         // proc Contains #tmp
         r.Relations.Should().Contain(rel => rel.RelationType == RelationType.Contains
@@ -189,5 +234,66 @@ public class SqlChunkTests
         var r = await AnalyzeSql(sql);
         r.Symbols.Should().BeEmpty();
         r.Chunks.Should().NotBeEmpty();
+
+        // Sliding window chunks should not have semantic enrichment (no symbol info)
+        var chunk = r.Chunks.First();
+        chunk.Source.Should().Contain("SELECT * FROM Orders;");
+    }
+
+    [Fact]
+    public async Task EnrichedChunk_Contains_Extracted_Metadata()
+    {
+        var sql = """
+            CREATE PROCEDURE dbo.GetCustomerOrders
+                @customerId INT,
+                @startDate DATE,
+                @endDate DATE
+            AS
+            BEGIN
+                SELECT 
+                    o.OrderId,
+                    o.OrderDate,
+                    c.CustomerName,
+                    p.ProductName,
+                    oi.Quantity
+                FROM dbo.Orders o
+                INNER JOIN dbo.Customers c ON o.CustomerId = c.CustomerId
+                INNER JOIN dbo.OrderItems oi ON o.OrderId = oi.OrderId
+                INNER JOIN dbo.Products p ON oi.ProductId = p.ProductId
+                WHERE c.CustomerId = @customerId
+                  AND o.OrderDate BETWEEN @startDate AND @endDate
+                ORDER BY o.OrderDate DESC;
+            END
+            """;
+        var r = await AnalyzeSql(sql);
+        r.Errors.Should().BeEmpty();
+        r.Symbols.Should().HaveCount(1);
+        r.Chunks.Should().HaveCount(1);
+
+        var chunk = r.Chunks.First();
+        
+        // Verify semantic header
+        chunk.Source.Should().Contain("-- CodeAtlas Semantic Index:");
+        chunk.Source.Should().Contain("Kind=Procedure");
+        chunk.Source.Should().Contain("Procedure=GetCustomerOrders");
+        
+        // Verify extracted operations
+        chunk.Source.Should().Contain("Operations=SELECT,CREATE");
+        
+        // Verify extracted tables (with schema prefix, comma-separated)
+        chunk.Source.Should().Contain("dbo.Orders");
+        chunk.Source.Should().Contain("dbo.Customers");
+        chunk.Source.Should().Contain("dbo.OrderItems");
+        chunk.Source.Should().Contain("dbo.Products");
+        
+        // Note: Column extraction is best-effort via regex; full SQL parsing would be needed for reliable extraction
+        
+        // Verify extracted parameters (comma-separated after Parameters=)
+        chunk.Source.Should().Contain("Parameters=");
+        chunk.Source.Should().Contain("customerId");
+        chunk.Source.Should().Contain("startDate");
+        chunk.Source.Should().Contain("endDate");
+        
+        // Note: Join extraction is best-effort via regex; the tables are already captured in Tables=
     }
 }

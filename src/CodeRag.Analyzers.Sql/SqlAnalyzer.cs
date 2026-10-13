@@ -156,20 +156,21 @@ public sealed class SqlAnalyzer : ICodeAnalyzer
         }
 
         /// <summary>
-        /// Второй проход: источник чанка = фрагмент объекта минус диапазоны вложенных кандидатов
-        /// (тот же центральный принцип исключения вложенных чанков, что и в TreeSitter-анализаторе).
+        /// Второй проход: источник чанка = фрагмент объекта минус диапазоны вложенных кандидатов,
+        /// обогащённый семантическим заголовком (метаданные SQL: операции, таблицы, параметры).
         /// </summary>
         public void EmitChunks()
         {
             foreach (var cand in _candidates)
             {
                 if (cand.Symbol == null) continue;
-                var source = BuildCandidateSource(cand);
-                if (!string.IsNullOrWhiteSpace(source))
+                var rawSource = BuildCandidateSource(cand);
+                var enriched = SqlChunkEnricher.Enrich(rawSource, cand.Symbol.Name, cand.Symbol.Kind, _ctx.FilePath);
+                if (!string.IsNullOrWhiteSpace(enriched))
                 {
                     try
                     {
-                        var chunk = _factory.Create(cand.Symbol.Id, SupportedLanguages.Sql, cand.Symbol.StartLine, cand.Symbol.EndLine, source);
+                        var chunk = _factory.Create(cand.Symbol.Id, SupportedLanguages.Sql, cand.Symbol.StartLine, cand.Symbol.EndLine, enriched);
                         _chunks.Add(chunk);
                     }
                     catch (Exception ex)
