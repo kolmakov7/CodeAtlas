@@ -8,5 +8,6 @@ public enum JobType
     Embedding = 2,
     Rebuild = 3,
     Clone = 4,
-    Relations = 5
+    Relations = 5,
+    Documentation = 6
 }

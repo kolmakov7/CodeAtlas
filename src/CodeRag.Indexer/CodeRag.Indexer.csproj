@@ -6,6 +6,7 @@
     <ProjectReference Include="..\CodeRag.Embeddings\CodeRag.Embeddings.csproj" />
     <ProjectReference Include="..\CodeRag.Analyzers.Abstractions\CodeRag.Analyzers.Abstractions.csproj" />
     <ProjectReference Include="..\CodeRag.Git\CodeRag.Git.csproj" />
+    <ProjectReference Include="..\CodeRag.Documentation\CodeRag.Documentation.csproj" />
   </ItemGroup>
 
   <ItemGroup>

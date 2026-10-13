@@ -319,6 +319,7 @@ export default function RepositoryDashboard() {
           <h3 style={{ marginBottom: 8 }}>Shortcuts</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 14 }}>
             <Link to={`/search?repositoryId=${repo.id}`}>Search in this repository →</Link>
+            <Link to={`/documentation?repositoryId=${repo.id}`}>AI documentation for this repo →</Link>
             <Link to={`/jobs?repositoryId=${repo.id}`}>View all jobs for this repo →</Link>
           </div>
         </div>

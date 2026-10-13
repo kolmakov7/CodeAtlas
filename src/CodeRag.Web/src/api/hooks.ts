@@ -16,6 +16,10 @@ import type {
   CredentialInfo,
   ActivityEntry,
   McpUsageStats,
+  Documentation,
+  DocumentationDetail,
+  GenerateDocumentationResponse,
+  DocumentationTargetType,
 } from "./types";
 
 // --- helpers ---
@@ -287,4 +291,66 @@ export function useActivity(limit = 20) {
     queryKey: ["activity", limit],
     queryFn: () => unwrap<ActivityEntry[]>(apiClient.get("/activity", { params: { limit } })),
   });
+}
+
+// Documentation (AI-generated)
+export function useDocumentationList(repositoryId: string | undefined, targetType?: DocumentationTargetType) {
+  return useQuery({
+    queryKey: ["documentation", repositoryId, targetType ?? "all"],
+    queryFn: () =>
+      unwrap<Documentation[]>(
+        apiClient.get(`/documentation/repositories/${repositoryId}`, {
+          params: targetType ? { targetType } : undefined,
+        }),
+      ),
+    enabled: !!repositoryId,
+  });
+}
+
+export function useDocumentationDetail(id: string | undefined) {
+  return useQuery({
+    queryKey: ["documentation", "detail", id],
+    queryFn: () => unwrap<DocumentationDetail>(apiClient.get(`/documentation/${id}`)),
+    enabled: !!id,
+  });
+}
+
+export function useDocumentationByTarget(
+  repositoryId: string | undefined,
+  targetType: DocumentationTargetType | undefined,
+  targetRef: string | undefined,
+) {
+  return useQuery({
+    queryKey: ["documentation", "target", repositoryId, targetType, targetRef],
+    queryFn: () =>
+      unwrap<DocumentationDetail>(
+        apiClient.get(`/documentation/repositories/${repositoryId}/targets/${targetType}`, {
+          params: { targetRef },
+        }),
+      ),
+    enabled: !!repositoryId && !!targetType && !!targetRef,
+  });
+}
+
+export function useDocumentationActions() {
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["documentation"] });
+    qc.invalidateQueries({ queryKey: ["jobs"] });
+  };
+  const generateRepository = useMutation({
+    mutationFn: (repositoryId: string) =>
+      unwrap<GenerateDocumentationResponse>(apiClient.post(`/documentation/repositories/${repositoryId}/generate`)),
+    onSuccess: invalidate,
+  });
+  const generateTarget = useMutation({
+    mutationFn: (payload: { repositoryId: string; targetType: DocumentationTargetType; targetRef: string }) =>
+      unwrap<GenerateDocumentationResponse>(apiClient.post("/documentation/targets/generate", payload)),
+    onSuccess: invalidate,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => apiClient.delete(`/documentation/${id}`),
+    onSuccess: invalidate,
+  });
+  return { generateRepository, generateTarget, remove };
 }

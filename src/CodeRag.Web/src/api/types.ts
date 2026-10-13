@@ -3,7 +3,7 @@
 
 export type RepositoryStatus = "Active" | "Syncing" | "Indexing" | "Paused" | "Error" | "Deleting";
 export type JobStatus = "Queued" | "Running" | "Completed" | "Failed" | "Canceled";
-export type JobType = "Sync" | "Index" | "Reindex" | "Delete" | "Clone" | "Embedding" | "Rebuild" | "Relations";
+export type JobType = "Sync" | "Index" | "Reindex" | "Delete" | "Clone" | "Embedding" | "Rebuild" | "Relations" | "Documentation";
 export type SearchMode = "Hybrid" | "FullText" | "Semantic" | "Symbol";
 export type SymbolKind = string; // e.g. Class, Interface, Method, Function, Property, Field, Enum, Namespace
 export type HealthStatus = "OK" | "FAIL" | "Degraded";
@@ -310,4 +310,31 @@ export interface CredentialInfo {
   kind: string;
   username?: string | null;
   // secret never exposed
+}
+
+export type DocumentationTargetType = "Repository" | "Module" | "Symbol";
+export type DocumentationStatus = "NotGenerated" | "Generated" | "Stale" | "Generating" | "Failed";
+
+export interface Documentation {
+  id: string;
+  repositoryId: string;
+  targetType: DocumentationTargetType;
+  targetRef: string;
+  title: string;
+  status: DocumentationStatus;
+  contentHash?: string | null;
+  version?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DocumentationDetail extends Documentation {
+  content?: string | null;
+}
+
+export interface GenerateDocumentationResponse {
+  jobId?: string | null;
+  count?: number | null;
+  succeeded?: number | null;
+  failed?: number | null;
 }

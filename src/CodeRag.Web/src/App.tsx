@@ -5,6 +5,7 @@ import RepositoryList from "@/pages/RepositoryList";
 import RepositoryDashboard from "@/pages/RepositoryDashboard";
 import SearchPage from "@/pages/Search";
 import SymbolExplorer from "@/pages/SymbolExplorer";
+import DocumentationPage from "@/pages/Documentation";
 import JobsPage from "@/pages/Jobs";
 import SettingsPage from "@/pages/Settings";
 import DiagnosticsPage from "@/pages/Diagnostics";
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="repositories" element={<RepositoryList />} />
         <Route path="repositories/:id" element={<RepositoryDashboard />} />
         <Route path="search" element={<SearchPage />} />
+        <Route path="documentation" element={<DocumentationPage />} />
         <Route path="symbols/:symbolId" element={<SymbolExplorer />} />
         <Route path="jobs" element={<JobsPage />} />
         <Route path="settings" element={<SettingsPage />} />

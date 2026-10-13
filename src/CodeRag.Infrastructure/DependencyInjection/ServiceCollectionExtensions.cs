@@ -68,6 +68,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<CodeRag.Domain.Ports.IRepositoryGroupStore, RepositoryGroupStore>();
         services.AddSingleton<CodeRag.Analyzers.Abstractions.ISymbolCatalog, DapperSymbolCatalog>();
         services.AddSingleton<IIndexingErrorStore, IndexingErrorStore>();
+        services.AddSingleton<IDocumentationStore, DocumentationStore>();
 
         // Persistence adapters (Activity, Settings, Statistics, Health)
         services.AddSingleton<IActivityRepository, DapperActivityRepository>();

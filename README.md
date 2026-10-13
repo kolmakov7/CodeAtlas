@@ -81,6 +81,13 @@ Changeable without a rebuild: Web UI **Settings** → DB (`settings` table) → 
 | | `Embeddings:Text:Dimensions` | `0` (auto) | text dimensionality (0 = auto-detect) |
 | | `Embeddings:Text:BatchSize` / `Timeout` / `MaxRetries` | `32 / 30s / 3` | text batching and retry |
 | | `Embeddings:Text:ApiKey` / `ProxyUrl` | — | text key and proxy |
+| **LLM (docs)** | `Llm:Endpoint` | — (empty = off) | OpenAI-compatible base URL for documentation generation; empty → feature reports "LLM not configured" |
+| | `Llm:Model` | `local-model` | model name in the request body |
+| | `Llm:Temperature` | `0.2` | sampling temperature (0.0 – 2.0) |
+| | `Llm:MaxTokens` | `4096` | max completion tokens (0 = server decides) |
+| | `Llm:TimeoutSeconds` / `MaxRetries` / `BaseDelayMs` | `300 / 2 / 500` | per-request timeout, retries, backoff base (ms, exponential) |
+| | `Llm:MaxContextChars` | `60000` | cap on prompt context chars sent to the model (0 = unlimited) |
+| | `Llm:ApiKey` / `ProxyUrl` | — | bearer key and HTTP proxy |
 | **Indexer** | `Indexer:MaxConcurrentIndexers` | `2` | parallel jobs |
 | | `Indexer:DefaultSyncIntervalSeconds` | `300` | repo polling |
 | | `Indexer:FullReindexThreshold` | `0.5` | >50% of files changed → full reindex |

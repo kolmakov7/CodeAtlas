@@ -52,11 +52,16 @@ public sealed class McpProgram
         builder.Services.AddSingleton<CodeSearchTools>();
         builder.Services.AddSingleton<IMcpToolHandler>(sp => sp.GetRequiredService<CodeSearchTools>());
 
-        var mcp = builder.Services.AddMcpServer().WithToolsFromAssembly();
+        var mcp = builder.Services.AddMcpServer(options =>
+        {
+            options.ServerInfo = new() { Name = "CodeAtlas", Version = "1.0.0" };
+            options.ServerInstructions = McpServerGuidance.Instructions;
+        }).WithToolsFromAssembly();
         if (useStdio) mcp.WithStdioServerTransport();
         if (useHttp) mcp.WithHttpTransport();
 
-        builder.Logging.AddConsole();
+        // stdout is the MCP stdio protocol channel; never write application logs there.
+        builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
         builder.Logging.SetMinimumLevel(LogLevel.Information);
 
         // Таблица settings → IConfiguration: значения из БД имеют приоритет над env/appsettings.

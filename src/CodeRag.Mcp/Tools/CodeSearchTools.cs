@@ -113,10 +113,10 @@ public sealed class CodeSearchTools : IMcpToolHandler
     [McpServerTool(Name = "embedding_status"), Description("Alias for EmbeddingStatus")]
     public Task<string> EmbeddingStatusAlias(CancellationToken ct = default) => EmbeddingStatus(ct);
 
-    [McpServerTool, Description("Code search (Hybrid by default: semantic + FullText + exact; Semantic = vectors only code+text merged, SemanticCode = code domain only (http://192.168.137.25:8082), SemanticText = text/docs corpus only (http://192.168.137.25:8083), no FTS; FullText = lexical only; Symbol = name lookup). Results include repositoryId, chunkId and symbolId so you can follow up with get_code / get_symbol / get_relations. Use to find code by query.")]
+    [McpServerTool, Description("Search indexed code and documentation. Hybrid is the default and combines semantic, FullText, exact and structural signals. Use SemanticCode for natural-language source-code intent, SemanticText for documentation/prose, FullText for exact identifiers, and Symbol for an exact symbol name/FQN. Semantic merges code and text vectors and is retained for compatibility; prefer the explicit domain modes. Results include repositoryId, file, lines, chunkId and symbolId for follow-up with get_code, get_symbol or get_relations. Scope with repositoryIds, languages or symbolKind; use minScore to remove weak semantic matches.")]
     public Task<string> SearchCodeAsync(
         [Description("Search query text")] string query,
-        [Description("Mode: Hybrid|FullText|Semantic|SemanticCode|SemanticText|Symbol (default Hybrid)")] string? mode = null,
+        [Description("Search mode: Hybrid (default, best first try), SemanticCode (source intent), SemanticText (docs/prose), FullText (exact tokens), Symbol (exact name/FQN), or Semantic (merged code+text compatibility mode)")] string? mode = null,
         [Description("Max results (1..100, default 20)")] int? limit = null,
         [Description("Offset for pagination (default 0)")] int? offset = null,
         [Description("Optional repository filter (Guid array)")] Guid[]? repositoryIds = null,

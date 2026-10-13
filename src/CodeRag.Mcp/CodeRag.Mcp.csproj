@@ -20,6 +20,7 @@
     <ProjectReference Include="..\CodeRag.Git\CodeRag.Git.csproj" />
     <ProjectReference Include="..\CodeRag.Indexer\CodeRag.Indexer.csproj" />
     <ProjectReference Include="..\CodeRag.Search\CodeRag.Search.csproj" />
+    <ProjectReference Include="..\CodeRag.Documentation\CodeRag.Documentation.csproj" />
     <ProjectReference Include="..\CodeRag.Analyzers.Abstractions\CodeRag.Analyzers.Abstractions.csproj" />
     <ProjectReference Include="..\CodeRag.Analyzers.CSharp\CodeRag.Analyzers.CSharp.csproj" />
   </ItemGroup>

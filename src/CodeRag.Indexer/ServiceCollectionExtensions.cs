@@ -38,6 +38,7 @@ public static class ServiceCollectionExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, EmbeddingJobHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, RebuildJobHandler>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, RelationsJobHandler>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IIndexingJobHandler, DocumentationJobHandler>());
 
         // Dispatcher (тонкий, делегирует в handlers)
         services.AddSingleton<IndexingService>();

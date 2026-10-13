@@ -8,6 +8,8 @@ using CodeRag.Git.DependencyInjection;
 using CodeRag.Indexer;
 using CodeRag.Infrastructure.DependencyInjection;
 using CodeRag.Infrastructure.Persistence;
+using CodeRag.Llm;
+using CodeRag.Documentation;
 using Microsoft.Extensions.Configuration;
 using CodeRag.Search;
 using Microsoft.AspNetCore.DataProtection;
@@ -54,6 +56,9 @@ builder.Services.AddEmbeddings(builder.Configuration);
 // Бинд опций из конфигурации (включая таблицу settings — hot reload через IOptionsMonitor)
 builder.Services.AddIndexer(builder.Configuration);
 builder.Services.AddSearch(builder.Configuration);
+// LLM + documentation generation (OpenAI-compatible chat; degrades gracefully when unconfigured)
+builder.Services.AddLlm(builder.Configuration);
+builder.Services.AddDocumentation();
 builder.Services.AddAnalyzers();
 
 // Application layer handlers (CQRS-lite)
@@ -68,7 +73,12 @@ builder.Services.AddSingleton<StatisticsService>();
 // MCP remote (Streamable HTTP) — reuse tools from CodeRag.Mcp, exposed at /mcp
 // stdio не нужен, http достаточно для remote opencode (type: remote, url: http://host:8080/mcp)
 builder.Services.AddSingleton<CodeRag.Mcp.Tools.CodeSearchTools>();
-builder.Services.AddMcpServer()
+builder.Services.AddSingleton<CodeRag.Mcp.Tools.DocumentationTools>();
+    builder.Services.AddMcpServer(options =>
+    {
+        options.ServerInfo = new() { Name = "CodeAtlas", Version = "1.0.0" };
+        options.ServerInstructions = CodeRag.Mcp.McpServerGuidance.Instructions;
+    })
     .WithHttpTransport()
     .WithToolsFromAssembly(typeof(CodeRag.Mcp.Tools.CodeSearchTools).Assembly);
 
