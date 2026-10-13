@@ -1,40 +1,75 @@
 import { useSearchParams, Link } from "react-router-dom";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useJobs, useJobActions, useRepositories } from "@/api/hooks";
 import { ProgressBar } from "@/components/ProgressBar";
 import { formatDate, formatDuration } from "@/utils/format";
 import type { IndexingJob } from "@/api/types";
 
+// Единица работы: для embedding-джобы — чанки (эмбеддинги), для файловых — файлы.
+function jobUnit(j: IndexingJob): string {
+  return j.type === "Embedding" ? "chunks" : "files";
+}
+
 function jobItemsLabel(j: IndexingJob): string {
   if (j.totalItems == null || j.totalItems <= 0) return "—";
   const done = j.itemsDone ?? 0;
-  const unit = j.type === "Embedding" ? "chunks" : "files";
-  return `${done.toLocaleString()} / ${j.totalItems.toLocaleString()} ${unit}`;
+  return `${done.toLocaleString()} / ${j.totalItems.toLocaleString()} ${jobUnit(j)}`;
 }
 
-function jobSpeed(j: IndexingJob): number | null {
+// Средняя скорость с момента фактического старта выполнения (для ETA — стабильнее).
+function cumulativeSpeed(j: IndexingJob): number | null {
   if (j.status !== "Running" || !j.startedAt || !j.itemsDone) return null;
   const elapsedSec = Math.max(1, (Date.now() - new Date(j.startedAt).getTime()) / 1000);
   return j.itemsDone / elapsedSec;
 }
 
-function jobEta(j: IndexingJob): string {
+function jobEta(j: IndexingJob, speed: number | null): string {
   if (j.status !== "Running" || j.totalItems == null || j.totalItems <= 0) return "—";
-  const speed = jobSpeed(j);
-  if (!speed) return "—";
-  const remainSec = (j.totalItems - (j.itemsDone ?? 0)) / speed;
+  if (!speed || speed <= 0) return "—";
+  const remainSec = Math.max(0, j.totalItems - (j.itemsDone ?? 0)) / speed;
   return `~${formatDuration(new Date().toISOString(), new Date(Date.now() + remainSec * 1000).toISOString())}`;
 }
 
-function JobDetails({ j }: { j: IndexingJob }) {
+// Мгновенная скорость (единиц/с) по дельтам между опросами. DTO несёт только накопленный
+// itemsDone, поэтому itemsDone/elapsed размывается временем ожидания в очереди и начальным
+// чтением чанков из БД. Дельта между опросами показывает реальный поток обработки
+// (для embedding — chunks/s, т.е. скорость обработки эмбеддингов, а не запросов).
+function useJobSpeeds(jobs: IndexingJob[] | undefined): Record<string, number> {
+  const prevRef = useRef<Record<string, { done: number; t: number }>>({});
+  const [speeds, setSpeeds] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    if (!jobs) return;
+    const now = Date.now();
+    const prev = prevRef.current;
+    const deltas: Record<string, number> = {};
+    for (const j of jobs) {
+      if (j.status !== "Running" || j.itemsDone == null) continue;
+      const p = prev[j.id];
+      if (p && now > p.t && j.itemsDone > p.done) {
+        deltas[j.id] = (j.itemsDone - p.done) / ((now - p.t) / 1000);
+      }
+      prev[j.id] = { done: j.itemsDone, t: now };
+    }
+    setSpeeds((old) => {
+      const merged: Record<string, number> = {};
+      for (const j of jobs) if (j.status === "Running") merged[j.id] = deltas[j.id] ?? old[j.id] ?? 0;
+      return merged;
+    });
+  }, [jobs]);
+
+  return speeds;
+}
+
+function JobDetails({ j, rate }: { j: IndexingJob; rate?: number }) {
   const rows: Array<[string, React.ReactNode]> = [];
   rows.push(["Phase", j.phase ?? "—"]);
   rows.push(["Elapsed", formatDuration(j.startedAt, j.status === "Running" ? null : j.finishedAt)]);
   if (j.totalItems != null) {
     rows.push(["Items", jobItemsLabel(j)]);
-    const speed = jobSpeed(j);
-    if (speed != null) rows.push(["Speed", `${speed.toFixed(1)} items/s`]);
-    if (j.status === "Running") rows.push(["ETA", jobEta(j)]);
+    const speed = rate && rate > 0 ? rate : cumulativeSpeed(j);
+    if (speed != null) rows.push(["Speed", `${speed.toFixed(1)} ${jobUnit(j)}/s`]);
+    if (j.status === "Running") rows.push(["ETA", jobEta(j, speed)]);
   }
   if (j.currentFile) rows.push(["Current file", <code style={{ fontSize: 11, wordBreak: "break-all" }}>{j.currentFile}</code>]);
   if (j.fromCommit || j.toCommit) rows.push(["Range", <code style={{ fontSize: 11 }}>{(j.fromCommit ?? "∅").slice(0, 10)} → {(j.toCommit ?? "∅").slice(0, 10)}</code>]);
@@ -63,6 +98,7 @@ export default function JobsPage() {
   const reposQ = useRepositories();
   const actions = useJobActions();
   const [expanded, setExpanded] = useState<string | null>(null);
+  const speeds = useJobSpeeds(jobsQ.data);
 
   const apply = () => {
     const p = new URLSearchParams();
@@ -148,7 +184,7 @@ export default function JobsPage() {
                 {expanded === j.id && (
                   <tr>
                     <td colSpan={8} style={{ background: "var(--bg-subtle, rgba(127,127,127,0.06))", padding: 0 }}>
-                      <JobDetails j={j} />
+                      <JobDetails j={j} rate={speeds[j.id]} />
                     </td>
                   </tr>
                 )}

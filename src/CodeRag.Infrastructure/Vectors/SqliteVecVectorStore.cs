@@ -554,25 +554,39 @@ public sealed class SqliteVecVectorStore : IVectorStore
 
     private async Task UpsertVectorEntriesAsync(List<VectorEntry> list, CancellationToken ct)
     {
+        if (list.Count == 0) return;
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        foreach (var e in list)
+        // One transaction for the whole batch: previously each row was an autocommit (one WAL
+        // commit per chunk), which dominated embedding throughput (≈10s per 64-chunk batch).
+        using var tx = conn.BeginTransaction();
+        try
         {
             var now = DateTimeOffset.UtcNow.ToString("o");
-            await conn.ExecuteAsync(
-                @"INSERT INTO vector_entries(chunk_id, repository_id, vector_id, model, dim, context_length, domain, updated_at)
-                  VALUES (@chunkId, @repoId, @vectorId, @model, @dim, @ctx, @domain, @now)
-                  ON CONFLICT(chunk_id) DO UPDATE SET repository_id=excluded.repository_id, vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, updated_at=excluded.updated_at;",
-                new
-                {
-                    chunkId = e.ChunkId.ToString(),
-                    repoId = e.RepositoryId.ToString(),
-                    vectorId = e.ChunkId.ToString(),
-                    model = e.Model,
-                    dim = e.Dim,
-                    ctx = (object?)e.ContextLength ?? DBNull.Value,
-                    domain = DomainToken,
-                    now
-                });
+            foreach (var e in list)
+            {
+                await conn.ExecuteAsync(
+                    @"INSERT INTO vector_entries(chunk_id, repository_id, vector_id, model, dim, context_length, domain, updated_at)
+                      VALUES (@chunkId, @repoId, @vectorId, @model, @dim, @ctx, @domain, @now)
+                      ON CONFLICT(chunk_id) DO UPDATE SET repository_id=excluded.repository_id, vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, updated_at=excluded.updated_at;",
+                    new
+                    {
+                        chunkId = e.ChunkId.ToString(),
+                        repoId = e.RepositoryId.ToString(),
+                        vectorId = e.ChunkId.ToString(),
+                        model = e.Model,
+                        dim = e.Dim,
+                        ctx = (object?)e.ContextLength ?? DBNull.Value,
+                        domain = DomainToken,
+                        now
+                    },
+                    transaction: tx);
+            }
+            tx.Commit();
+        }
+        catch
+        {
+            try { tx.Rollback(); } catch { }
+            throw;
         }
     }
 

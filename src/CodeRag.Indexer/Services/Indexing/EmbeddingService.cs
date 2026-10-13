@@ -46,17 +46,33 @@ internal sealed class EmbeddingService
             return;
         }
 
-        var entries = new List<VectorEntry>();
+        var entries = new List<VectorEntry>(chunks.Count);
         for (int i = 0; i < chunks.Count; i++)
         {
             var ch = chunks[i];
             var vec = vectors[i];
             entries.Add(new VectorEntry(ch.Id, ch.RepositoryId, vec, provider.Model, vec.Length, provider.ContextLength));
-            ch.MarkEmbedded(provider.Model, provider.ConfigHash);
-            await _chunkStore.UpsertAsync(ch, ct).ConfigureAwait(false);
         }
 
-        try { await store.UpsertAsync(entries, ct).ConfigureAwait(false); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Vector upsert failed for {Count} {Domain} chunks", entries.Count, domain.ToText()); }
+        // Persist vectors FIRST. Only mark the chunks as embedded once the vectors are actually
+        // stored — otherwise a failed vector write would mark chunks embedded with no vector and
+        // they'd never be retried (semantic search would silently miss them).
+        try
+        {
+            await store.UpsertAsync(entries, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Vector upsert failed for {Count} {Domain} chunks — chunks left unembedded for retry", entries.Count, domain.ToText());
+            return;
+        }
+
+        foreach (var ch in chunks)
+            ch.MarkEmbedded(provider.Model, provider.ConfigHash);
+
+        // One batch (single connection + transaction) instead of one connection per chunk —
+        // the per-chunk upsert loop was the embedding-throughput bottleneck (each write waited
+        // on the chunks-DB write lock, ~10s per 64-chunk batch under concurrent indexing).
+        await _chunkStore.UpsertBatchAsync(chunks, ct).ConfigureAwait(false);
     }
 }

@@ -52,10 +52,15 @@ public sealed class IndexingJob
         };
     }
 
-    public void MarkRunning()
+    public void MarkRunning(DateTimeOffset? at = null)
     {
         if (Status != JobStatus.Queued) throw new DomainValidationException($"Job {Id} can only run from Queued, current {Status}.");
         Status = JobStatus.Running;
+        // StartedAt фиксирует фактический старт выполнения (а не момент постановки в
+        // очередь): иначе скорость/ETA джобы включают время ожидания в очереди, слоте
+        // семафора и per-repo локе и получаются заниженными (embedding-джоба, которая
+        // создаётся в конце Index и может долго ждать, страдала сильнее всего).
+        StartedAt = at ?? DateTimeOffset.UtcNow;
     }
 
     public void UpdateProgress(double progress)
