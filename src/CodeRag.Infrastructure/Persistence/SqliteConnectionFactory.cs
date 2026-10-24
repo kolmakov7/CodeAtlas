@@ -61,6 +61,14 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
     public async Task ProvisionAsync(CancellationToken ct = default)
     {
         Directory.CreateDirectory(DataDir);
+        foreach (var path in new[] { _dbPath, _chunksDbPath, _vecDbPath })
+        {
+            await using var conn = new SqliteConnection($"Data Source={path}") { DefaultTimeout = 300 };
+            await conn.OpenAsync(ct).ConfigureAwait(false);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=300000;";
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -113,11 +121,10 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
 
     private async Task ConfigureConnectionAsync(SqliteConnection conn, CancellationToken ct = default)
     {
-        // PRAGMA must be executed without transaction.
+        // journal_mode is set once in ProvisionAsync: re-applying it per connection can
+        // itself return SQLITE_BUSY while another writer is active.
+        conn.DefaultTimeout = 300;
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "PRAGMA journal_mode=WAL;";
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
         cmd.CommandText = "PRAGMA synchronous=NORMAL;";
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
 
