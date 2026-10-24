@@ -20,6 +20,33 @@ import type {
   DocumentationDetail,
   GenerateDocumentationResponse,
   DocumentationTargetType,
+  RepositoryLink,
+  SymbolUsageInfo,
+  Project,
+  TaskItem,
+  TaskDetail,
+  TaskResult,
+  TaskQueryParams,
+  TaskTreeParams,
+  TaskTreeResult,
+  TaskDependencyResult,
+  TaskComment,
+  TaskHistoryResult,
+  TodoImportResult,
+  EntityLink,
+  KnowledgeEntry,
+  KnowledgeDetail,
+  KnowledgeSearchRequest,
+  KnowledgeSearchResult,
+  KnowledgeQueryParams,
+  KnowledgeLinkResult,
+  ConsolidationJob,
+  ConsolidationJobDetail,
+  RevisionStatus,
+  RevisionRunResult,
+  ConsolidationAnalysisResult,
+  ConsolidationApplyOutcome,
+  RevisionJobQueryParams,
 } from "./types";
 
 // --- helpers ---
@@ -339,12 +366,25 @@ export function useDocumentationActions() {
     qc.invalidateQueries({ queryKey: ["jobs"] });
   };
   const generateRepository = useMutation({
-    mutationFn: (repositoryId: string) =>
-      unwrap<GenerateDocumentationResponse>(apiClient.post(`/documentation/repositories/${repositoryId}/generate`)),
+    mutationFn: (payload: { repositoryId: string; force?: boolean; maxSymbols?: number; strategy?: "usage" | "kind"; minUsage?: number }) =>
+      unwrap<{ jobId: string }>(
+        apiClient.post(`/documentation/repositories/${payload.repositoryId}/generate`, {
+          force: payload.force ?? false,
+          maxSymbols: payload.maxSymbols ?? null,
+          strategy: payload.strategy ?? "usage",
+          minUsage: payload.minUsage ?? 0,
+        }),
+      ),
     onSuccess: invalidate,
   });
   const generateTarget = useMutation({
-    mutationFn: (payload: { repositoryId: string; targetType: DocumentationTargetType; targetRef: string }) =>
+    mutationFn: (payload: {
+      repositoryId: string;
+      targetType: DocumentationTargetType;
+      targetRef?: string;
+      symbolId?: string;
+      force?: boolean;
+    }) =>
       unwrap<GenerateDocumentationResponse>(apiClient.post("/documentation/targets/generate", payload)),
     onSuccess: invalidate,
   });
@@ -354,3 +394,384 @@ export function useDocumentationActions() {
   });
   return { generateRepository, generateTarget, remove };
 }
+
+// Repository links (cross-repo relations)
+export function useRepositoryLinks(repositoryId?: string) {
+  return useQuery({
+    queryKey: ["repository-links", repositoryId ?? "all"],
+    queryFn: () =>
+      unwrap<RepositoryLink[]>(
+        apiClient.get("/repository-links", { params: { repositoryId: repositoryId || undefined } }),
+      ),
+  });
+}
+
+export function useRepositoryLinkActions() {
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["repository-links"] });
+  const create = useMutation({
+    mutationFn: (payload: { sourceRepositoryId: string; targetRepositoryId: string; linkType: string; note?: string }) =>
+      unwrap<RepositoryLink>(apiClient.post("/repository-links", payload)),
+    onSuccess: invalidate,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => apiClient.delete(`/repository-links/${id}`),
+    onSuccess: invalidate,
+  });
+  return { create, remove };
+}
+
+// Per-object usage statistics
+export function useRepositoryUsage(repositoryId?: string, days = 30) {
+  return useQuery({
+    queryKey: ["usage", repositoryId ?? "all", days],
+    queryFn: () =>
+      unwrap<SymbolUsageInfo[]>(
+        apiClient.get(`/repositories/${repositoryId}/usage`, { params: { days, limit: 20 } }),
+      ),
+    enabled: !!repositoryId,
+  });
+}
+
+// --- Projects ---
+export function useProjects() {
+  return useQuery({
+    queryKey: ["projects"],
+    queryFn: () => unwrap<Project[]>(apiClient.get("/projects")),
+  });
+}
+
+export function useCreateProject() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { name?: string; repositoryIds: string[]; path?: string; language?: string }) =>
+      unwrap<Project>(apiClient.post("/projects", payload)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+  });
+}
+
+// --- Tasks ---
+export function useTasks(params: TaskQueryParams = {}) {
+  return useQuery({
+    queryKey: ["tasks", "list", params],
+    queryFn: () => unwrap<TaskItem[]>(apiClient.get("/tasks", { params })),
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useTask(id: string | undefined) {
+  return useQuery({
+    queryKey: ["tasks", "detail", id],
+    queryFn: () => unwrap<TaskDetail>(apiClient.get(`/tasks/${id}`)),
+    enabled: !!id,
+  });
+}
+
+export function useTaskTree(params: TaskTreeParams = {}, enabled = true) {
+  return useQuery({
+    queryKey: ["tasks", "tree", params],
+    queryFn: () => unwrap<TaskTreeResult>(apiClient.get("/tasks/tree", { params })),
+    enabled,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useTaskDependencies(id: string | undefined) {
+  return useQuery({
+    queryKey: ["tasks", "dependencies", id],
+    queryFn: () => unwrap<EntityLink[]>(apiClient.get(`/tasks/${id}/dependencies`)),
+    enabled: !!id,
+  });
+}
+
+export function useTaskComments(id: string | undefined) {
+  return useQuery({
+    queryKey: ["tasks", "comments", id],
+    queryFn: () => unwrap<TaskComment[]>(apiClient.get(`/tasks/${id}/comments`)),
+    enabled: !!id,
+  });
+}
+
+export function useTaskHistory(id: string | undefined) {
+  return useQuery({
+    queryKey: ["tasks", "history", id],
+    queryFn: () => unwrap<TaskHistoryResult>(apiClient.get(`/tasks/${id}/history`)),
+    enabled: !!id,
+  });
+}
+
+export function useTaskActions() {
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["tasks"] });
+  const create = useMutation({
+    mutationFn: (payload: {
+      title: string;
+      description?: string;
+      kind?: TaskItem["kind"];
+      status?: TaskItem["status"];
+      priority?: TaskItem["priority"];
+      projectId?: string;
+      repositoryId?: string;
+      parentTaskId?: string;
+      createdBy?: string;
+    }) => unwrap<TaskResult>(apiClient.post("/tasks", payload)),
+    onSuccess: invalidate,
+  });
+  const update = useMutation({
+    mutationFn: ({ id, ...payload }: {
+      id: string;
+      expectedVersion: number;
+      title?: string;
+      description?: string;
+      kind?: TaskItem["kind"];
+      status?: TaskItem["status"];
+      priority?: TaskItem["priority"];
+      projectId?: string;
+      repositoryId?: string;
+      parentTaskId?: string;
+      clearParent?: boolean;
+      actor?: string;
+    }) => unwrap<TaskResult>(apiClient.put(`/tasks/${id}`, payload)),
+    onSuccess: invalidate,
+  });
+  const archive = useMutation({
+    mutationFn: ({ id, expectedVersion, actor }: { id: string; expectedVersion: number; actor?: string }) =>
+      unwrap<TaskItem>(apiClient.post(`/tasks/${id}/archive`, null, { params: { expectedVersion, actor } })),
+    onSuccess: invalidate,
+  });
+  const restore = useMutation({
+    mutationFn: ({ id, expectedVersion, actor }: { id: string; expectedVersion: number; actor?: string }) =>
+      unwrap<TaskItem>(apiClient.post(`/tasks/${id}/restore`, null, { params: { expectedVersion, actor } })),
+    onSuccess: invalidate,
+  });
+  const addComment = useMutation({
+    mutationFn: ({ id, body, author }: { id: string; body: string; author?: string }) =>
+      unwrap<{ task: TaskItem; comment: TaskComment }>(
+        apiClient.post(`/tasks/${id}/comments`, { body, author }),
+      ),
+    onSuccess: invalidate,
+  });
+  const addDependency = useMutation({
+    mutationFn: ({ id, dependsOnTaskId, actor }: { id: string; dependsOnTaskId: string; actor?: string }) =>
+      unwrap<TaskDependencyResult>(
+        apiClient.post(`/tasks/${id}/dependencies`, { dependsOnTaskId, actor }),
+      ),
+    onSuccess: invalidate,
+  });
+  const removeDependency = useMutation({
+    mutationFn: ({ id, dependsOnTaskId, actor }: { id: string; dependsOnTaskId: string; actor?: string }) =>
+      apiClient.delete(`/tasks/${id}/dependencies/${dependsOnTaskId}`, { params: { actor } }),
+    onSuccess: invalidate,
+  });
+  return { create, update, archive, restore, addComment, addDependency, removeDependency };
+}
+
+export function useImportTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { repositoryId: string; path: string; projectId?: string; dryRun?: boolean }) =>
+      unwrap<TodoImportResult>(apiClient.post("/tasks/import", payload)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["tasks"] }),
+  });
+}
+
+export function useExportTasks() {
+  return useMutation({
+    mutationFn: (params: { projectId?: string; repositoryId?: string; includeArchived?: boolean }) =>
+      unwrap<string>(apiClient.get("/tasks/export", { params, responseType: "text" })),
+  });
+}
+
+// --- Knowledge ---
+export function useKnowledgeList(params: KnowledgeQueryParams = {}, enabled = true) {
+  return useQuery({
+    queryKey: ["knowledge", "list", params],
+    queryFn: () =>
+      unwrap<KnowledgeEntry[]>(
+        apiClient.get("/knowledge", { params, paramsSerializer: { indexes: null } }),
+      ),
+    enabled,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useKnowledgeSearch(req: KnowledgeSearchRequest, enabled = true) {
+  return useQuery({
+    queryKey: ["knowledge", "search", req],
+    queryFn: () => unwrap<KnowledgeSearchResult>(apiClient.post("/knowledge/search", req)),
+    enabled,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useKnowledge(id: string | undefined) {
+  return useQuery({
+    queryKey: ["knowledge", "detail", id],
+    queryFn: () => unwrap<KnowledgeDetail>(apiClient.get(`/knowledge/${id}`)),
+    enabled: !!id,
+  });
+}
+
+export function useKnowledgeRelated(id: string | undefined, depth = 1, relation?: string) {
+  return useQuery({
+    queryKey: ["knowledge", "related", id, depth, relation ?? "all"],
+    queryFn: () =>
+      unwrap<KnowledgeEntry[]>(
+        apiClient.get(`/knowledge/${id}/related`, { params: { depth, relation } }),
+      ),
+    enabled: !!id,
+  });
+}
+
+export function useKnowledgeActions() {
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["knowledge"] });
+  const create = useMutation({
+    mutationFn: (payload: {
+      title: string;
+      content: string;
+      type: KnowledgeEntry["type"];
+      projectId?: string;
+      repositoryId?: string;
+      sourceRef?: string;
+      externalKey?: string;
+      taskId?: string;
+      createdBy?: string;
+    }) => unwrap<{ entry: KnowledgeEntry; created: boolean }>(apiClient.post("/knowledge", payload)),
+    onSuccess: invalidate,
+  });
+  const update = useMutation({
+    mutationFn: ({ id, ...payload }: {
+      id: string;
+      expectedVersion: number;
+      title?: string;
+      content?: string;
+      type?: KnowledgeEntry["type"];
+      status?: KnowledgeEntry["status"];
+      actor?: string;
+    }) => unwrap<KnowledgeEntry>(apiClient.put(`/knowledge/${id}`, payload)),
+    onSuccess: invalidate,
+  });
+  const markStale = useMutation({
+    mutationFn: ({ id, expectedVersion, reason, actor }: {
+      id: string;
+      expectedVersion: number;
+      reason?: string;
+      actor?: string;
+    }) => unwrap<KnowledgeEntry>(apiClient.post(`/knowledge/${id}/stale`, { expectedVersion, reason, actor })),
+    onSuccess: invalidate,
+  });
+  const addLink = useMutation({
+    mutationFn: ({ id, targetType, targetId, relation, note, actor }: {
+      id: string;
+      targetType: string;
+      targetId: string;
+      relation: string;
+      note?: string;
+      actor?: string;
+    }) =>
+      unwrap<KnowledgeLinkResult>(
+        apiClient.post(`/knowledge/${id}/links`, { targetType, targetId, relation, note }, { params: { actor } }),
+      ),
+    onSuccess: invalidate,
+  });
+  const removeLink = useMutation({
+    mutationFn: ({ id, targetType, targetId, relation, actor }: {
+      id: string;
+      targetType: string;
+      targetId: string;
+      relation: string;
+      actor?: string;
+    }) =>
+      apiClient.delete(`/knowledge/${id}/links`, { params: { targetType, targetId, relation, actor } }),
+    onSuccess: invalidate,
+  });
+  const reembed = useMutation({
+    mutationFn: (limit: number) =>
+      unwrap<{ embedded: number }>(apiClient.post("/knowledge/reembed", null, { params: { limit } })),
+    onSuccess: invalidate,
+  });
+  return { create, update, markStale, addLink, removeLink, reembed };
+}
+
+// --- Revision / consolidation ---
+export function useRevisionStatus() {
+  return useQuery({
+    queryKey: ["revision", "status"],
+    queryFn: () => unwrap<RevisionStatus>(apiClient.get("/revision/status")),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useRevisionJobs(params: RevisionJobQueryParams = {}) {
+  return useQuery({
+    queryKey: ["revision", "jobs", params],
+    queryFn: () => unwrap<ConsolidationJob[]>(apiClient.get("/revision/jobs", { params })),
+    refetchInterval: 5_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useRevisionJob(id: string | undefined) {
+  return useQuery({
+    queryKey: ["revision", "job", id],
+    queryFn: () => unwrap<ConsolidationJobDetail>(apiClient.get(`/revision/jobs/${id}`)),
+    enabled: !!id,
+  });
+}
+
+export function useRevisionActions() {
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["revision"] });
+  const run = useMutation({
+    mutationFn: (payload: { projectId?: string; repositoryId?: string; dryRun?: boolean }) =>
+      unwrap<RevisionRunResult>(apiClient.post("/revision/run", payload)),
+    onSuccess: invalidate,
+  });
+  const analyze = useMutation({
+    mutationFn: ({ id, actor }: { id: string; actor?: string }) =>
+      unwrap<ConsolidationAnalysisResult>(apiClient.post(`/revision/jobs/${id}/analyze`, { actor })),
+    onSuccess: invalidate,
+  });
+  const accept = useMutation({
+    mutationFn: ({ id, expectedProposalVersion, actor }: {
+      id: string;
+      expectedProposalVersion: number;
+      actor?: string;
+    }) =>
+      unwrap<ConsolidationApplyOutcome>(
+        apiClient.post(`/revision/jobs/${id}/accept`, { expectedProposalVersion, actor }),
+      ),
+    onSuccess: invalidate,
+  });
+  const reject = useMutation({
+    mutationFn: ({ id, actor, reason }: { id: string; actor?: string; reason?: string }) =>
+      unwrap<ConsolidationApplyOutcome>(apiClient.post(`/revision/jobs/${id}/reject`, { actor, reason })),
+    onSuccess: invalidate,
+  });
+  const cancel = useMutation({
+    mutationFn: ({ id, actor }: { id: string; actor?: string }) =>
+      unwrap<ConsolidationApplyOutcome>(apiClient.post(`/revision/jobs/${id}/cancel`, { actor })),
+    onSuccess: invalidate,
+  });
+  const postpone = useMutation({
+    mutationFn: ({ id, actor }: { id: string; actor?: string }) =>
+      unwrap<ConsolidationApplyOutcome>(apiClient.post(`/revision/jobs/${id}/postpone`, { actor })),
+    onSuccess: invalidate,
+  });
+  const retry = useMutation({
+    mutationFn: ({ id, actor }: { id: string; actor?: string }) =>
+      unwrap<ConsolidationApplyOutcome>(apiClient.post(`/revision/jobs/${id}/retry`, { actor })),
+    onSuccess: invalidate,
+  });
+  const undo = useMutation({
+    mutationFn: ({ id, actor }: { id: string; actor?: string }) =>
+      unwrap<ConsolidationApplyOutcome>(apiClient.post(`/revision/jobs/${id}/undo`, { actor })),
+    onSuccess: () => {
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["knowledge"] });
+    },
+  });
+  return { run, analyze, accept, reject, cancel, postpone, retry, undo };
+}
+

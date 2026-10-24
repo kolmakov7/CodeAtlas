@@ -4,6 +4,9 @@ using CodeRag.Git.DependencyInjection;
 using CodeRag.Indexer;
 using CodeRag.Infrastructure.DependencyInjection;
 using CodeRag.Infrastructure.Persistence;
+using CodeRag.Documentation;
+using CodeRag.Knowledge;
+using CodeRag.Llm;
 using CodeRag.Mcp.Tools;
 using CodeRag.Search;
 using Microsoft.Extensions.Configuration;
@@ -48,15 +51,23 @@ public sealed class McpProgram
         builder.Services.AddIndexer(builder.Configuration);
         builder.Services.AddSearch(builder.Configuration);
         builder.Services.AddAnalyzers();
+        builder.Services.AddLlm(builder.Configuration);
+        builder.Services.AddDocumentation();
+        builder.Services.AddKnowledge(builder.Configuration, enableScheduler: false);
 
         builder.Services.AddSingleton<CodeSearchTools>();
         builder.Services.AddSingleton<IMcpToolHandler>(sp => sp.GetRequiredService<CodeSearchTools>());
 
+        var revisionToolsEnabled = builder.Configuration.GetValue<bool>("Knowledge:Revision:ToolsEnabled")
+            || Environment.GetEnvironmentVariable("MCP_REVISION_TOOLS") == "1";
+        var toolTypes = new List<Type> { typeof(CodeSearchTools), typeof(TaskTools), typeof(KnowledgeTools) };
+        if (revisionToolsEnabled) toolTypes.Add(typeof(RevisionTools));
         var mcp = builder.Services.AddMcpServer(options =>
         {
             options.ServerInfo = new() { Name = "CodeAtlas", Version = "1.0.0" };
-            options.ServerInstructions = McpServerGuidance.Instructions;
-        }).WithToolsFromAssembly();
+            options.ServerInstructions = McpServerGuidance.Instructions
+                + (revisionToolsEnabled ? McpServerGuidance.RevisionInstructions : "");
+        }).WithTools(toolTypes);
         if (useStdio) mcp.WithStdioServerTransport();
         if (useHttp) mcp.WithHttpTransport();
 

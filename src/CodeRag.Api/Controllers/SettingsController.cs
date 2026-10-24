@@ -44,6 +44,9 @@ public sealed class SettingsController : ControllerBase
             return Problem(title: $"Code embedding endpoint '{body.Embeddings.Code.Endpoint}' is not valid. Must be http:// or https:// with a valid host (IP or DNS), e.g. http://192.168.1.10:8080/v1/embeddings", statusCode: 400);
         if (body.Embeddings?.Text?.Endpoint is not null && !IsValidEndpoint(body.Embeddings.Text.Endpoint))
             return Problem(title: $"Text embedding endpoint '{body.Embeddings.Text.Endpoint}' is not valid. Must be http:// or https:// with a valid host (IP or DNS)", statusCode: 400);
+        // LLM endpoint: empty is allowed (= documentation generation disabled), non-empty must be a valid URL.
+        if (!string.IsNullOrWhiteSpace(body.Llm?.Endpoint) && !IsValidEndpoint(body.Llm!.Endpoint!))
+            return Problem(title: $"LLM endpoint '{body.Llm.Endpoint}' is not valid. Must be http:// or https:// with a valid host (IP or DNS), e.g. http://192.168.1.10:4000/v1", statusCode: 400);
         var flat = AppSettingsDto.Flatten(body);
         _logger.LogInformation("PUT /api/settings keys={Keys}", string.Join(",", flat.Keys));
         var updated = await _settings.UpsertAsync(flat, ct).ConfigureAwait(false);

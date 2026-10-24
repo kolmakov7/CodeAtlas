@@ -60,6 +60,21 @@ public sealed class SystemSettingsDto
     public string? LogLevel { get; set; }
 }
 
+/// <summary>LLM (chat completion) used for AI documentation generation.</summary>
+public sealed class LlmSettingsDto
+{
+    public string? Endpoint { get; set; }
+    public string? Model { get; set; }
+    public double? Temperature { get; set; }
+    public int? MaxTokens { get; set; }
+    public int? TimeoutSeconds { get; set; }
+    public int? MaxRetries { get; set; }
+    public int? MaxContextChars { get; set; }
+
+    /// <summary>Read-only: true when an endpoint is set (feature enabled).</summary>
+    public bool Configured { get; set; }
+}
+
 /// <summary>Вложенная модель настроек — контракт Web UI (Settings.tsx).</summary>
 public sealed class AppSettingsDto
 {
@@ -69,6 +84,8 @@ public sealed class AppSettingsDto
     public SearchSettingsDto? Search { get; set; }
     public StorageSettingsDto? Storage { get; set; }
     public SystemSettingsDto? System { get; set; }
+    public LlmSettingsDto? Llm { get; set; }
+    public RevisionSettingsDto? Revision { get; set; }
 
     /// <summary>Разворачивает DTO в плоские ключи "Group:Key" для таблицы settings.</summary>
     public static Dictionary<string, string> Flatten(AppSettingsDto dto)
@@ -99,6 +116,17 @@ public sealed class AppSettingsDto
             Add("Indexer:MinEmbeddingChars", i.MinEmbeddingChars?.ToString(CultureInfo.InvariantCulture));
             Add("Indexer:Exclusions", i.Exclusions is null ? null : string.Join(", ", i.Exclusions));
             Add("Indexer:LanguageExclusions", i.LanguageExclusions is null ? null : string.Join(", ", i.LanguageExclusions));
+        }
+
+        if (dto.Revision is { } rev)
+        {
+            Add("Knowledge:Revision:Enabled", rev.Enabled?.ToString(CultureInfo.InvariantCulture));
+            Add("Knowledge:Revision:IntervalDays", rev.IntervalDays?.ToString(CultureInfo.InvariantCulture));
+            Add("Knowledge:Revision:CheckMinutes", rev.CheckMinutes?.ToString(CultureInfo.InvariantCulture));
+            Add("Knowledge:Revision:MaxEntriesPerRun", rev.MaxEntriesPerRun?.ToString(CultureInfo.InvariantCulture));
+            Add("Knowledge:Revision:SimilarityThreshold", rev.SimilarityThreshold?.ToString(CultureInfo.InvariantCulture));
+            Add("Knowledge:Revision:StaleDays", rev.StaleDays?.ToString(CultureInfo.InvariantCulture));
+            Add("Knowledge:Revision:ToolsEnabled", rev.ToolsEnabled?.ToString(CultureInfo.InvariantCulture));
         }
 
         if (dto.Embeddings is { } e)
@@ -140,6 +168,17 @@ public sealed class AppSettingsDto
             Add("System:LogLevel", sys.LogLevel);
         }
 
+        if (dto.Llm is { } llm)
+        {
+            Add("Llm:Endpoint", llm.Endpoint);
+            Add("Llm:Model", llm.Model);
+            Add("Llm:Temperature", llm.Temperature?.ToString(CultureInfo.InvariantCulture));
+            Add("Llm:MaxTokens", llm.MaxTokens?.ToString(CultureInfo.InvariantCulture));
+            Add("Llm:TimeoutSeconds", llm.TimeoutSeconds?.ToString(CultureInfo.InvariantCulture));
+            Add("Llm:MaxRetries", llm.MaxRetries?.ToString(CultureInfo.InvariantCulture));
+            Add("Llm:MaxContextChars", llm.MaxContextChars?.ToString(CultureInfo.InvariantCulture));
+        }
+
         return result;
     }
 
@@ -163,6 +202,10 @@ public sealed class AppSettingsDto
         // Stored value wins over merged config; null if absent.
         string? Resolve(string key) => Get(key) ?? config[key];
         bool ResolveBool(string key, bool fallback) => bool.TryParse(Resolve(key), out var v) ? v : fallback;
+        int ResolveInt(string key, int fallback) =>
+            int.TryParse(Resolve(key), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+        double ResolveDouble(string key, double fallback) =>
+            double.TryParse(Resolve(key), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
 
         // Per-domain value, falling back to the legacy single-model key, then a default.
         string? DomStr(string domain, string key, string? legacyKey, string? fallback) =>
@@ -192,6 +235,16 @@ public sealed class AppSettingsDto
                 MinEmbeddingChars = CfgInt("Indexer:MinEmbeddingChars", 32),
                 Exclusions = SplitList(Get("Indexer:Exclusions")),
                 LanguageExclusions = SplitList(Get("Indexer:LanguageExclusions"))
+            },
+            Revision = new RevisionSettingsDto
+            {
+                Enabled = ResolveBool("Knowledge:Revision:Enabled", false),
+                IntervalDays = ResolveInt("Knowledge:Revision:IntervalDays", 7),
+                CheckMinutes = ResolveInt("Knowledge:Revision:CheckMinutes", 15),
+                MaxEntriesPerRun = ResolveInt("Knowledge:Revision:MaxEntriesPerRun", 500),
+                SimilarityThreshold = ResolveDouble("Knowledge:Revision:SimilarityThreshold", 0.8),
+                StaleDays = ResolveInt("Knowledge:Revision:StaleDays", 180),
+                ToolsEnabled = ResolveBool("Knowledge:Revision:ToolsEnabled", false)
             },
             Embeddings = new EmbeddingsSettingsDto
             {
@@ -231,6 +284,17 @@ public sealed class AppSettingsDto
             System = new SystemSettingsDto
             {
                 LogLevel = Get("System:LogLevel") ?? "Information"
+            },
+            Llm = new LlmSettingsDto
+            {
+                Endpoint = Resolve("Llm:Endpoint") ?? CodeRag.Llm.LlmOptions.DefaultEndpoint,
+                Model = Resolve("Llm:Model") ?? CodeRag.Llm.LlmOptions.DefaultModel,
+                Temperature = ResolveDouble("Llm:Temperature", 0.2),
+                MaxTokens = ResolveInt("Llm:MaxTokens", 4096),
+                TimeoutSeconds = ResolveInt("Llm:TimeoutSeconds", 300),
+                MaxRetries = ResolveInt("Llm:MaxRetries", 2),
+                MaxContextChars = ResolveInt("Llm:MaxContextChars", 60000),
+                Configured = !string.IsNullOrWhiteSpace(Resolve("Llm:Endpoint") ?? CodeRag.Llm.LlmOptions.DefaultEndpoint)
             }
         };
     }
@@ -248,4 +312,15 @@ public sealed class AppSettingsDto
         if (TimeSpan.TryParse(raw, CultureInfo.InvariantCulture, out var ts)) return (int)ts.TotalSeconds;
         return fallback;
     }
+
+public sealed class RevisionSettingsDto
+{
+    public bool? Enabled { get; set; }
+    public int? IntervalDays { get; set; }
+    public int? CheckMinutes { get; set; }
+    public int? MaxEntriesPerRun { get; set; }
+    public double? SimilarityThreshold { get; set; }
+    public int? StaleDays { get; set; }
+    public bool? ToolsEnabled { get; set; }
+}
 }

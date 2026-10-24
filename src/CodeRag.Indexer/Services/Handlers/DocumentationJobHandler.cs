@@ -5,6 +5,7 @@ using CodeRag.Documentation;
 using CodeRag.Documentation.Models;
 using CodeRag.Indexer.Services.Indexing;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace CodeRag.Indexer.Services.Handlers;
 
@@ -56,9 +57,12 @@ internal sealed class DocumentationJobHandler : IIndexingJobHandler
             Branch: repo.Branch);
 
         var progress = new ThrottledProgress(_progress, job, ct);
+        var options = ParseOptions(job.Options);
         var result = await _documentation.GenerateForRepositoryAsync(
-            repoTarget, includeRepositoryLevel: true, force: false, maxSymbols: null,
-            progress: progress, ct: ct).ConfigureAwait(false);
+            repoTarget, includeRepositoryLevel: true, force: options.Force, maxSymbols: options.MaxSymbols,
+            progress: progress, ct: ct,
+            strategy: string.IsNullOrWhiteSpace(options.Strategy) ? "usage" : options.Strategy!,
+            minUsage: options.MinUsage).ConfigureAwait(false);
         progress.Complete().GetAwaiter().GetResult();
 
         var generated = result.Results.Count(r => r.Generated);
@@ -67,6 +71,18 @@ internal sealed class DocumentationJobHandler : IIndexingJobHandler
         _logger.LogInformation(
             "Documentation job {JobId} repo {Repo}: {Total} target(s), {Generated} generated, {Skipped} unchanged, {Failed} failed",
             job.Id, repo.Id, result.Total, generated, skipped, result.Failed);
+    }
+
+    /// <summary>Per-job options (indexing_jobs.options JSON): force regeneration and/or cap the number of targets.</summary>
+    private sealed record DocJobOptions(bool Force = false, int? MaxSymbols = null, string? Strategy = null, int MinUsage = 0);
+
+    private static readonly JsonSerializerOptions JobJsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private static DocJobOptions ParseOptions(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new DocJobOptions();
+        try { return JsonSerializer.Deserialize<DocJobOptions>(json, JobJsonOptions) ?? new DocJobOptions(); }
+        catch { return new DocJobOptions(); }
     }
 
     /// <summary>IProgress with throttling (250 ms) — does not hit the DB on every target.</summary>

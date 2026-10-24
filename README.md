@@ -81,8 +81,8 @@ Changeable without a rebuild: Web UI **Settings** → DB (`settings` table) → 
 | | `Embeddings:Text:Dimensions` | `0` (auto) | text dimensionality (0 = auto-detect) |
 | | `Embeddings:Text:BatchSize` / `Timeout` / `MaxRetries` | `32 / 30s / 3` | text batching and retry |
 | | `Embeddings:Text:ApiKey` / `ProxyUrl` | — | text key and proxy |
-| **LLM (docs)** | `Llm:Endpoint` | — (empty = off) | OpenAI-compatible base URL for documentation generation; empty → feature reports "LLM not configured" |
-| | `Llm:Model` | `local-model` | model name in the request body |
+| **LLM (docs)** | `Llm:Endpoint` | `http://192.168.137.25:4000/v1` | OpenAI-compatible base URL for documentation generation; empty → feature reports "LLM not configured" |
+| | `Llm:Model` | `qwen3.8:27b` | model name in the request body |
 | | `Llm:Temperature` | `0.2` | sampling temperature (0.0 – 2.0) |
 | | `Llm:MaxTokens` | `4096` | max completion tokens (0 = server decides) |
 | | `Llm:TimeoutSeconds` / `MaxRetries` / `BaseDelayMs` | `300 / 2 / 500` | per-request timeout, retries, backoff base (ms, exponential) |
@@ -109,11 +109,59 @@ TEXT_EMBEDDINGS_MODEL=text-embed-v1
 TEXT_EMBEDDINGS_DIMENSIONS=1536
 ```
 
+## Cross-repository links, usage & cost-bounded docs
+
+- **Repository links** (`repository_links`): declare that one repository depends on / calls
+  another (RepositoryDashboard → "Related repositories"). Links enable cross-repository
+  relation resolution: when relations are extracted, symbols are also resolved against linked
+  repositories, and a language-agnostic pass records references from the repo's own code to
+  foreign symbols (e.g. an app repo calling SQL objects in a DB repo). API:
+  `GET/POST/DELETE /api/repository-links`.
+- **Usage statistics** (`symbol_usage`): recorded for search hits and symbol lookups, and from
+  cross-repo references. Surfaced per repository (RepositoryDashboard → "Top used objects")
+  and via `GET /api/repositories/{id}/usage` and `GET /api/usage/top`.
+- **Cost-bounded documentation**: `POST /api/documentation/repositories/{id}/generate` accepts
+  `{ force, maxSymbols, strategy: "usage"|"kind", minUsage }`. With `strategy=usage` (default)
+  objects are ranked by 30-day usage, then type; `maxSymbols` caps a run (repo overview + N).
+  The Documentation page exposes Max targets, the strategy and "Only used objects".
+
+Relations are owned by their origin repository: re-indexing a repo removes only the edges it
+produced (including cross-repo edges), so a linked repo's re-index never orphans the other side.
+
 ## MCP
 
 ```bash
 docker compose --profile mcp up -d  # sidecar with /data:ro, stdio
 ```
+
+### Central tasks
+
+`create_task`, `list_tasks`, `update_task`, `get_task_tree`, `link_task`,
+`add_task_dependency`, `import_todos`, `export_tasks`. Tasks live on the server with
+hierarchy, dependencies, comments, links and append-only history — don't create `TODO_*.md`
+files. Pass `expectedVersion` on updates and `externalKey` for idempotent creation.
+
+### Knowledge memory
+
+`save_knowledge`, `search_knowledge`, `update_knowledge`, `link_knowledge`,
+`mark_knowledge_stale`, `reembed_knowledge`. Keep durable decisions, constraints and research
+here (separate from temporary tasks), link them to tasks/symbols/files, and scope with
+`projectId`/`repositoryId` (omitted `projectId` = global). Search modes: `hybrid` (default),
+`semantic`, `lexical`; semantic degrades gracefully when embeddings are unavailable.
+
+### Revision
+
+> Revision MCP tools are hidden by default to keep the agent context small. Enable with
+> `Knowledge:Revision:ToolsEnabled=true` or `MCP_REVISION_TOOLS=1` when you need the queue.
+
+`run_revision` deterministically finds duplicate, contradictory, stale and source-less
+knowledge and queues jobs; it never calls the LLM by itself. `analyze_revision_job` runs the
+LLM only on explicit request. If the LLM is not configured, `revision_status` reports it as a
+dependency state and analysis leaves the job in `awaiting_llm` — no automatic retries.
+`accept_revision_job` requires the current `proposalVersion`; accept supersedes sources, undo
+restores them.
+
+Full guide: `docs/tasks-knowledge.md`.
 
 ## Updating and backup
 

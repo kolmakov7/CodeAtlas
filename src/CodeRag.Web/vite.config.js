@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+// API the dev server proxies to. Overridable for e2e (port 8080 may be taken by other services).
+const apiTarget = process.env.VITE_API_TARGET || "http://localhost:8080";
 export default defineConfig({
     plugins: [react()],
     resolve: {
@@ -12,15 +14,19 @@ export default defineConfig({
         port: 5173,
         proxy: {
             "/api": {
-                target: "http://localhost:8080",
+                target: apiTarget,
                 changeOrigin: true,
             },
             "/health": {
-                target: "http://localhost:8080",
+                target: apiTarget,
                 changeOrigin: true,
             },
             "/openapi": {
-                target: "http://localhost:8080",
+                target: apiTarget,
+                changeOrigin: true,
+            },
+            "/mcp": {
+                target: apiTarget,
                 changeOrigin: true,
             },
         },

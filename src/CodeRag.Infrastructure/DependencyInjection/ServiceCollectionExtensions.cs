@@ -66,9 +66,17 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IChunkStore, ChunkStore>();
         services.AddSingleton<CodeRag.Domain.Ports.IRelationStore, RelationStore>();
         services.AddSingleton<CodeRag.Domain.Ports.IRepositoryGroupStore, RepositoryGroupStore>();
+        services.AddSingleton<CodeRag.Domain.Ports.IRepositoryLinkStore, RepositoryLinkStore>();
         services.AddSingleton<CodeRag.Analyzers.Abstractions.ISymbolCatalog, DapperSymbolCatalog>();
         services.AddSingleton<IIndexingErrorStore, IndexingErrorStore>();
         services.AddSingleton<IDocumentationStore, DocumentationStore>();
+        services.AddSingleton<IProjectStore, ProjectStore>();
+        services.AddSingleton<ITaskStore, TaskStore>();
+        services.AddSingleton<IEntityLinkStore, EntityLinkStore>();
+        services.AddSingleton<IEntityHistoryStore, EntityHistoryStore>();
+        services.AddSingleton<IKnowledgeStore, KnowledgeStore>();
+        services.AddSingleton<IConsolidationStore, ConsolidationStore>();
+        services.AddSingleton<IRevisionRunStore, RevisionRunStore>();
 
         // Persistence adapters (Activity, Settings, Statistics, Health)
         services.AddSingleton<IActivityRepository, DapperActivityRepository>();
@@ -77,6 +85,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IStatisticsRefresher, DapperStatisticsRefresher>();
         services.AddSingleton<IMcpUsageRecorder, DapperMcpUsageRecorder>();
         services.AddSingleton<IMcpUsageQueryService, DapperMcpUsageQueryService>();
+        services.AddSingleton<IUsageRecorder, DapperUsageRecorder>();
+        services.AddSingleton<IUsageQueryService, DapperUsageQueryService>();
         services.AddSingleton<IDbHealthProbe, DbHealthProbe>();
         services.AddSingleton<IStorageProbe, StorageProbe>();
 
@@ -100,13 +110,17 @@ public static class ServiceCollectionExtensions
                 var logger = sp.GetRequiredService<ILogger<PgVectorVectorStore>>();
                 return new DefaultVectorStoreFactory(
                     new PgVectorVectorStore(factory, codeDim, EmbeddingDomain.Code, logger, fallbackLogger),
-                    new PgVectorVectorStore(factory, textDim, EmbeddingDomain.Text, logger, fallbackLogger));
+                    new PgVectorVectorStore(factory, textDim, EmbeddingDomain.Text, logger, fallbackLogger),
+                    new PgVectorVectorStore(factory, textDim, EmbeddingDomain.Text, logger, fallbackLogger,
+                        tableName: "vec_knowledge", ownerType: "knowledge"));
             }
 
             var sqliteLogger = sp.GetRequiredService<ILogger<SqliteVecVectorStore>>();
             return new DefaultVectorStoreFactory(
                 new SqliteVecVectorStore(factory, codeDim, EmbeddingDomain.Code, sqliteLogger, fallbackLogger),
-                new SqliteVecVectorStore(factory, textDim, EmbeddingDomain.Text, sqliteLogger, fallbackLogger));
+                new SqliteVecVectorStore(factory, textDim, EmbeddingDomain.Text, sqliteLogger, fallbackLogger),
+                new SqliteVecVectorStore(factory, textDim, EmbeddingDomain.Text, sqliteLogger, fallbackLogger,
+                    tableName: "vec_knowledge", ownerType: "knowledge"));
         });
 
         // Back-compat: the single IVectorStore resolves to the Code store.

@@ -10,25 +10,29 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "generate:api": "orval --config orval.config.ts",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "e2e:prepare": "dotnet build ../../src/CodeRag.Api/CodeRag.Api.csproj",
+    "e2e:api": "rm -rf /tmp/coderag-e2e && CODERAG__E2E_SEED=1 CODERAG__DataDir=/tmp/coderag-e2e ASPNETCORE_URLS=http://localhost:8091 ASPNETCORE_ENVIRONMENT=E2E Llm__Endpoint=http://127.0.0.1:9 dotnet run --project ../../src/CodeRag.Api --no-launch-profile"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.1",
     "@tanstack/react-query": "^5.51.1",
     "axios": "^1.7.4",
-    "clsx": "^2.1.1"
+    "clsx": "^2.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@tanstack/eslint-plugin-query": "^5.51.1",
+    "@types/node": "^26.6.5",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
-    "typescript": "^5.5.3",
-    "vite": "^5.4.1",
-    "orval": "^6.30.0",
     "openapi-typescript": "^7.4.2",
-    "@tanstack/eslint-plugin-query": "^5.51.1"
+    "orval": "^6.30.0",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.1"
   },
   "engines": {
     "node": ">=18"

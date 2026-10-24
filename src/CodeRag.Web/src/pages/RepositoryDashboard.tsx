@@ -4,6 +4,8 @@ import { useRepository, useRepositoryStatistics, useRepositoryActions, useJobs, 
 import { StatCard } from "@/components/StatCard";
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { ProgressBar } from "@/components/ProgressBar";
+import RepositoryLinksCard from "@/components/RepositoryLinksCard";
+import RepositoryUsageCard from "@/components/RepositoryUsageCard";
 import { formatDate, formatDuration } from "@/utils/format";
 import apiClient from "@/api/client";
 import { useQueryClient } from "@tanstack/react-query";
@@ -323,6 +325,11 @@ export default function RepositoryDashboard() {
             <Link to={`/jobs?repositoryId=${repo.id}`}>View all jobs for this repo →</Link>
           </div>
         </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 16, marginTop: 16 }}>
+        <RepositoryLinksCard repositoryId={repo.id} />
+        <RepositoryUsageCard repositoryId={repo.id} />
       </div>
 
       <ConfirmModal

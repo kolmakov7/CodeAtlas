@@ -15,7 +15,9 @@ public sealed record GenerateDocumentationRequest(
 /// <summary>Request to enqueue whole-repository documentation generation.</summary>
 public sealed record GenerateRepositoryDocumentationRequest(
     bool Force = false,
-    int? MaxSymbols = null);
+    int? MaxSymbols = null,
+    string? Strategy = null,
+    int MinUsage = 0);
 
 /// <summary>List-item view of a documentation entry (no content).</summary>
 public sealed record DocumentationDto(

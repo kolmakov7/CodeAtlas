@@ -22,11 +22,17 @@ public sealed class LlmOptions
 {
     public const string SectionName = "Llm";
 
+    /// <summary>Default OpenAI-compatible endpoint (from the local opencode/gateway config).</summary>
+    public const string DefaultEndpoint = "http://192.168.137.25:4000/v1";
+
+    /// <summary>Default chat model used for documentation generation.</summary>
+    public const string DefaultModel = "qwen3.8:27b";
+
     /// <summary>Base URL of the OpenAI-compatible server. Empty = unconfigured.</summary>
     public string? Endpoint { get; set; }
 
     /// <summary>Model name to pass in the request body.</summary>
-    public string? Model { get; set; } = "local-model";
+    public string? Model { get; set; } = DefaultModel;
 
     /// <summary>Sampling temperature.</summary>
     public double Temperature { get; set; } = 0.2;

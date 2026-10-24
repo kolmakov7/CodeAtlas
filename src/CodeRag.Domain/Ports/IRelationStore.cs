@@ -21,6 +21,9 @@ public interface IRelationStore
     /// <summary>Atomically replace all relations of a language in a repository (delete + upsert).</summary>
     Task ReplaceForLanguageAsync(Guid repositoryId, string language, IEnumerable<Relation> relations, CancellationToken ct = default);
 
+    /// <summary>Delete only cross-repository edges originated by a repository (endpoints in different repos).</summary>
+    Task DeleteCrossRepoByOriginAsync(Guid repositoryId, CancellationToken ct = default);
+
     Task<IReadOnlyList<Relation>> GetByRepositoryAsync(Guid repositoryId, CancellationToken ct = default);
 
     Task<IReadOnlyList<Relation>> GetBySymbolAsync(

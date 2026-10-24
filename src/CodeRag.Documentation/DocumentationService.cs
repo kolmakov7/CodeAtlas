@@ -30,6 +30,7 @@ public sealed class DocumentationService
     private readonly ITargetContentHasher _hasher;
     private readonly ISymbolStore _symbols;
     private readonly IFileStore _files;
+    private readonly IUsageQueryService? _usage;
     private readonly ILogger<DocumentationService> _logger;
 
     public DocumentationService(
@@ -39,7 +40,8 @@ public sealed class DocumentationService
         ITargetContentHasher hasher,
         ISymbolStore symbols,
         IFileStore files,
-        ILogger<DocumentationService> logger)
+        ILogger<DocumentationService> logger,
+        IUsageQueryService? usage = null)
     {
         _contextBuilder = contextBuilder;
         _generator = generator;
@@ -48,6 +50,7 @@ public sealed class DocumentationService
         _symbols = symbols;
         _files = files;
         _logger = logger;
+        _usage = usage;
     }
 
     public bool IsAvailable => _generator.IsAvailable;
@@ -104,13 +107,17 @@ public sealed class DocumentationService
     }
 
     /// <summary>Generate documentation for every "documentable" symbol in a repository, plus the repo-level doc.</summary>
+    /// <param name="strategy">"usage" (default) ranks by observed usage; "kind" is the legacy kind/FQN order.</param>
+    /// <param name="minUsage">When &gt; 0, skip objects with a lower 30-day usage score.</param>
     public async Task<DocumentationBatchResult> GenerateForRepositoryAsync(
         DocumentationTarget repoTarget,
         bool includeRepositoryLevel = true,
         bool force = false,
         int? maxSymbols = null,
         IProgress<(int Done, int Total)>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string strategy = "usage",
+        int minUsage = 0)
     {
         var result = new DocumentationBatchResult();
         var total = (includeRepositoryLevel ? 1 : 0);
@@ -126,10 +133,34 @@ public sealed class DocumentationService
         var files = await _files.GetByRepositoryAsync(repoTarget.RepositoryId, ct).ConfigureAwait(false);
         var pathById = files.ToDictionary(f => f.Id, f => f.Path);
         var symbols = await _symbols.GetByRepositoryAsync(repoTarget.RepositoryId, ct).ConfigureAwait(false);
+
+        // Usage scores (30-day window) drive prioritisation when strategy=usage.
+        IReadOnlyDictionary<Guid, int> scores = _usage is not null
+            ? await _usage.GetScoreByRepositoryAsync(repoTarget.RepositoryId, 30, ct).ConfigureAwait(false)
+            : new Dictionary<Guid, int>();
+
+        // Deduplicate by stable target key (several symbols can share a FQN — e.g. external
+        // stubs vs. the real body); keep the most substantial declaration.
         var documentable = symbols
             .Where(s => IsDocumentable(s.Kind))
-            .OrderBy(s => s.Fqn ?? s.Name)
+            .GroupBy(s => DocumentationTarget.BuildTargetRef(DocumentationTargetType.Symbol, s.Fqn, s.Name, null, null), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(s => (s.EndLine ?? 0) - (s.StartLine ?? 0)).First())
             .ToList();
+
+        if (minUsage > 0)
+            documentable = documentable.Where(s => scores.GetValueOrDefault(s.Id) >= minUsage).ToList();
+
+        documentable = strategy == "usage"
+            ? documentable
+                .OrderByDescending(s => scores.GetValueOrDefault(s.Id))
+                .ThenBy(s => KindRank(s.Kind))
+                .ThenBy(s => s.Fqn ?? s.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : documentable
+                .OrderBy(s => KindRank(s.Kind))
+                .ThenBy(s => s.Fqn ?? s.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
         if (maxSymbols is int m)
             documentable = documentable.Take(m).ToList();
 
@@ -159,12 +190,29 @@ public sealed class DocumentationService
         return result;
     }
 
-    /// <summary>Kinds worth a dedicated documentation entry (types; methods only when explicitly targeted).</summary>
+    /// <summary>
+    /// Kinds worth a dedicated documentation entry: object-oriented types plus SQL objects
+    /// (procedures/functions/views/tables). Methods are documented only when explicitly targeted.
+    /// </summary>
     private static bool IsDocumentable(SymbolKind kind) => kind switch
     {
         SymbolKind.Class or SymbolKind.Interface or SymbolKind.Struct
         or SymbolKind.Record or SymbolKind.Enum => true,
+        SymbolKind.Procedure or SymbolKind.Function
+        or SymbolKind.View or SymbolKind.Table => true,
         _ => false
+    };
+
+    /// <summary>Ordering weight for a capped repository run: more meaningful objects first.</summary>
+    private static int KindRank(SymbolKind kind) => kind switch
+    {
+        SymbolKind.Class or SymbolKind.Interface or SymbolKind.Record => 0,
+        SymbolKind.Struct or SymbolKind.Enum => 1,
+        SymbolKind.Procedure => 2,
+        SymbolKind.Function => 3,
+        SymbolKind.View => 4,
+        SymbolKind.Table => 5,
+        _ => 6
     };
 }
 

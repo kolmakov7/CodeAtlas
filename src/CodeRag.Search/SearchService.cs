@@ -24,6 +24,7 @@ public sealed class SearchService : ISearchService
     private readonly FileContentService _files;
     private readonly IOptionsMonitor<SearchOptions> _optionsMonitor;
     private readonly ILogger<SearchService> _logger;
+    private readonly IUsageRecorder? _usage;
     private SearchOptions Opts => _optionsMonitor.CurrentValue;
 
     [Microsoft.Extensions.DependencyInjection.ActivatorUtilitiesConstructor]
@@ -35,7 +36,8 @@ public sealed class SearchService : ISearchService
         RelationService relations,
         FileContentService files,
         IOptionsMonitor<SearchOptions> options,
-        ILogger<SearchService> logger)
+        ILogger<SearchService> logger,
+        IUsageRecorder? usage = null)
     {
         _chunkLoader = chunkLoader;
         _ranker = ranker;
@@ -45,6 +47,7 @@ public sealed class SearchService : ISearchService
         _files = files;
         _optionsMonitor = options;
         _logger = logger;
+        _usage = usage;
     }
 
     public static string? NormalizeRelationType(string? token) => RelationService.Normalize(token);
@@ -167,12 +170,27 @@ public sealed class SearchService : ISearchService
         }
 
         sw.Stop();
+        if (_usage is not null && items.Count > 0)
+            _usage.RecordSymbols("search_hit", "codeatlas", items.Where(i => i.SymbolId.HasValue).Select(i => i.SymbolId!.Value));
         _logger.LogInformation("Search query={Query} mode={Mode} latency={Latency}ms candidates={Cand} total={Total} returned={Returned} exact={Exact} fts={Fts} vector={Vec} struct={Struct} weights lex={Lex} sem={Sem} structW={StructW} warnings={Warnings}", query, req.Mode, sw.ElapsedMilliseconds, candidates.Count, total, items.Count, exactCount, ftsCount, vectorCount, structCount, Opts.LexicalWeight, Opts.SemanticWeight, Opts.StructuralWeight, warnings.Count == 0 ? "none" : string.Join(",", warnings));
         return new SearchResult(items, total, warnings) { ElapsedMs = sw.ElapsedMilliseconds };
     }
 
-    public Task<IReadOnlyList<Symbol>> FindSymbolAsync(FindSymbolRequest req, CancellationToken ct = default) => _symbols.FindAsync(req, ct);
-    public Task<Symbol?> GetSymbolAsync(Guid symbolId, CancellationToken ct = default) => _symbols.GetAsync(symbolId, ct);
+    public async Task<IReadOnlyList<Symbol>> FindSymbolAsync(FindSymbolRequest req, CancellationToken ct = default)
+    {
+        var result = await _symbols.FindAsync(req, ct).ConfigureAwait(false);
+        if (_usage is not null && result.Count > 0)
+            _usage.RecordSymbols("lookup", "codeatlas", result.Select(s => s.Id));
+        return result;
+    }
+
+    public async Task<Symbol?> GetSymbolAsync(Guid symbolId, CancellationToken ct = default)
+    {
+        var symbol = await _symbols.GetAsync(symbolId, ct).ConfigureAwait(false);
+        if (symbol is not null) _usage?.RecordSymbol("lookup", "codeatlas", symbolId);
+        return symbol;
+    }
+
     public Task<IReadOnlyList<Reference>> FindReferencesAsync(Guid symbolId, CancellationToken ct = default) => _relations.FindReferencesAsync(symbolId, ct);
     public Task<IReadOnlyList<RelationEntry>> GetRelationsAsync(Guid symbolId, CodeRag.Domain.Enums.RelationDirection direction = CodeRag.Domain.Enums.RelationDirection.Both, string[]? types = null, CancellationToken ct = default) => _relations.GetRelationsAsync(symbolId, direction, types, ct);
     public Task<IReadOnlyList<Symbol>> FindImplementationsAsync(Guid symbolId, CancellationToken ct = default) => _relations.FindImplementationsAsync(symbolId, ct);

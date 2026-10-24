@@ -29,6 +29,7 @@ COPY src/CodeRag.Mcp/CodeRag.Mcp.csproj src/CodeRag.Mcp/
 COPY src/CodeRag.Application/CodeRag.Application.csproj src/CodeRag.Application/
 COPY src/CodeRag.Llm/CodeRag.Llm.csproj src/CodeRag.Llm/
 COPY src/CodeRag.Documentation/CodeRag.Documentation.csproj src/CodeRag.Documentation/
+COPY src/CodeRag.Knowledge/CodeRag.Knowledge.csproj src/CodeRag.Knowledge/
 COPY src/CodeRag.Api/CodeRag.Api.csproj src/CodeRag.Api/
 COPY tests/CodeRag.Tests/CodeRag.Tests.csproj tests/CodeRag.Tests/
 

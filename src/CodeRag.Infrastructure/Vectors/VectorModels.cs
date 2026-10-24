@@ -20,7 +20,8 @@ public sealed record VectorEntry(
     float[] Embedding,
     string Model = "default",
     int Dim = 384,
-    int? ContextLength = null
+    int? ContextLength = null,
+    string OwnerType = "chunk"
 );
 
 /// <summary>Одна модель, по которой хранятся векторы (счётчик чанков).</summary>

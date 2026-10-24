@@ -10,8 +10,10 @@ using CodeRag.Infrastructure.DependencyInjection;
 using CodeRag.Infrastructure.Persistence;
 using CodeRag.Llm;
 using CodeRag.Documentation;
+using CodeRag.Knowledge;
 using Microsoft.Extensions.Configuration;
 using CodeRag.Search;
+using CodeRag.Domain.Exceptions;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.OpenApi.Models;
 
@@ -59,6 +61,7 @@ builder.Services.AddSearch(builder.Configuration);
 // LLM + documentation generation (OpenAI-compatible chat; degrades gracefully when unconfigured)
 builder.Services.AddLlm(builder.Configuration);
 builder.Services.AddDocumentation();
+builder.Services.AddKnowledge(builder.Configuration, enableScheduler: true);
 builder.Services.AddAnalyzers();
 
 // Application layer handlers (CQRS-lite)
@@ -69,18 +72,31 @@ builder.Services.AddSingleton<GetStatisticsQueryHandler>();
 builder.Services.AddSingleton<HealthService>();
 builder.Services.AddSingleton<SettingsService>();
 builder.Services.AddSingleton<StatisticsService>();
+// E2E seed (Playwright) — only invoked when CODERAG__E2E_SEED=1
+builder.Services.AddSingleton<E2eDataSeeder>();
 
 // MCP remote (Streamable HTTP) — reuse tools from CodeRag.Mcp, exposed at /mcp
 // stdio не нужен, http достаточно для remote opencode (type: remote, url: http://host:8080/mcp)
 builder.Services.AddSingleton<CodeRag.Mcp.Tools.CodeSearchTools>();
 builder.Services.AddSingleton<CodeRag.Mcp.Tools.DocumentationTools>();
-    builder.Services.AddMcpServer(options =>
+var revisionToolsEnabled = builder.Configuration.GetValue<bool>("Knowledge:Revision:ToolsEnabled")
+    || Environment.GetEnvironmentVariable("MCP_REVISION_TOOLS") == "1";
+var mcpToolTypes = new List<Type>
+{
+    typeof(CodeRag.Mcp.Tools.CodeSearchTools),
+    typeof(CodeRag.Mcp.Tools.DocumentationTools),
+    typeof(CodeRag.Mcp.Tools.TaskTools),
+    typeof(CodeRag.Mcp.Tools.KnowledgeTools)
+};
+if (revisionToolsEnabled) mcpToolTypes.Add(typeof(CodeRag.Mcp.Tools.RevisionTools));
+builder.Services.AddMcpServer(options =>
     {
         options.ServerInfo = new() { Name = "CodeAtlas", Version = "1.0.0" };
-        options.ServerInstructions = CodeRag.Mcp.McpServerGuidance.Instructions;
+        options.ServerInstructions = CodeRag.Mcp.McpServerGuidance.Instructions
+            + (revisionToolsEnabled ? CodeRag.Mcp.McpServerGuidance.RevisionInstructions : "");
     })
     .WithHttpTransport()
-    .WithToolsFromAssembly(typeof(CodeRag.Mcp.Tools.CodeSearchTools).Assembly);
+    .WithTools(mcpToolTypes);
 
 // Таблица settings → IConfiguration: значения из БД имеют приоритет над env/appsettings,
 // hot reload через FireReload() после Upsert (SettingsController).
@@ -111,6 +127,13 @@ using (var scope = app.Services.CreateScope())
         // Загрузить сохранённые настройки из БД в IConfiguration (первый Load() при Build()
         // выполняется до инициализации DI и БД, поэтому значения тогда ещё недоступны).
         settingsTableProvider.FireReload();
+        // Playwright E2E: deterministic seeded dataset (see E2eDataSeeder).
+        if (Environment.GetEnvironmentVariable("CODERAG__E2E_SEED") == "1")
+        {
+            var seeder = scope.ServiceProvider.GetRequiredService<E2eDataSeeder>();
+            await seeder.SeedAsync().ConfigureAwait(false);
+            loggerInit.LogInformation("E2E seed flag set — seeded fixture data");
+        }
     }
     catch (Exception ex)
     {
@@ -121,6 +144,34 @@ using (var scope = app.Services.CreateScope())
 
 app.UseSwagger();
 app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "CodeRag v1"));
+
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (VersionConflictException ex)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Title = "Version conflict",
+            Detail = ex.Message,
+            Status = StatusCodes.Status409Conflict
+        });
+    }
+    catch (DomainValidationException ex)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Title = "Validation error",
+            Detail = ex.Message,
+            Status = StatusCodes.Status400BadRequest
+        });
+    }
+});
 
 app.MapGet("/openapi/{documentName}.json", (string documentName, Swashbuckle.AspNetCore.Swagger.ISwaggerProvider provider) =>
 {

@@ -26,6 +26,9 @@ public sealed class IndexingJob
     /// <summary>Последний обработанный путь (для файловых джоб).</summary>
     public string? CurrentFile { get; private set; }
 
+    /// <summary>Произвольные JSON-опции, специфичные для типа джобы (например documentation: {"force":false,"maxSymbols":25}).</summary>
+    public string? Options { get; private set; }
+
     private IndexingJob(Guid id, Guid repositoryId, JobType type, JobStatus status, DateTimeOffset startedAt)
     {
         Id = id;
@@ -39,7 +42,8 @@ public sealed class IndexingJob
         Guid id, Guid repositoryId, JobType type,
         JobStatus status = JobStatus.Queued,
         DateTimeOffset? startedAt = null,
-        string? fromCommit = null, string? toCommit = null)
+        string? fromCommit = null, string? toCommit = null,
+        string? options = null)
     {
         if (id == Guid.Empty) throw new DomainValidationException("Job Id must not be empty.");
         if (repositoryId == Guid.Empty) throw new DomainValidationException("RepositoryId must not be empty.");
@@ -48,6 +52,7 @@ public sealed class IndexingJob
         {
             FromCommit = string.IsNullOrWhiteSpace(fromCommit) ? null : fromCommit.Trim(),
             ToCommit = string.IsNullOrWhiteSpace(toCommit) ? null : toCommit.Trim(),
+            Options = string.IsNullOrWhiteSpace(options) ? null : options,
             Progress = 0
         };
     }
@@ -122,7 +127,8 @@ public sealed class IndexingJob
         Guid id, Guid repositoryId, JobType type, JobStatus status,
         DateTimeOffset startedAt, DateTimeOffset? finishedAt,
         double progress, string? error, string? fromCommit, string? toCommit,
-        int? totalItems = null, int? itemsDone = null, string? phase = null, string? currentFile = null)
+        int? totalItems = null, int? itemsDone = null, string? phase = null, string? currentFile = null,
+        string? options = null)
     {
         return new IndexingJob(id, repositoryId, type, status, startedAt)
         {
@@ -134,7 +140,8 @@ public sealed class IndexingJob
             TotalItems = totalItems,
             ItemsDone = itemsDone,
             Phase = phase,
-            CurrentFile = currentFile
+            CurrentFile = currentFile,
+            Options = string.IsNullOrWhiteSpace(options) ? null : options
         };
     }
 }

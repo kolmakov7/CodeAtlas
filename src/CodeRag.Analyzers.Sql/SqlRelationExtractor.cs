@@ -36,7 +36,16 @@ public sealed class SqlRelationExtractor : IRepositoryRelationExtractor
         var catalog = await _catalog.GetSymbolsAsync(context.RepositoryId, Language, ct).ConfigureAwait(false);
         if (catalog.Count == 0) return Array.Empty<Relation>();
 
-        var index = new CatalogIndex(catalog);
+        // Cross-repository fallback: symbols of linked repositories (e.g. a DB repo whose
+        // objects are referenced from another DB repo). Local resolution wins.
+        CatalogIndex? linkedIndex = null;
+        if (context.LinkedRepositoryIds is { Count: > 0 })
+        {
+            var linked = await _catalog.GetSymbolsAsync(context.LinkedRepositoryIds, Language, ct).ConfigureAwait(false);
+            if (linked.Count > 0) linkedIndex = new CatalogIndex(linked);
+        }
+
+        var index = new CatalogIndex(catalog, linkedIndex);
         var scope = new Scope();
 
         var total = files.Count;
@@ -105,8 +114,11 @@ public sealed class SqlRelationExtractor : IRepositoryRelationExtractor
         private readonly Dictionary<string, List<CatalogSymbol>> ByFqn = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, List<CatalogSymbol>> ByNorm = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, List<CatalogSymbol>> ByName = new(StringComparer.OrdinalIgnoreCase);
-        public CatalogIndex(IReadOnlyList<CatalogSymbol> catalog)
+        private readonly CatalogIndex? _fallback;
+
+        public CatalogIndex(IReadOnlyList<CatalogSymbol> catalog, CatalogIndex? fallback = null)
         {
+            _fallback = fallback;
             foreach (var c in catalog)
             {
                 if (!string.IsNullOrWhiteSpace(c.Fqn))
@@ -148,7 +160,7 @@ public sealed class SqlRelationExtractor : IRepositoryRelationExtractor
             var stripped = fqn.Replace("[", "").Replace("]", "");
             if (ByFqn.TryGetValue(stripped, out var l3) && l3.Count > 0) return l3[0].Id;
             if (ByNorm.TryGetValue(Normalize(stripped), out var l4) && l4.Count > 0) return l4[0].Id;
-            return null;
+            return _fallback?.ResolveFqn(fqn);
         }
         public Guid? ResolveName(string? name)
         {
@@ -156,7 +168,7 @@ public sealed class SqlRelationExtractor : IRepositoryRelationExtractor
             var clean = name.Replace("[", "").Replace("]", "").Trim();
             if (ByName.TryGetValue(clean, out var l1) && l1.Count > 0) return l1[0].Id;
             if (ByFqn.TryGetValue(clean, out var l2) && l2.Count > 0) return l2[0].Id;
-            return null;
+            return _fallback?.ResolveName(name);
         }
     }
 

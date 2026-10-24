@@ -78,7 +78,8 @@ public sealed class DocumentationTools
 
         if (type == DocumentationTargetType.Repository)
         {
-            var job = IndexingJob.Create(Guid.NewGuid(), repositoryId, JobType.Documentation);
+            var options = System.Text.Json.JsonSerializer.Serialize(new { force });
+            var job = IndexingJob.Create(Guid.NewGuid(), repositoryId, JobType.Documentation, options: options);
             await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
             return $"Documentation generation queued for repository '{repo.Name}' (jobId={job.Id}). Poll the jobs endpoint or documentation status for progress.";
         }

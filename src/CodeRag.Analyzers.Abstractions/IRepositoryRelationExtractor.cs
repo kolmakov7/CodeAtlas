@@ -4,7 +4,10 @@ namespace CodeRag.Analyzers.Abstractions;
 public sealed record SourceFile(string Path, string Content);
 
 /// <summary>Контекст извлечения связей для одного репозитория.</summary>
-public sealed record RelationExtractionContext(Guid RepositoryId, IReadOnlyList<SourceFile> Files);
+public sealed record RelationExtractionContext(
+    Guid RepositoryId,
+    IReadOnlyList<SourceFile> Files,
+    IReadOnlyCollection<Guid>? LinkedRepositoryIds = null);
 
 /// <summary>Прогресс whole-repository извлечения связей (по файлам).</summary>
 public sealed record RelationExtractionProgress(int FilesTotal, int FilesDone, string? CurrentFile);

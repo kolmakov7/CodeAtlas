@@ -130,19 +130,20 @@ public sealed class DocumentationContextBuilder : IDocumentationContextBuilder
             bool outgoing = e.FromSymbolId == symbolId;
             var other = outgoing ? e.ToSymbol : e.FromSymbol;
             if (other is null) continue;
+            var mapped = await ToContextSymbolAsync(other, symbol.RepositoryId, ct).ConfigureAwait(false);
 
             switch (e.RelationType)
             {
                 case nameof(RelationType.Inherits) when outgoing:
-                    AddUnique(baseTypes, ToContextSymbol(other)); break;
+                    AddUnique(baseTypes, mapped); break;
                 case nameof(RelationType.Implements) when outgoing:
-                    AddUnique(interfaces, ToContextSymbol(other)); break;
+                    AddUnique(interfaces, mapped); break;
                 case nameof(RelationType.References) or nameof(RelationType.Calls)
                     or nameof(RelationType.Uses) or nameof(RelationType.DependsOn) when outgoing:
-                    AddUnique(dependencies, ToContextSymbol(other)); break;
+                    AddUnique(dependencies, mapped); break;
                 case nameof(RelationType.Calls) or nameof(RelationType.References)
                     or nameof(RelationType.Uses) or nameof(RelationType.DependsOn) when !outgoing:
-                    AddUnique(callers, ToContextSymbol(other)); break;
+                    AddUnique(callers, mapped); break;
             }
         }
 
@@ -310,6 +311,18 @@ public sealed class DocumentationContextBuilder : IDocumentationContextBuilder
         FilePath: s.FilePath,
         StartLine: s.StartLine,
         EndLine: s.EndLine);
+
+    /// <summary>Map a related symbol, tagging it with its repository when it lives in another (linked) repo.</summary>
+    private async Task<ContextSymbol> ToContextSymbolAsync(SearchSymbol s, Guid localRepoId, CancellationToken ct)
+    {
+        string? repoName = null;
+        if (s.RepositoryId != Guid.Empty && s.RepositoryId != localRepoId)
+        {
+            try { repoName = (await _repos.GetByIdAsync(s.RepositoryId, ct).ConfigureAwait(false))?.Name; }
+            catch { /* best-effort */ }
+        }
+        return ToContextSymbol(s) with { RepositoryName = repoName };
+    }
 
     private static void AddUnique(List<ContextSymbol> list, ContextSymbol item)
     {

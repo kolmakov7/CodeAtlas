@@ -7,6 +7,9 @@ const nav = [
   { to: "/search", label: "Search", icon: "🔍" },
   { to: "/documentation", label: "Documentation", icon: "📄" },
   { to: "/jobs", label: "Jobs", icon: "⚙" },
+  { to: "/tasks", label: "Tasks", icon: "📋" },
+  { to: "/knowledge", label: "Knowledge", icon: "🧠" },
+  { to: "/review", label: "Review", icon: "✅" },
   { to: "/settings", label: "Settings", icon: "⚙" },
   { to: "/diagnostics", label: "Diagnostics", icon: "♥" },
 ];
@@ -25,6 +28,7 @@ export default function Layout() {
           <NavLink
             key={n.to}
             to={n.to}
+            data-testid={`nav-${n.label.toLowerCase().replace(/\s+/g, "-")}`}
             className={({ isActive }) => (isActive && (location.pathname === n.to || (n.to !== "/" && location.pathname.startsWith(n.to))) ? "active" : "")}
           >
             <span style={{ marginRight: 8 }}>{n.icon}</span>

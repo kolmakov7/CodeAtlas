@@ -20,10 +20,17 @@ public sealed class RelationStore : IRelationStore
         try
         {
             const string sql = @"
-INSERT INTO relations(from_symbol_id, to_symbol_id, relation_type, repository_id)
-VALUES (@from, @to, @type, @repo)
+INSERT INTO relations(from_symbol_id, to_symbol_id, relation_type, repository_id,
+                      from_repository_id, to_repository_id, origin_repository_id)
+VALUES (@from, @to, @type, @repo,
+        (SELECT repository_id FROM symbols WHERE id=@from),
+        (SELECT repository_id FROM symbols WHERE id=@to),
+        @repo)
 ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
-  repository_id = excluded.repository_id;";
+  repository_id = excluded.repository_id,
+  from_repository_id = excluded.from_repository_id,
+  to_repository_id = excluded.to_repository_id,
+  origin_repository_id = excluded.origin_repository_id;";
             foreach (var r in list)
             {
                 await conn.ExecuteAsync(sql, new
@@ -46,7 +53,7 @@ ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
     public async Task DeleteByRepositoryAsync(Guid repositoryId, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        await conn.ExecuteAsync("DELETE FROM relations WHERE repository_id=@repo;", new { repo = repositoryId.ToString() }).ConfigureAwait(false);
+        await conn.ExecuteAsync("DELETE FROM relations WHERE origin_repository_id=@repo OR repository_id=@repo;", new { repo = repositoryId.ToString() }).ConfigureAwait(false);
     }
 
     public async Task DeleteByRepositoryAndLanguageAsync(Guid repositoryId, string language, CancellationToken ct = default)
@@ -54,7 +61,7 @@ ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         const string sql = @"
 DELETE FROM relations
-WHERE repository_id=@repo AND (
+WHERE (origin_repository_id=@repo OR repository_id=@repo) AND (
     from_symbol_id IN (SELECT id FROM symbols WHERE repository_id=@repo AND language=@lang)
     OR to_symbol_id IN (SELECT id FROM symbols WHERE repository_id=@repo AND language=@lang)
 );";
@@ -70,7 +77,7 @@ WHERE repository_id=@repo AND (
         {
             const string del = @"
 DELETE FROM relations
-WHERE repository_id=@repo AND (
+WHERE (origin_repository_id=@repo OR repository_id=@repo) AND (
     from_symbol_id IN (SELECT id FROM symbols WHERE repository_id=@repo AND language=@lang)
     OR to_symbol_id IN (SELECT id FROM symbols WHERE repository_id=@repo AND language=@lang)
 );";
@@ -79,10 +86,17 @@ WHERE repository_id=@repo AND (
             if (list.Count > 0)
             {
                 const string sql = @"
-INSERT INTO relations(from_symbol_id, to_symbol_id, relation_type, repository_id)
-VALUES (@from, @to, @type, @repo)
+INSERT INTO relations(from_symbol_id, to_symbol_id, relation_type, repository_id,
+                      from_repository_id, to_repository_id, origin_repository_id)
+VALUES (@from, @to, @type, @repo,
+        (SELECT repository_id FROM symbols WHERE id=@from),
+        (SELECT repository_id FROM symbols WHERE id=@to),
+        @repo)
 ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
-  repository_id = excluded.repository_id;";
+  repository_id = excluded.repository_id,
+  from_repository_id = excluded.from_repository_id,
+  to_repository_id = excluded.to_repository_id,
+  origin_repository_id = excluded.origin_repository_id;";
                 foreach (var r in list)
                 {
                     await conn.ExecuteAsync(sql, new
@@ -103,10 +117,20 @@ ON CONFLICT(from_symbol_id, to_symbol_id, relation_type) DO UPDATE SET
         }
     }
 
+    public async Task DeleteCrossRepoByOriginAsync(Guid repositoryId, CancellationToken ct = default)
+    {
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        await conn.ExecuteAsync(
+            "DELETE FROM relations WHERE origin_repository_id=@repo AND from_repository_id IS NOT NULL AND to_repository_id IS NOT NULL AND from_repository_id<>to_repository_id;",
+            new { repo = repositoryId.ToString() }).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<Relation>> GetByRepositoryAsync(Guid repositoryId, CancellationToken ct = default)
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
-        var rows = await conn.QueryAsync<RelRow>("SELECT * FROM relations WHERE repository_id=@repo;", new { repo = repositoryId.ToString() }).ConfigureAwait(false);
+        var rows = await conn.QueryAsync<RelRow>(
+            "SELECT * FROM relations WHERE from_repository_id=@repo OR to_repository_id=@repo OR repository_id=@repo;",
+            new { repo = repositoryId.ToString() }).ConfigureAwait(false);
         return rows.Select(Map).ToList();
     }
 

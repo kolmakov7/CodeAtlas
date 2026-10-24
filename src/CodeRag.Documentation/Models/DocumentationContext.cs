@@ -10,7 +10,8 @@ public sealed record ContextSymbol(
     string? Signature,
     string? FilePath,
     int? StartLine,
-    int? EndLine)
+    int? EndLine,
+    string? RepositoryName = null)
 {
     public string Display => string.IsNullOrWhiteSpace(Fqn) ? Name : Fqn;
 
@@ -18,7 +19,8 @@ public sealed record ContextSymbol(
     {
         var sig = string.IsNullOrWhiteSpace(Signature) ? string.Empty : $" — {Signature.Trim()}";
         var loc = string.IsNullOrWhiteSpace(location) ? string.Empty : $" ({location})";
-        return $"- {Display}{sig}{loc}";
+        var repo = string.IsNullOrWhiteSpace(RepositoryName) ? string.Empty : $" [repo: {RepositoryName}]";
+        return $"- {Display}{sig}{loc}{repo}";
     }
 }
 

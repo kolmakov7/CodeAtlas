@@ -1,7 +1,7 @@
 namespace CodeRag.Analyzers.Abstractions;
 
 /// <summary>Символ из персистентного каталога репозитория.</summary>
-public sealed record CatalogSymbol(Guid Id, string? Fqn, string Name);
+public sealed record CatalogSymbol(Guid Id, string? Fqn, string Name, string? Kind = null);
 
 /// <summary>
 /// Каталог уже сохранённых символов репозитория.
@@ -10,4 +10,8 @@ public sealed record CatalogSymbol(Guid Id, string? Fqn, string Name);
 public interface ISymbolCatalog
 {
     Task<IReadOnlyList<CatalogSymbol>> GetSymbolsAsync(Guid repositoryId, string? language = null, CancellationToken ct = default);
+
+    /// <summary>Symbols from several repositories at once (cross-repository resolution).</summary>
+    Task<IReadOnlyList<CatalogSymbol>> GetSymbolsAsync(IReadOnlyCollection<Guid> repositoryIds, string? language = null, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<CatalogSymbol>>(Array.Empty<CatalogSymbol>());
 }

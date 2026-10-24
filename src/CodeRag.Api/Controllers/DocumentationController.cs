@@ -51,7 +51,16 @@ public sealed class DocumentationController : ControllerBase
 
         _logger.LogInformation("POST /api/documentation/repositories/{Repo}/generate force={Force} maxSymbols={Max}",
             repoId, req?.Force ?? false, req?.MaxSymbols);
-        var job = IndexingJob.Create(Guid.NewGuid(), repoId, JobType.Documentation);
+        var maxSymbols = req?.MaxSymbols is int m and > 0 ? m : (int?)null;
+        var strategy = string.Equals(req?.Strategy, "kind", StringComparison.OrdinalIgnoreCase) ? "kind" : "usage";
+        var options = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            force = req?.Force ?? false,
+            maxSymbols,
+            strategy,
+            minUsage = Math.Max(0, req?.MinUsage ?? 0)
+        });
+        var job = IndexingJob.Create(Guid.NewGuid(), repoId, JobType.Documentation, options: options);
         await _jobRunner.EnqueueAsync(job, ct).ConfigureAwait(false);
         return Accepted(new { jobId = job.Id });
     }
@@ -71,10 +80,24 @@ public sealed class DocumentationController : ControllerBase
         DocumentationTarget target;
         if (targetType == DocumentationTargetType.Symbol)
         {
-            if (req.SymbolId is not Guid sid)
-                return Problem(title: "symbolId is required for symbol targets", statusCode: 400);
-            var symbol = await _symbols.GetByIdAsync(sid, ct).ConfigureAwait(false);
-            if (symbol is null) return Problem(title: $"Symbol {sid} not found", statusCode: 404);
+            Symbol? symbol;
+            if (req.SymbolId is Guid sid)
+            {
+                symbol = await _symbols.GetByIdAsync(sid, ct).ConfigureAwait(false);
+                if (symbol is null) return Problem(title: $"Symbol {sid} not found", statusCode: 404);
+            }
+            else
+            {
+                // Resolve a symbol from a human-typed name / FQN when no id is supplied.
+                var term = (req.TargetRef ?? req.Name ?? req.Namespace)?.Trim();
+                if (string.IsNullOrWhiteSpace(term))
+                    return Problem(title: "Provide symbolId, or targetRef/name with the symbol name or FQN", statusCode: 400);
+
+                var match = (await _symbols.SearchAsync(term, repo.Id, limit: 1, ct: ct).ConfigureAwait(false)).FirstOrDefault();
+                if (match is null) return Problem(title: $"Symbol '{term}' not found in this repository", statusCode: 404);
+                symbol = await _symbols.GetByIdAsync(match.Id, ct).ConfigureAwait(false);
+                if (symbol is null) return Problem(title: $"Symbol '{term}' not found in this repository", statusCode: 404);
+            }
 
             var file = (await GetFilePathAsync(repo.Id, symbol, ct).ConfigureAwait(false));
             target = new DocumentationTarget(

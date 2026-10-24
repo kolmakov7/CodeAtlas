@@ -24,6 +24,8 @@ public sealed class SqliteVecVectorStore : IVectorStore
     private readonly EmbeddingDomain _domain;
     private readonly ILogger<SqliteVecVectorStore> _logger;
     private readonly InMemoryVectorStore _fallback;
+    private readonly string _tableName;
+    private readonly string _ownerType;
     private bool _initialized;
     private int? _tableDim;
     private volatile bool _tableStale;
@@ -31,7 +33,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
     private readonly SemaphoreSlim _initLock = new(1, 1);
 
     /// <summary>Vector table for this domain (isolated code / text spaces).</summary>
-    private string Table => _domain == EmbeddingDomain.Text ? "vec_chunks_text" : "vec_chunks_code";
+    private string Table => _tableName;
 
     /// <summary>Domain token written to vector_entries.domain.</summary>
     private string DomainToken => _domain.ToText();
@@ -41,13 +43,19 @@ public sealed class SqliteVecVectorStore : IVectorStore
         IVectorDimSource dimSource,
         EmbeddingDomain domain,
         ILogger<SqliteVecVectorStore> logger,
-        ILogger<InMemoryVectorStore> fallbackLogger)
+        ILogger<InMemoryVectorStore> fallbackLogger,
+        string? tableName = null,
+        string ownerType = "chunk")
     {
         _factory = factory;
         _dimSource = dimSource;
         _domain = domain;
         _logger = logger;
         _fallback = new InMemoryVectorStore(fallbackLogger, logWarning: false);
+        _tableName = string.IsNullOrWhiteSpace(tableName)
+            ? (domain == EmbeddingDomain.Text ? "vec_chunks_text" : "vec_chunks_code")
+            : tableName;
+        _ownerType = string.IsNullOrWhiteSpace(ownerType) ? "chunk" : ownerType;
     }
 
     private bool UseFallback => !_factory.IsVecAvailable;
@@ -293,8 +301,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
             var ids = list.Select(g => g.ToString()).ToArray();
             var dp = new DynamicParameters();
             dp.Add("domain", DomainToken);
+            dp.Add("ownerType", _ownerType);
             for (var i = 0; i < ids.Length; i++) dp.Add($"id{i}", ids[i]);
-            await conn2.ExecuteAsync($"DELETE FROM vector_entries WHERE domain=@domain AND chunk_id IN ({string.Join(",", ids.Select((_, i) => $"@id{i}"))});", dp);
+            await conn2.ExecuteAsync($"DELETE FROM vector_entries WHERE domain=@domain AND owner_type=@ownerType AND chunk_id IN ({string.Join(",", ids.Select((_, i) => $"@id{i}"))});", dp);
             return;
         }
 
@@ -309,7 +318,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
             {
                 var sid = id.ToString();
                 await vecConn.ExecuteAsync($"DELETE FROM {Table} WHERE chunk_id = @id;", new { id = sid }, transaction: tx);
-                await metaConn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND chunk_id = @id;", new { domain = DomainToken, id = sid }, transaction: metaTx);
+                await metaConn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND owner_type=@ownerType AND chunk_id = @id;", new { domain = DomainToken, ownerType = _ownerType, id = sid }, transaction: metaTx);
             }
             tx.Commit();
             metaTx.Commit();
@@ -346,8 +355,8 @@ public sealed class SqliteVecVectorStore : IVectorStore
             }
             // repository_id is denormalized on vector_entries — no cross-DB join needed.
             await metaConn.ExecuteAsync(
-                @"DELETE FROM vector_entries WHERE domain=@domain AND repository_id = @rid;",
-                new { domain = DomainToken, rid }, transaction: metaTx).ConfigureAwait(false);
+                @"DELETE FROM vector_entries WHERE domain=@domain AND owner_type=@ownerType AND repository_id = @rid;",
+                new { domain = DomainToken, ownerType = _ownerType, rid }, transaction: metaTx).ConfigureAwait(false);
             tx.Commit();
             metaTx.Commit();
         }
@@ -367,7 +376,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
             var hadStale = _fallback.HasDimensionMismatch(expectedDim);
             if (hadStale) _fallback.Clear();
             using var connMeta = await _factory.CreateAsync(ct).ConfigureAwait(false);
-            await connMeta.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND dim <> @dim;", new { domain = DomainToken, dim = expectedDim }).ConfigureAwait(false);
+            await connMeta.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND owner_type=@ownerType AND dim <> @dim;", new { domain = DomainToken, ownerType = _ownerType, dim = expectedDim }).ConfigureAwait(false);
             if (hadStale)
                 _logger.LogInformation("InMemory fallback vectors and stale metadata cleared for {Domain} (expected dim={Dim})", _domain.ToText(), expectedDim);
             return hadStale;
@@ -382,7 +391,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
         using var tx = vecConn.BeginTransaction();
         using var metaTx = metaConn.BeginTransaction();
         await vecConn.ExecuteAsync($"DROP TABLE {Table};", transaction: tx).ConfigureAwait(false);
-        await metaConn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain;", new { domain = DomainToken }, transaction: metaTx).ConfigureAwait(false);
+        await metaConn.ExecuteAsync("DELETE FROM vector_entries WHERE domain=@domain AND owner_type=@ownerType;", new { domain = DomainToken, ownerType = _ownerType }, transaction: metaTx).ConfigureAwait(false);
         tx.Commit();
         metaTx.Commit();
         _tableStale = false;
@@ -396,8 +405,8 @@ public sealed class SqliteVecVectorStore : IVectorStore
     {
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         var rows = (await conn.QueryAsync<IndexSummaryRow>(
-            "SELECT model, dim, context_length, COUNT(*) AS chunk_count FROM vector_entries WHERE domain=@domain GROUP BY model, dim, context_length ORDER BY model, dim;",
-            new { domain = DomainToken }).ConfigureAwait(false)).ToList();
+            "SELECT model, dim, context_length, COUNT(*) AS chunk_count FROM vector_entries WHERE domain=@domain AND owner_type=@ownerType GROUP BY model, dim, context_length ORDER BY model, dim;",
+            new { domain = DomainToken, ownerType = _ownerType }).ConfigureAwait(false)).ToList();
         return new VectorIndexSummary(rows.Select(r =>
             new VectorIndexModelInfo(r.model, r.dim, r.context_length, r.chunk_count)).ToList());
     }
@@ -565,9 +574,9 @@ public sealed class SqliteVecVectorStore : IVectorStore
             foreach (var e in list)
             {
                 await conn.ExecuteAsync(
-                    @"INSERT INTO vector_entries(chunk_id, repository_id, vector_id, model, dim, context_length, domain, updated_at)
-                      VALUES (@chunkId, @repoId, @vectorId, @model, @dim, @ctx, @domain, @now)
-                      ON CONFLICT(chunk_id) DO UPDATE SET repository_id=excluded.repository_id, vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, updated_at=excluded.updated_at;",
+                    @"INSERT INTO vector_entries(chunk_id, repository_id, vector_id, model, dim, context_length, domain, owner_type, updated_at)
+                      VALUES (@chunkId, @repoId, @vectorId, @model, @dim, @ctx, @domain, @ownerType, @now)
+                      ON CONFLICT(chunk_id) DO UPDATE SET repository_id=excluded.repository_id, vector_id=excluded.vector_id, model=excluded.model, dim=excluded.dim, context_length=excluded.context_length, domain=excluded.domain, owner_type=excluded.owner_type, updated_at=excluded.updated_at;",
                     new
                     {
                         chunkId = e.ChunkId.ToString(),
@@ -577,6 +586,7 @@ public sealed class SqliteVecVectorStore : IVectorStore
                         dim = e.Dim,
                         ctx = (object?)e.ContextLength ?? DBNull.Value,
                         domain = DomainToken,
+                        ownerType = _ownerType,
                         now
                     },
                     transaction: tx);

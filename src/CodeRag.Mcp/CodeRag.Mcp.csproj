@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeRag.Domain\CodeRag.Domain.csproj" />
+    <ProjectReference Include="..\CodeRag.Knowledge\CodeRag.Knowledge.csproj" />
     <ProjectReference Include="..\CodeRag.Infrastructure\CodeRag.Infrastructure.csproj" />
     <ProjectReference Include="..\CodeRag.Embeddings\CodeRag.Embeddings.csproj" />
     <ProjectReference Include="..\CodeRag.Git\CodeRag.Git.csproj" />

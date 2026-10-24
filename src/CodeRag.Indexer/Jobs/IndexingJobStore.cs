@@ -20,14 +20,15 @@ public sealed class IndexingJobStore : IIndexingJobStore
         using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
         const string sql = @"
 INSERT INTO indexing_jobs(id, repository_id, type, status, started_at, finished_at, progress, error,
-                          total_items, items_done, phase, current_file, from_commit, to_commit)
+                          total_items, items_done, phase, current_file, from_commit, to_commit, options)
 VALUES (@id,@repo,@type,@status,@started,@finished,@progress,@error,
-        @total,@done,@phase,@currentFile,@fromCommit,@toCommit)
+        @total,@done,@phase,@currentFile,@fromCommit,@toCommit,@options)
 ON CONFLICT(id) DO UPDATE SET
   repository_id=excluded.repository_id, type=excluded.type, status=excluded.status,
   started_at=excluded.started_at, finished_at=excluded.finished_at, progress=excluded.progress, error=excluded.error,
   total_items=excluded.total_items, items_done=excluded.items_done, phase=excluded.phase,
-  current_file=excluded.current_file, from_commit=excluded.from_commit, to_commit=excluded.to_commit;";
+  current_file=excluded.current_file, from_commit=excluded.from_commit, to_commit=excluded.to_commit,
+  options=excluded.options;";
         await conn.ExecuteAsync(sql, new
         {
             id = job.Id.ToString(),
@@ -43,7 +44,8 @@ ON CONFLICT(id) DO UPDATE SET
             phase = job.Phase,
             currentFile = job.CurrentFile,
             fromCommit = job.FromCommit,
-            toCommit = job.ToCommit
+            toCommit = job.ToCommit,
+            options = job.Options
         }).ConfigureAwait(false);
     }
 
@@ -108,7 +110,7 @@ WHERE id=@id;", new
         var to = r.toCommit ?? r.to_commit;
         var progress = r.progress ?? (status == JobStatus.Completed ? 1 : 0);
         return IndexingJob.Rehydrate(id, repo, type, status, started, finished, progress, r.error, from, to,
-            r.total_items, r.items_done, r.phase, r.current_file);
+            r.total_items, r.items_done, r.phase, r.current_file, r.options);
     }
 
     private sealed class JobRow
@@ -125,6 +127,7 @@ WHERE id=@id;", new
         public int? items_done { get; set; }
         public string? phase { get; set; }
         public string? current_file { get; set; }
+        public string? options { get; set; }
         // Колонки from_commit/to_commit (миграция 006); Dapper мапит both-названия, fallback ниже.
         public string? fromCommit { get; set; }
         public string? toCommit { get; set; }

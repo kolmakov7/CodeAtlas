@@ -47,6 +47,48 @@ jobs:
       # - run: npx playwright test
       #   working-directory: tests/e2e
 
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build API (e2e host)
+        run: dotnet build src/CodeRag.Api/CodeRag.Api.csproj
+
+      - name: Install web deps
+        run: npm ci
+        working-directory: src/CodeRag.Web
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: src/CodeRag.Web
+
+      - name: Web typecheck + build
+        run: npm run build
+        working-directory: src/CodeRag.Web
+
+      - name: Playwright E2E
+        run: npm run test:e2e
+        working-directory: src/CodeRag.Web
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: src/CodeRag.Web/playwright-report
+          if-no-files-found: ignore
+
   docker:
     runs-on: ubuntu-latest
     needs: test

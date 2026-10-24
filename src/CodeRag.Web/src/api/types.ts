@@ -294,6 +294,25 @@ export interface Settings {
   system?: {
     logLevel?: string;
   };
+  revision?: {
+    enabled?: boolean;
+    intervalDays?: number;
+    checkMinutes?: number;
+    maxEntriesPerRun?: number;
+    similarityThreshold?: number;
+    staleDays?: number;
+    toolsEnabled?: boolean;
+  };
+  llm?: {
+    endpoint?: string | null;
+    model?: string | null;
+    temperature?: number | null;
+    maxTokens?: number | null;
+    timeoutSeconds?: number | null;
+    maxRetries?: number | null;
+    maxContextChars?: number | null;
+    configured?: boolean;
+  };
 }
 
 export interface ProxyConfig {
@@ -312,20 +331,29 @@ export interface CredentialInfo {
   // secret never exposed
 }
 
-export type DocumentationTargetType = "Repository" | "Module" | "Symbol";
-export type DocumentationStatus = "NotGenerated" | "Generated" | "Stale" | "Generating" | "Failed";
+export type DocumentationTargetType = "repository" | "module" | "symbol";
+export type DocumentationStatus = "notgenerated" | "generated" | "stale" | "generating" | "failed";
 
 export interface Documentation {
   id: string;
   repositoryId: string;
   targetType: DocumentationTargetType;
+  targetId?: string | null;
   targetRef: string;
-  title: string;
+  name: string;
+  namespace?: string | null;
+  filePath?: string | null;
+  language?: string | null;
   status: DocumentationStatus;
-  contentHash?: string | null;
-  version?: number | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
+  error?: string | null;
+  model?: string | null;
+  promptVersion: string;
+  sourceHash?: string | null;
+  generationCommit?: string | null;
+  contextChars?: number | null;
+  outputChars?: number | null;
+  generatedAt: string;
+  updatedAt: string;
 }
 
 export interface DocumentationDetail extends Documentation {
@@ -333,8 +361,351 @@ export interface DocumentationDetail extends Documentation {
 }
 
 export interface GenerateDocumentationResponse {
-  jobId?: string | null;
-  count?: number | null;
-  succeeded?: number | null;
-  failed?: number | null;
+  documentation: DocumentationDetail;
+  generated: boolean;
+}
+
+export interface RepositoryLink {
+  id: string;
+  sourceRepositoryId: string;
+  sourceRepositoryName: string;
+  targetRepositoryId: string;
+  targetRepositoryName: string;
+  linkType: string;
+  confidence?: number | null;
+  note?: string | null;
+  createdAt: string;
+}
+
+export interface SymbolUsageInfo {
+  symbolId: string;
+  repositoryId: string;
+  name: string;
+  fqn?: string | null;
+  kind: string;
+  filePath?: string | null;
+  usageCount: number;
+  lastUsedAt: string;
+  score: number;
+}
+
+export interface Project {
+  id: string;
+  repositoryId: string;
+  name?: string | null;
+  path?: string | null;
+  language?: string | null;
+  repositoryIds?: string[];
+}
+
+export type TaskKind = "Work" | "Temporary" | "Research" | "Note";
+export type TaskState = "Open" | "InProgress" | "Blocked" | "Done" | "Cancelled" | "Archived";
+export type TaskPriority = "Critical" | "High" | "Normal" | "Low" | "Backlog";
+
+export interface TaskItem {
+  id: string;
+  title: string;
+  description?: string | null;
+  kind: TaskKind;
+  status: TaskState;
+  previousStatus?: TaskState | null;
+  priority: TaskPriority;
+  projectId?: string | null;
+  repositoryId?: string | null;
+  parentTaskId?: string | null;
+  source: string;
+  externalKey?: string | null;
+  createdBy?: string | null;
+  metadata?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string | null;
+  version: number;
+}
+
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface EntityLink {
+  id: string;
+  fromType: string;
+  fromId: string;
+  toType: string;
+  toId: string;
+  relation: string;
+  note?: string | null;
+  createdBy?: string | null;
+  createdAt: string;
+}
+
+export interface EntityHistoryEntry {
+  id: number;
+  entityType: string;
+  entityId: string;
+  at: string;
+  actor?: string | null;
+  action: string;
+  versionFrom?: number | null;
+  versionTo?: number | null;
+  changes?: string | null;
+}
+
+export interface TaskDetail {
+  task: TaskItem;
+  comments: TaskComment[];
+  links: EntityLink[];
+  history: EntityHistoryEntry[];
+}
+
+export interface TaskResult {
+  task: TaskItem;
+  created: boolean;
+  links: EntityLink[];
+}
+
+export interface TaskTreeNode {
+  task: TaskItem;
+  children: TaskTreeNode[];
+}
+
+export interface TaskTreeResult {
+  roots: TaskTreeNode[];
+}
+
+export interface TaskDependencyResult {
+  task: TaskItem;
+  dependsOn: TaskItem;
+  created: boolean;
+}
+
+export interface TaskHistoryResult {
+  task: TaskItem;
+  history: EntityHistoryEntry[];
+}
+
+export interface TaskQueryParams {
+  query?: string;
+  status?: TaskState;
+  kind?: TaskKind;
+  projectId?: string;
+  repositoryId?: string;
+  parentTaskId?: string;
+  includeArchived?: boolean;
+  rootOnly?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface TaskTreeParams {
+  rootTaskId?: string;
+  projectId?: string;
+  repositoryId?: string;
+  maxDepth?: number;
+  includeArchived?: boolean;
+}
+
+export interface TodoImportItem {
+  externalKey: string;
+  title: string;
+  status: TaskState;
+  action: string;
+}
+
+export interface TodoImportResult {
+  dryRun: boolean;
+  found: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  items: TodoImportItem[];
+}
+
+export type KnowledgeType = "Fact" | "Decision" | "Constraint" | "Research" | "Hypothesis" | "Issue" | "Observation";
+export type KnowledgeStatus = "Active" | "Stale" | "Superseded" | "Archived";
+
+export interface KnowledgeEntry {
+  id: string;
+  title: string;
+  content: string;
+  type: KnowledgeType;
+  projectId?: string | null;
+  repositoryId?: string | null;
+  status: KnowledgeStatus;
+  source: string;
+  sourceRef?: string | null;
+  externalKey?: string | null;
+  contentHash: string;
+  createdBy?: string | null;
+  metadata?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  version: number;
+  embeddedModel?: string | null;
+  embeddedConfigHash?: string | null;
+  embeddedAt?: string | null;
+}
+
+export interface KnowledgeDetail {
+  entry: KnowledgeEntry;
+  links: EntityLink[];
+  history: EntityHistoryEntry[];
+  embedded: boolean;
+}
+
+export type KnowledgeSearchMode = "hybrid" | "semantic" | "lexical";
+
+export interface KnowledgeSearchRequest {
+  query: string;
+  mode?: KnowledgeSearchMode;
+  types?: KnowledgeType[];
+  statuses?: KnowledgeStatus[];
+  projectId?: string;
+  repositoryId?: string;
+  globalOnly?: boolean;
+  includeArchived?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface KnowledgeSearchHit {
+  entry: KnowledgeEntry;
+  score: number;
+  matchedBy: string;
+}
+
+export interface KnowledgeSearchResult {
+  hits: KnowledgeSearchHit[];
+  warnings: string[];
+  mode: string;
+}
+
+export interface KnowledgeQueryParams {
+  query?: string;
+  types?: KnowledgeType[];
+  statuses?: KnowledgeStatus[];
+  projectId?: string;
+  repositoryId?: string;
+  globalOnly?: boolean;
+  includeArchived?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface KnowledgeLinkResult {
+  link: EntityLink;
+  created: boolean;
+}
+
+export type ConsolidationJobStatus =
+  | "Pending"
+  | "ReadyForAnalysis"
+  | "AwaitingLlm"
+  | "ReadyForReview"
+  | "Accepted"
+  | "Rejected"
+  | "Cancelled"
+  | "Error"
+  | "Postponed"
+  | "Undone";
+
+export type ConsolidationJobType = "Duplicates" | "Contradiction" | "MissingSource" | "Stale" | "Consolidate";
+
+export interface ConsolidationJob {
+  id: string;
+  type: ConsolidationJobType;
+  status: ConsolidationJobStatus;
+  reason: string;
+  projectId?: string | null;
+  repositoryId?: string | null;
+  dedupeKey: string;
+  inputVersion: string;
+  attempts: number;
+  lastError?: string | null;
+  analysis?: string | null;
+  proposal?: string | null;
+  proposalVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
+  resultKnowledgeId?: string | null;
+  version: number;
+}
+
+export interface ConsolidationEntity {
+  id: string;
+  version: number;
+  title: string;
+  content: string;
+  type: KnowledgeType;
+  status: KnowledgeStatus;
+  contentHash: string;
+}
+
+export interface ConsolidationJobDetail {
+  job: ConsolidationJob;
+  items: ConsolidationEntity[];
+  history: EntityHistoryEntry[];
+}
+
+export interface RevisionRun {
+  id: string;
+  trigger: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  stats?: string | null;
+  error?: string | null;
+}
+
+export interface RevisionStatus {
+  llm: { configured: boolean; status: string };
+  lastRun?: RevisionRun | null;
+  queue: {
+    readyForAnalysis: number;
+    awaitingLlm: number;
+    readyForReview: number;
+    errors: number;
+  };
+}
+
+export interface RevisionRunResult {
+  runId: string;
+  scanned: number;
+  jobsCreated: number;
+  jobsSkipped: number;
+  jobIds: string[];
+  warnings: string[];
+}
+
+export interface ConsolidationAnalysisResult {
+  jobId: string;
+  status: string;
+  llmConfigured: boolean;
+  error?: string | null;
+  proposal?: string | null;
+}
+
+export interface ConsolidationApplyOutcome {
+  success: boolean;
+  jobId: string;
+  status: string;
+  resultKnowledgeId?: string | null;
+  error?: string | null;
+}
+
+export interface RevisionJobQueryParams {
+  status?: ConsolidationJobStatus;
+  type?: ConsolidationJobType;
+  projectId?: string;
+  repositoryId?: string;
+  limit?: number;
+  offset?: number;
 }

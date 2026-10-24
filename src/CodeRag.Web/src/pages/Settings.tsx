@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { useSettings, useUpdateSettings, useProxies, useCredentials, useRepositoryGroups } from "@/api/hooks";
 
-type Tab = "repositories" | "indexing" | "embeddings" | "search" | "storage" | "system" | "proxies" | "credentials" | "groups";
+type Tab = "repositories" | "indexing" | "embeddings" | "llm" | "revision" | "search" | "storage" | "system" | "proxies" | "credentials" | "groups";
 const tabs: { id: Tab; label: string }[] = [
   { id: "repositories", label: "Repositories" },
   { id: "indexing", label: "Indexing" },
   { id: "embeddings", label: "Embeddings" },
+  { id: "llm", label: "Documentation (LLM)" },
+  { id: "revision", label: "Knowledge revision" },
   { id: "search", label: "Search" },
   { id: "storage", label: "Storage" },
   { id: "system", label: "System" },
@@ -67,6 +69,8 @@ export default function SettingsPage() {
     const textEp = form.embeddings?.text?.endpoint;
     if (codeEp && !isValidEndpoint(codeEp)) { setEndpointError(`Code endpoint must be http:// or https:// URL with valid host (e.g. http://192.168.1.10:8080/v1/embeddings) — got '${codeEp}'`); return; }
     if (textEp && !isValidEndpoint(textEp)) { setEndpointError(`Text endpoint must be http:// or https:// URL — got '${textEp}'`); return; }
+    const llmEp = form.llm?.endpoint;
+    if (llmEp && !isValidEndpoint(llmEp)) { setEndpointError(`Documentation LLM endpoint must be http:// or https:// URL — got '${llmEp}'`); return; }
     setEndpointError(null);
     update.mutate(form);
   };
@@ -228,6 +232,62 @@ export default function SettingsPage() {
           </div>
           {endpointError && <div style={{ color: "var(--danger)", fontSize: 12 }}>{endpointError}</div>}
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>Endpoint must be a valid http:// or https:// URL with a DNS name or IP (e.g. http://192.168.1.10:8080/v1/embeddings or https://api.example.com/v1/embeddings).</div>
+        </div>
+      )}
+      {tab === "llm" && (
+        <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <h3>Documentation (LLM)</h3>
+          <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            OpenAI-compatible chat endpoint used to generate AI documentation. Leave the endpoint empty to disable documentation generation.
+            Default is the local gateway: <code>{form.llm?.endpoint || "—"}</code> with model <code>{form.llm?.model || "—"}</code>.
+          </p>
+          <div style={{ fontSize: 12, color: form.llm?.configured ? "var(--success)" : "var(--danger)" }}>
+            {form.llm?.configured ? "Configured — generation enabled." : "Not configured — generation will fail."}
+          </div>
+          <label>Endpoint
+            <input value={form.llm?.endpoint ?? ""} onChange={(e) => setForm({ ...form, llm: { ...form.llm, endpoint: e.target.value } })} placeholder="http://192.168.137.25:4000/v1" />
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Base URL or .../chat/completions. Empty = documentation disabled.</span>
+          </label>
+          <label>Model
+            <input value={form.llm?.model ?? ""} onChange={(e) => setForm({ ...form, llm: { ...form.llm, model: e.target.value } })} placeholder="qwen3.8:27b" />
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Sent as <code>model</code> in the request body.</span>
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+            <label>Temperature <input type="number" step="0.1" min={0} max={2} value={form.llm?.temperature ?? 0.2} onChange={(e) => setForm({ ...form, llm: { ...form.llm, temperature: Number(e.target.value) } })} />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Sampling temperature</span>
+            </label>
+            <label>Max tokens <input type="number" value={form.llm?.maxTokens ?? 4096} onChange={(e) => setForm({ ...form, llm: { ...form.llm, maxTokens: Number(e.target.value) } })} />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>0 = server decides</span>
+            </label>
+            <label>Timeout (seconds) <input type="number" value={form.llm?.timeoutSeconds ?? 300} onChange={(e) => setForm({ ...form, llm: { ...form.llm, timeoutSeconds: Number(e.target.value) } })} />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Per request</span>
+            </label>
+            <label>Max retries <input type="number" value={form.llm?.maxRetries ?? 2} onChange={(e) => setForm({ ...form, llm: { ...form.llm, maxRetries: Number(e.target.value) } })} />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Retries on transient failure</span>
+            </label>
+            <label>Max context chars <input type="number" value={form.llm?.maxContextChars ?? 60000} onChange={(e) => setForm({ ...form, llm: { ...form.llm, maxContextChars: Number(e.target.value) } })} />
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Cap on prompt context (0 = unlimited)</span>
+            </label>
+          </div>
+          {endpointError && <div style={{ color: "var(--danger)", fontSize: 12 }}>{endpointError}</div>}
+        </div>
+      )}
+      {tab === "revision" && (
+        <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <h3>Knowledge revision</h3>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={form.revision?.enabled ?? false} onChange={(e) => setForm({ ...form, revision: { ...form.revision, enabled: e.target.checked } })} />
+            Enable periodic revision (never calls the LLM automatically)
+          </label>
+          <label>Interval days <input type="number" value={form.revision?.intervalDays ?? 7} onChange={(e) => setForm({ ...form, revision: { ...form.revision, intervalDays: Number(e.target.value) } })} /></label>
+          <label>Check every N minutes <input type="number" value={form.revision?.checkMinutes ?? 15} onChange={(e) => setForm({ ...form, revision: { ...form.revision, checkMinutes: Number(e.target.value) } })} /></label>
+          <label>Max entries per run <input type="number" value={form.revision?.maxEntriesPerRun ?? 500} onChange={(e) => setForm({ ...form, revision: { ...form.revision, maxEntriesPerRun: Number(e.target.value) } })} /></label>
+          <label>Similarity threshold <input type="number" step="0.01" value={form.revision?.similarityThreshold ?? 0.8} onChange={(e) => setForm({ ...form, revision: { ...form.revision, similarityThreshold: Number(e.target.value) } })} /></label>
+          <label>Stale after days <input type="number" value={form.revision?.staleDays ?? 180} onChange={(e) => setForm({ ...form, revision: { ...form.revision, staleDays: Number(e.target.value) } })} /></label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={form.revision?.toolsEnabled ?? false} onChange={(e) => setForm({ ...form, revision: { ...form.revision, toolsEnabled: e.target.checked } })} />
+            Expose revision MCP tools (hides them from the agent context by default)
+          </label>
         </div>
       )}
       {tab === "search" && (
