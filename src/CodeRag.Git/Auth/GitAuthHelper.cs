@@ -70,9 +70,6 @@ public static class GitAuthHelper
             ctx.ConfigArgs.Add("-c");
             ctx.ConfigArgs.Add(helper);
 
-            // Also support Authorization Bearer header (для GitHub PAT как Bearer)
-            ctx.ConfigArgs.Add("-c");
-            ctx.ConfigArgs.Add($"http.extraHeader=Authorization: Bearer {token}");
 
             // Дополнительно GIT_ASKPASS temp script для fallback
             var askPass = CreateAskPassScript(username, token);
