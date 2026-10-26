@@ -60,7 +60,10 @@ public sealed class McpProgram
 
         var revisionToolsEnabled = builder.Configuration.GetValue<bool>("Knowledge:Revision:ToolsEnabled")
             || Environment.GetEnvironmentVariable("MCP_REVISION_TOOLS") == "1";
-        var toolTypes = new List<Type> { typeof(CodeSearchTools), typeof(TaskTools), typeof(KnowledgeTools) };
+        var toolTypes = new List<Type>
+        {
+            typeof(CodeSearchTools), typeof(TaskTools), typeof(KnowledgeTools), typeof(WorkContextTools)
+        };
         if (revisionToolsEnabled) toolTypes.Add(typeof(RevisionTools));
         var mcp = builder.Services.AddMcpServer(options =>
         {

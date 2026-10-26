@@ -24,12 +24,15 @@ public static class McpServerGuidance
         ambiguous identifiers and narrow searches with repositoryIds/languages/symbolKind.
 
         Central tasks and knowledge:
+        - Call get_work_context with repositoryId (or projectId) at the start of a session:
+          it returns open tasks and recent knowledge in one call.
         - Use task tools instead of writing TODO_*.md files; the server is the source of truth.
         - Pass expectedVersion on updates. On a version conflict, re-read and retry; never
           overwrite blindly.
         - Pass externalKey for idempotent task/knowledge creation.
         - Store durable decisions, constraints and research with save_knowledge, separately
           from temporary tasks, and link it to tasks/symbols/files.
+        - After edits or test runs, update the current task; do not leave work untracked.
         """;
 
     public const string RevisionInstructions = """

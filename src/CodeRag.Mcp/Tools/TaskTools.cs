@@ -282,8 +282,11 @@ public sealed class TaskTools
             return $"File: {result.FileName} ({result.Count} tasks)\n\n{result.Content}";
         });
 
+    private static string StatusLabel(TaskState status)
+        => status == TaskState.InProgress ? "in_progress" : status.ToString().ToLowerInvariant();
+
     private static string FormatTask(TaskItem task)
-        => $"Task {task.Id} v{task.Version} [{task.Status.ToString().ToLowerInvariant()}] " +
+        => $"Task {task.Id} v{task.Version} [{StatusLabel(task.Status)}] " +
            $"{task.Kind.ToString().ToLowerInvariant()} p{(int)task.Priority} — {task.Title}" +
            (task.ProjectId is null ? " (global)" : $" project={task.ProjectId}") +
            (task.RepositoryId is null ? "" : $" repo={task.RepositoryId}") +
@@ -291,19 +294,31 @@ public sealed class TaskTools
            (string.IsNullOrWhiteSpace(task.Description) ? "" : $"\n  {Truncate(task.Description, 500)}");
 
     private static TaskKind ParseKind(string? value)
-        => Enum.TryParse<TaskKind>(value, true, out var parsed) ? parsed : TaskKind.Work;
+        => TryParseEnum(value, out TaskKind parsed) ? parsed : TaskKind.Work;
 
     private static TaskKind? ParseKindOrNull(string? value)
-        => Enum.TryParse<TaskKind>(value, true, out var parsed) ? parsed : null;
+        => TryParseEnum(value, out TaskKind parsed) ? parsed : null;
 
     private static TaskState ParseState(string? value)
-        => Enum.TryParse<TaskState>(value, true, out var parsed) ? parsed : TaskState.Open;
+        => TryParseEnum(value, out TaskState parsed) ? parsed : TaskState.Open;
 
     private static TaskState? ParseStateOrNull(string? value)
-        => Enum.TryParse<TaskState>(value, true, out var parsed) ? parsed : null;
+        => TryParseEnum(value, out TaskState parsed) ? parsed : null;
 
     private static TaskPriority ParsePriority(int? value)
         => value is null ? TaskPriority.Normal : (TaskPriority)Math.Clamp(value.Value, 0, 4);
+
+    // Tool schemas document snake_case values (in_progress, in-progress), but the enums are
+    // PascalCase (InProgress). Enum.TryParse alone rejects the documented spelling and the
+    // update silently keeps the old value.
+    private static bool TryParseEnum<TEnum>(string? value, out TEnum parsed)
+        where TEnum : struct, Enum
+    {
+        parsed = default;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var normalized = value.Replace("_", "").Replace("-", "").Replace(" ", "");
+        return Enum.TryParse(normalized, ignoreCase: true, out parsed);
+    }
 
     private static string Truncate(string? value, int max)
         => string.IsNullOrEmpty(value) ? "" : value.Length <= max ? value : value[..max] + "…";

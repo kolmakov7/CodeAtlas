@@ -24,7 +24,8 @@ public sealed class McpToolRegistrationTests
             typeof(CodeSearchTools),
             typeof(DocumentationTools),
             typeof(TaskTools),
-            typeof(KnowledgeTools)
+            typeof(KnowledgeTools),
+            typeof(WorkContextTools)
         });
 
         services.Count(descriptor => descriptor.ServiceType == typeof(McpServerTool))

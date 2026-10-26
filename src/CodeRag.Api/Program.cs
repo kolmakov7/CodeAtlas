@@ -86,7 +86,8 @@ var mcpToolTypes = new List<Type>
     typeof(CodeRag.Mcp.Tools.CodeSearchTools),
     typeof(CodeRag.Mcp.Tools.DocumentationTools),
     typeof(CodeRag.Mcp.Tools.TaskTools),
-    typeof(CodeRag.Mcp.Tools.KnowledgeTools)
+    typeof(CodeRag.Mcp.Tools.KnowledgeTools),
+    typeof(CodeRag.Mcp.Tools.WorkContextTools)
 };
 if (revisionToolsEnabled) mcpToolTypes.Add(typeof(CodeRag.Mcp.Tools.RevisionTools));
 builder.Services.AddMcpServer(options =>
