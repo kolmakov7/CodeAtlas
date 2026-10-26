@@ -67,7 +67,8 @@ public sealed class McpProgram
             options.ServerInfo = new() { Name = "CodeAtlas", Version = "1.0.0" };
             options.ServerInstructions = McpServerGuidance.Instructions
                 + (revisionToolsEnabled ? McpServerGuidance.RevisionInstructions : "");
-        }).WithTools(toolTypes);
+        })
+        .WithCodeAtlasTools(toolTypes);
         if (useStdio) mcp.WithStdioServerTransport();
         if (useHttp) mcp.WithHttpTransport();
 

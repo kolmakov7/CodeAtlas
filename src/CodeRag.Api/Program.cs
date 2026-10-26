@@ -96,7 +96,7 @@ builder.Services.AddMcpServer(options =>
             + (revisionToolsEnabled ? CodeRag.Mcp.McpServerGuidance.RevisionInstructions : "");
     })
     .WithHttpTransport()
-    .WithTools(mcpToolTypes);
+    .WithCodeAtlasTools(mcpToolTypes);
 
 // Таблица settings → IConfiguration: значения из БД имеют приоритет над env/appsettings,
 // hot reload через FireReload() после Upsert (SettingsController).
