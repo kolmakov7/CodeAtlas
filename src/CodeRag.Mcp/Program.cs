@@ -62,7 +62,7 @@ public sealed class McpProgram
             || Environment.GetEnvironmentVariable("MCP_REVISION_TOOLS") == "1";
         var toolTypes = new List<Type>
         {
-            typeof(CodeSearchTools), typeof(TaskTools), typeof(KnowledgeTools), typeof(WorkContextTools)
+            typeof(CodeSearchTools), typeof(TaskTools), typeof(KnowledgeTools), typeof(ProjectTools), typeof(WorkContextTools)
         };
         if (revisionToolsEnabled) toolTypes.Add(typeof(RevisionTools));
         var mcp = builder.Services.AddMcpServer(options =>

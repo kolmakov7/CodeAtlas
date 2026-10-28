@@ -25,6 +25,7 @@ public sealed class TasksKnowledgeTests : IDisposable
     private readonly string? _previousDataDir;
     private readonly SqliteConnectionFactory _factory;
     private readonly TaskService _tasks;
+    private readonly ProjectService _projects;
     private readonly KnowledgeService _knowledge;
     private readonly RevisionService _revision;
     private readonly ConsolidationService _consolidation;
@@ -51,6 +52,7 @@ public sealed class TasksKnowledgeTests : IDisposable
         var jobStore = new ConsolidationStore(_factory);
         var runStore = new RevisionRunStore(_factory);
         var projects = new ProjectService(projectStore, repoStore);
+        _projects = projects;
 
         _tasks = new TaskService(taskStore, projectStore, repoStore, linkStore, historyStore, projects);
 
@@ -104,6 +106,18 @@ public sealed class TasksKnowledgeTests : IDisposable
             "INSERT INTO repositories(id,name,git_url,local_path,status) VALUES(@i,@n,'file:///x',@p,'active');",
             new { i = id.ToString(), n = "repo-" + id.ToString("N")[..6], p = Path.Combine(_dataDir, "repos", "checkout") });
         return id;
+    }
+
+    [Fact]
+    public async Task Empty_project_can_be_created_and_used_as_task_scope()
+    {
+        var project = await _projects.CreateAsync("TOTK", Array.Empty<Guid>());
+        project.RepositoryIds.Should().BeEmpty();
+        project.RepositoryId.Should().BeNull();
+
+        var task = await _tasks.CreateAsync(new CreateTaskRequest("Scope check", ProjectId: project.Id));
+        task.Task.ProjectId.Should().Be(project.Id);
+        task.Task.RepositoryId.Should().BeNull();
     }
 
     [Fact]

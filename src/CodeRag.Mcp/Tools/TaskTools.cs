@@ -50,9 +50,14 @@ public sealed class TaskTools
         [Description("Parent task Id (Guid)")] Guid? parentTaskId = null,
         [Description("Idempotency key; repeat calls return the existing task")] string? externalKey = null,
         [Description("Author/source label")] string? createdBy = null,
+        [Description("Create in global scope (cross-project). Explicit opt-in only.")] bool @global = false,
         CancellationToken ct = default)
         => TrackAsync("create_task", repositoryId, async () =>
         {
+            if (projectId is null && repositoryId is null && !@global)
+                return "Error: scope required. Pass projectId (call list_projects or create_project first) or repositoryId. Use global=true only for genuinely cross-project tasks.";
+            if (@global && (projectId is not null || repositoryId is not null))
+                return "Error: pass either projectId/repositoryId or global=true, not both.";
             var request = new CreateTaskRequest(
                 title, description, ParseKind(kind), ParseState(status), ParsePriority(priority),
                 projectId, repositoryId, parentTaskId, "agent", externalKey, createdBy);
@@ -241,16 +246,6 @@ public sealed class TaskTools
             var removed = await _tasks.UnlinkAsync(taskId, targetType, targetId, relation, actor, ct)
                 .ConfigureAwait(false);
             return removed ? "Link removed" : "Link not found";
-        });
-
-    [McpServerTool, Description("List projects (with linked repositories) available as task/knowledge scope.")]
-    public Task<string> ListProjectsAsync(CancellationToken ct = default)
-        => TrackAsync("list_projects", null, async () =>
-        {
-            var projects = await _projects.ListAsync(ct).ConfigureAwait(false);
-            if (projects.Count == 0) return "No projects found. Use repositoryId when creating a task/knowledge to auto-create a default project.";
-            return string.Join("\n", projects.Select(p =>
-                $"- {p.Id} {p.Name ?? "(unnamed)"} repos=[{string.Join(",", p.RepositoryIds)}]"));
         });
 
     [McpServerTool, Description("Import checkbox TODO items from a markdown file in a repository checkout. Repeat imports are idempotent (external key per item). Use dryRun to preview.")]

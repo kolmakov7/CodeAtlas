@@ -76,11 +76,13 @@ public sealed class WorkContextTools
             var scopeProjectId = project?.Id;
             var scopeRepositoryId = scopeProjectId is null ? repositoryId : null;
 
-            var tasks = await _tasks.ListAsync(new TaskQuery(
+            var tasks = (await _tasks.ListAsync(new TaskQuery(
                 ProjectId: scopeProjectId,
                 RepositoryId: scopeRepositoryId,
                 IncludeArchived: withArchived,
-                Limit: 500), ct).ConfigureAwait(false);
+                Limit: 500), ct).ConfigureAwait(false)).ToList();
+            if (repositoryId is not null && project is not null)
+                tasks = tasks.Where(t => t.RepositoryId is null || t.RepositoryId == repositoryId).ToList();
 
             var openTasks = tasks
                 .Where(t => t.Status is TaskState.Open or TaskState.InProgress or TaskState.Blocked)
@@ -95,12 +97,15 @@ public sealed class WorkContextTools
                 .Take(takeTasks)
                 .ToList();
 
-            var knowledge = await _knowledge.ListAsync(new KnowledgeQuery(
+            var knowledge = (await _knowledge.ListAsync(new KnowledgeQuery(
                 ProjectId: scopeProjectId,
                 RepositoryId: scopeRepositoryId,
                 Statuses: new[] { KnowledgeStatus.Active, KnowledgeStatus.Stale },
                 IncludeArchived: withArchived,
-                Limit: takeKnowledge), ct).ConfigureAwait(false);
+                Limit: takeKnowledge), ct).ConfigureAwait(false)).ToList();
+            if (repositoryId is not null && project is not null)
+                knowledge = knowledge.Where(k => k.RepositoryId is null || k.RepositoryId == repositoryId)
+                    .Take(takeKnowledge).ToList();
 
             var sb = new StringBuilder();
             sb.AppendLine("# Work context");
@@ -155,6 +160,7 @@ public sealed class WorkContextTools
             sb.AppendLine($"- {project.Name ?? "(unnamed)"} id={project.Id} repos=[{string.Join(", ", project.RepositoryIds)}]");
         sb.AppendLine();
         sb.AppendLine("Tip: call repositories to find repositoryId values; a project is resolved automatically from a repository.");
+        sb.AppendLine("If the current topic has no project yet, call create_project (repositoryIds may be empty) and then use its projectId.");
         return sb.ToString().TrimEnd();
     }
 

@@ -31,9 +31,53 @@ public sealed class DbInitializer
         var provider = SqlDialect.IsPostgres(_factory) ? "Postgres" : "Sqlite";
 
         await MigrateAsync("Main", () => _factory.CreateAsync(ct), provider, ct).ConfigureAwait(false);
+        await EnsureProjectsRepositoryNullableAsync(provider, ct).ConfigureAwait(false);
         await MigrateAsync("Chunks", () => _factory.CreateChunksAsync(ct), provider, ct).ConfigureAwait(false);
 
         WarnAboutLegacyLayout(provider, ct);
+    }
+
+    private async Task EnsureProjectsRepositoryNullableAsync(string provider, CancellationToken ct)
+    {
+        if (!string.Equals(provider, "Sqlite", StringComparison.Ordinal)) return;
+        using var conn = await _factory.CreateAsync(ct).ConfigureAwait(false);
+        var columns = (await conn.QueryAsync<(long cid, string name, string type, long notnull)>(
+            "PRAGMA table_info(projects);").ConfigureAwait(false)).ToList();
+        var repoColumn = columns.FirstOrDefault(c => c.name == "repository_id");
+        if (string.IsNullOrEmpty(repoColumn.name) || repoColumn.notnull == 0) return;
+
+        _logger.LogInformation("Rebuilding projects table to allow empty projects (repository_id nullable)");
+        await conn.ExecuteAsync("PRAGMA foreign_keys=OFF;").ConfigureAwait(false);
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            await conn.ExecuteAsync("DROP TABLE IF EXISTS projects_new;", transaction: tx).ConfigureAwait(false);
+            await conn.ExecuteAsync(@"
+CREATE TABLE projects_new (
+    id TEXT PRIMARY KEY,
+    repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL,
+    name TEXT,
+    path TEXT,
+    language TEXT
+);
+INSERT INTO projects_new(id, repository_id, name, path, language)
+SELECT id, repository_id, name, path, language FROM projects;
+DROP TABLE projects;
+ALTER TABLE projects_new RENAME TO projects;", transaction: tx).ConfigureAwait(false);
+            tx.Commit();
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+        finally
+        {
+            await conn.ExecuteAsync("PRAGMA foreign_keys=ON;").ConfigureAwait(false);
+        }
+        var violations = await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM pragma_foreign_key_check;").ConfigureAwait(false);
+        if (violations > 0)
+            _logger.LogWarning("projects rebuild left {Count} foreign-key violations", violations);
     }
 
     private async Task MigrateAsync(string kind, Func<Task<IDbConnection>> open, string provider, CancellationToken ct)

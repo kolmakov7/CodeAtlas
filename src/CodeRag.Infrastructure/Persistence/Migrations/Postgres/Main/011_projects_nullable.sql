@@ -1,0 +1,1 @@
+ALTER TABLE projects ALTER COLUMN repository_id DROP NOT NULL;

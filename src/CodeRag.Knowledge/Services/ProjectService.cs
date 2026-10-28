@@ -33,15 +33,14 @@ public sealed class ProjectService
         string? name, IReadOnlyList<Guid> repositoryIds, string? path = null, string? language = null,
         CancellationToken ct = default)
     {
-        if (repositoryIds.Count == 0)
-            throw new DomainValidationException("A project must be linked to at least one repository.");
         foreach (var repositoryId in repositoryIds.Distinct())
         {
             var repository = await _repositories.GetByIdAsync(repositoryId, ct).ConfigureAwait(false);
             if (repository is null) throw new DomainValidationException($"Repository {repositoryId} not found.");
         }
         var id = Guid.NewGuid();
-        var project = Project.Create(id, repositoryIds[0], name, path, language, repositoryIds);
+        var project = Project.Create(id, repositoryIds.FirstOrDefault() == Guid.Empty ? null : repositoryIds[0],
+            name, path, language, repositoryIds);
         await _projects.UpsertAsync(project, ct).ConfigureAwait(false);
         return project;
     }
@@ -49,8 +48,6 @@ public sealed class ProjectService
     public async Task SetRepositoriesAsync(Guid projectId, IReadOnlyList<Guid> repositoryIds, CancellationToken ct = default)
     {
         _ = await GetAsync(projectId, ct).ConfigureAwait(false);
-        if (repositoryIds.Count == 0)
-            throw new DomainValidationException("A project must be linked to at least one repository.");
         foreach (var repositoryId in repositoryIds.Distinct())
         {
             var repository = await _repositories.GetByIdAsync(repositoryId, ct).ConfigureAwait(false);

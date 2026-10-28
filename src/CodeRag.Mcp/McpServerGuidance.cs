@@ -26,10 +26,13 @@ public static class McpServerGuidance
         Central tasks and knowledge:
         - Call get_work_context with repositoryId (or projectId) at the start of a session:
           it returns open tasks and recent knowledge in one call.
+        - Scope is mandatory. If no project matches the work, call create_project first;
+          repositoryIds may be empty. Then pass projectId to create_task/save_knowledge (or
+          pass repositoryId). Do not work without a scope.
+        - Use global=true only for genuinely cross-project tasks/knowledge.
         - Use task tools instead of writing TODO_*.md files; the server is the source of truth.
         - Pass expectedVersion on updates. On a version conflict, re-read and retry; never
-          overwrite blindly.
-        - Pass externalKey for idempotent task/knowledge creation.
+          overwrite blindly. Pass externalKey for idempotent creation.
         - Store durable decisions, constraints and research with save_knowledge, separately
           from temporary tasks, and link it to tasks/symbols/files.
         - After edits or test runs, update the current task; do not leave work untracked.

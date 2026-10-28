@@ -25,7 +25,7 @@ public sealed class ProjectStore : IProjectStore
             new
             {
                 id = project.Id.ToString(),
-                repo = project.RepositoryId.ToString(),
+                repo = project.RepositoryId?.ToString(),
                 name = project.Name,
                 path = project.Path,
                 language = project.Language
@@ -96,7 +96,6 @@ public sealed class ProjectStore : IProjectStore
         CancellationToken ct)
     {
         var ids = repositoryIds.Where(x => x != Guid.Empty).Distinct().ToList();
-        if (ids.Count == 0) return;
         await conn.ExecuteAsync("DELETE FROM project_repositories WHERE project_id=@id;",
             new { id = projectId.ToString() }, tx).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow.ToString("o");
@@ -107,13 +106,13 @@ public sealed class ProjectStore : IProjectStore
                 new { p = projectId.ToString(), r = repoId.ToString(), at = now }, tx).ConfigureAwait(false);
         }
         await conn.ExecuteAsync("UPDATE projects SET repository_id=@repo WHERE id=@id;",
-            new { repo = ids[0].ToString(), id = projectId.ToString() }, tx).ConfigureAwait(false);
+            new { repo = ids.Count == 0 ? null : ids[0].ToString(), id = projectId.ToString() }, tx).ConfigureAwait(false);
     }
 
     private static Project Map(ProjectRow row, IReadOnlyList<string> repositoryIds)
         => Project.Rehydrate(
             Guid.Parse(row.id),
-            Guid.Parse(row.repository_id),
+            string.IsNullOrWhiteSpace(row.repository_id) ? null : Guid.Parse(row.repository_id),
             row.name,
             row.path,
             row.language,
@@ -122,7 +121,7 @@ public sealed class ProjectStore : IProjectStore
     private sealed class ProjectRow
     {
         public string id { get; set; } = "";
-        public string repository_id { get; set; } = "";
+        public string? repository_id { get; set; }
         public string? name { get; set; }
         public string? path { get; set; }
         public string? language { get; set; }
@@ -131,6 +130,6 @@ public sealed class ProjectStore : IProjectStore
     private sealed class ProjectRepositoryRow
     {
         public string project_id { get; set; } = "";
-        public string repository_id { get; set; } = "";
+        public string? repository_id { get; set; }
     }
 }

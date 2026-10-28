@@ -32,7 +32,7 @@ public sealed class ProjectsController : ControllerBase
     public async Task<ActionResult<Project>> Create([FromBody] CreateProjectRequest request, CancellationToken ct)
     {
         var project = await _projects.CreateAsync(
-            request.Name, request.RepositoryIds, request.Path, request.Language, ct);
+            request.Name, request.RepositoryIds ?? Array.Empty<Guid>(), request.Path, request.Language, ct);
         return CreatedAtAction(nameof(Get), new { id = project.Id }, project);
     }
 
@@ -47,7 +47,7 @@ public sealed class ProjectsController : ControllerBase
 
 public sealed record CreateProjectRequest(
     string? Name,
-    IReadOnlyList<Guid> RepositoryIds,
+    IReadOnlyList<Guid>? RepositoryIds = null,
     string? Path = null,
     string? Language = null);
 

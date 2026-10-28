@@ -46,9 +46,14 @@ public sealed class KnowledgeTools
         [Description("Idempotency key")] string? externalKey = null,
         [Description("Optional task Id to link this knowledge to")] Guid? taskId = null,
         [Description("Author label")] string? createdBy = null,
+        [Description("Save to global memory (cross-project). Explicit opt-in only.")] bool @global = false,
         CancellationToken ct = default)
         => TrackAsync("save_knowledge", repositoryId, async () =>
         {
+            if (projectId is null && repositoryId is null && !@global)
+                return "Error: scope required. Pass projectId (call list_projects or create_project first) or repositoryId. Use global=true only for genuinely cross-project knowledge.";
+            if (@global && (projectId is not null || repositoryId is not null))
+                return "Error: pass either projectId/repositoryId or global=true, not both.";
             var links = taskId is null
                 ? null
                 : new[] { new KnowledgeLinkRequest(EntityTypes.Task, taskId.Value, LinkRelations.Relates) };
