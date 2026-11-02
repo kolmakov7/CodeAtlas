@@ -1,0 +1,11 @@
+{
+  "name": "opencode-codeatlas-context-nudge",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  }
+}
