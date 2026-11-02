@@ -101,8 +101,8 @@ export default Plugin.define({
             const previous = (await ctx.storage.get(key)) as NudgeState | undefined
             if (previous && Date.now() - previous.at < cooldownMs) continue
 
-            await ctx.storage.set(key, { at: Date.now(), ratio })
             await ctx.session.prompt({ sessionID, text: promptText(ratio), delivery })
+            await ctx.storage.set(key, { at: Date.now(), ratio })
           } catch (error) {
             console.error("[codeatlas.context-nudge] event handling failed:", error)
           }
